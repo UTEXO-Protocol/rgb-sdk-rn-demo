@@ -10,11 +10,24 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npm install
    ```
 
-2. Start the app
+2. Generate native folders (Android and iOS)
 
    ```bash
-   npx expo start
+   npm run prebuild
    ```
+
+3. Install iOS dependencies (CocoaPods)
+
+   ```bash
+   cd ios && pod install && cd ..
+   ```
+
+4. Run the app
+
+   ```bash
+   npm run ios
+   ```
+
 
 In the output, you'll find options to open the app in a
 
