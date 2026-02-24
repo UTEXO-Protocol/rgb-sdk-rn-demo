@@ -4,9 +4,17 @@
  */
 
 import {
-  createWallet, WalletManager
+  LightningProtocol, OnchainProtocol, UTEXOProtocol,
+  UTEXOWallet,
+  WalletManager,
+  bridgeAPI,
+  createWallet,
+  restoreFromBackup, type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
+import { documentDirectory } from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
+
+const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
 
 // Configuration
 // Network endpoint configuration for different platforms:
@@ -174,6 +182,7 @@ export async function runWalletFlow() {
     success: false,
     error: null,
   };
+  const pushStep = (step: any) => flowResults.steps.push(step);
 
   try {
 
@@ -185,7 +194,7 @@ export async function runWalletFlow() {
     flowResults.steps.push({ step: 'initSenderWallet', status: 'success', data: { address: await senderWallet.getAddress() } });
 
     //   // Issue NIA asset
-    flowResults.steps.push({ step: 'issueAsset', status: 'running' });
+    pushStep({ step: 'issueAsset', status: 'running' });
     //   console.log("\nIssuing NIA asset...");
     const asset1 = await senderWallet.issueAssetNia({
       ticker: "USDT",
@@ -194,18 +203,18 @@ export async function runWalletFlow() {
       precision: 0
     });
     console.log("Issued NIA asset:", asset1);
-    flowResults.steps.push({ step: 'issueAsset', status: 'success', data: asset1 });
+    pushStep({ step: 'issueAsset', status: 'success', data: asset1 });
     flowResults.assetId = asset1.assetId;
 
     //   // List assets
-    flowResults.steps.push({ step: 'listAssets', status: 'running' });
+    pushStep({ step: 'listAssets', status: 'running' });
     //   console.log("\nListing assets...");
     const assets1 = await senderWallet.listAssets();
     console.log("Assets:", assets1);
-    flowResults.steps.push({ step: 'listAssets', status: 'success', data: assets1 });
+    pushStep({ step: 'listAssets', status: 'success', data: assets1 });
 
     //   // Initialize receiving wallet
-    flowResults.steps.push({ step: 'initReceiverWallet', status: 'running' });
+    pushStep({ step: 'initReceiverWallet', status: 'running' });
     //   console.log("\nInitializing receiving wallet...");
     const { wallet: receiverWallet } = await initWallet(null);
     const btcAddress = await receiverWallet.getAddress();
@@ -213,10 +222,10 @@ export async function runWalletFlow() {
     await receiverWallet.syncWallet();
     const btcBalance2 = await receiverWallet.getBtcBalance();
     console.log("BTC balance:", btcBalance2);
-    flowResults.steps.push({ step: 'initReceiverWallet', status: 'success', data: { address: btcAddress, balance: btcBalance2 } });
+    pushStep({ step: 'initReceiverWallet', status: 'success', data: { address: btcAddress, balance: btcBalance2 } });
 
     //   // Send BTC to the address
-    flowResults.steps.push({ step: 'sendBtc', status: 'running' });
+    pushStep({ step: 'sendBtc', status: 'running' });
     const psbt = await senderWallet.sendBtcBegin({
       address: btcAddress,
       amount: 7000,
@@ -227,7 +236,7 @@ export async function runWalletFlow() {
     console.log("Signed PSBT:", signedPsbt);
     const result = await senderWallet.sendBtcEnd({ signedPsbt });
     console.log("Send BTC result:", result);
-    flowResults.steps.push({ step: 'sendBtc', status: 'success', data: result });
+    pushStep({ step: 'sendBtc', status: 'success', data: result });
 
     await mine(10);
     //   // Wait for confirmation
@@ -237,23 +246,30 @@ export async function runWalletFlow() {
     const btcBalance = await receiverWallet.getBtcBalance();
     console.log("BTC balance:", btcBalance);
     flowResults.receiverBtcBalance = btcBalance;
-    flowResults.steps.push({ step: 'sendBtc', status: 'success', data: { balance: btcBalance } });
+    pushStep({ step: 'sendBtc', status: 'success', data: { balance: btcBalance } });
 
     //   // Create blind receive
     if (!asset1.assetId) {
       throw new Error('Asset ID is required for blind receive');
     }
-    flowResults.steps.push({ step: 'blindReceive', status: 'running' });
+    pushStep({ step: 'blindReceive', status: 'running' });
     //   console.log("\nCreating blind receive...");
     const receiveData1 = await receiverWallet.blindReceive({
       assetId: null as unknown as string, // TODO: add asset_id
       amount: 76
     });
     console.log("Blind receive data:", receiveData1);
-    flowResults.steps.push({ step: 'blindReceive', status: 'success', data: receiveData1 });
+    pushStep({ step: 'blindReceive', status: 'success', data: receiveData1 });
+
+    // Decode the blind receive invoice
+    pushStep({ step: 'decodeRGBInvoice', status: 'running' });
+    const decodedInvoice: InvoiceData = await receiverWallet.decodeRGBInvoice({ invoice: receiveData1.invoice });
+    console.log("Decoded invoice:", decodedInvoice);
+    pushStep({ step: 'decodeRGBInvoice', status: 'success', data: decodedInvoice });
+    flowResults.decodedInvoice = decodedInvoice;
 
     //   // Send assets
-    flowResults.steps.push({ step: 'sendAssets', status: 'running' });
+    pushStep({ step: 'sendAssets', status: 'running' });
     //   console.log("\nSending assets...", asset1);
     const sendResult = await senderWallet.send({
       assetId: asset1.assetId,
@@ -262,7 +278,7 @@ export async function runWalletFlow() {
       minConfirmations: 1
     });
     console.log("Send result:", sendResult);
-    flowResults.steps.push({ step: 'sendAssets', status: 'success', data: sendResult });
+    pushStep({ step: 'sendAssets', status: 'success', data: sendResult });
 
     //   // Refresh wallets
     //   console.log("\nRefreshing wallets...");
@@ -278,19 +294,19 @@ export async function runWalletFlow() {
     await senderWallet.refreshWallet();
 
     //   // List assets in receiver wallet
-    flowResults.steps.push({ step: 'listReceiverAssets', status: 'running' });
+    pushStep({ step: 'listReceiverAssets', status: 'running' });
     //   console.log("\nListing receiver assets...");
     const rcvAssets = await receiverWallet.listAssets();
     //   console.log("Receiver assets:", JSON.stringify(rcvAssets, null, 2));
-    flowResults.steps.push({ step: 'listReceiverAssets', status: 'success', data: rcvAssets });
+    pushStep({ step: 'listReceiverAssets', status: 'success', data: rcvAssets });
 
     //   // Get asset balance
     if (asset1.assetId) {
-      flowResults.steps.push({ step: 'getAssetBalance', status: 'running' });
+      pushStep({ step: 'getAssetBalance', status: 'running' });
       //     console.log("\nGetting asset balance...");
       const rcvAssetBalance = await receiverWallet.getAssetBalance(asset1.assetId);
       //     console.log("Receiver asset balance:", JSON.stringify(rcvAssetBalance, null, 2));
-      flowResults.steps.push({ step: 'getAssetBalance', status: 'success', data: rcvAssetBalance });
+      pushStep({ step: 'getAssetBalance', status: 'success', data: rcvAssetBalance });
       flowResults.receiverAssetBalance = rcvAssetBalance;
     }
 
@@ -298,16 +314,16 @@ export async function runWalletFlow() {
     if (!asset1.assetId) {
       throw new Error('Asset ID is required for witness receive');
     }
-    flowResults.steps.push({ step: 'witnessReceive', status: 'running' });
+    pushStep({ step: 'witnessReceive', status: 'running' });
     //   console.log("\nCreating witness receive...");
     const receiveData2 = await receiverWallet.witnessReceive({
       assetId: asset1.assetId,
       amount: 50
     });
-    flowResults.steps.push({ step: 'witnessReceive', status: 'success', data: receiveData2 });
+    pushStep({ step: 'witnessReceive', status: 'success', data: receiveData2 });
 
     //   // Send assets with witness
-    flowResults.steps.push({ step: 'sendAssetsWithWitness', status: 'running' });
+    pushStep({ step: 'sendAssetsWithWitness', status: 'running' });
     console.log("\nSending assets...", asset1);
     const sendResult2 = await senderWallet.send({
       assetId: asset1.assetId,
@@ -320,7 +336,7 @@ export async function runWalletFlow() {
       minConfirmations: 1
     });
     console.log("Send result:", sendResult2);
-    flowResults.steps.push({ step: 'sendAssetsWithWitness', status: 'success', data: sendResult2 });
+    pushStep({ step: 'sendAssetsWithWitness', status: 'success', data: sendResult2 });
 
     //   // Refresh wallets
     //   console.log("\nRefreshing wallets...");
@@ -337,30 +353,170 @@ export async function runWalletFlow() {
 
     //   // List transfers
     if (asset1.assetId) {
-      flowResults.steps.push({ step: 'listTransfers', status: 'running' });
+      pushStep({ step: 'listTransfers', status: 'running' });
       console.log("\nListing transfers...");
       const transfers = await senderWallet.listTransfers(asset1.assetId);
       console.log("Transfers:", transfers);
-      flowResults.steps.push({ step: 'listTransfers', status: 'success', data: transfers });
+      pushStep({ step: 'listTransfers', status: 'success', data: transfers });
     }
 
     //   // List transactions
-    flowResults.steps.push({ step: 'listTransactions', status: 'running' });
+    pushStep({ step: 'listTransactions', status: 'running' });
     console.log("\nListing transactions...");
     const transactions = await senderWallet.listTransactions();
     console.log("Transactions:", transactions);
-    flowResults.steps.push({ step: 'listTransactions', status: 'success', data: transactions });
+    pushStep({ step: 'listTransactions', status: 'success', data: transactions });
 
     //   // List unspents
-    flowResults.steps.push({ step: 'listUnspents', status: 'running' });
+    pushStep({ step: 'listUnspents', status: 'running' });
     console.log("\nListing unspents...");
     const unspents = await receiverWallet.listUnspents();
     console.log("Unspents:", unspents);
-    flowResults.steps.push({ step: 'listUnspents', status: 'success', data: unspents });
+    pushStep({ step: 'listUnspents', status: 'success', data: unspents });
 
-    // Backup/restore functionality skipped for React Native testing
-    // console.log("\nExample completed successfully!");
-    // console.log("=".repeat(50));
+    // ── getXpub / getNetwork / isDisposed ──────────────────────────
+    pushStep({ step: 'walletGetters', status: 'running' });
+    const xpubs = senderWallet.getXpub();
+    const network = senderWallet.getNetwork();
+    const notDisposed = !senderWallet.isDisposed();
+    flowResults.walletGetters = { xpubs, network, notDisposed };
+    pushStep({ step: 'walletGetters', status: 'success', data: { network, notDisposed } });
+
+    // ── estimateFeeRate ────────────────────────────────────────────
+    pushStep({ step: 'estimateFeeRate', status: 'running' });
+    try {
+      const feeEstimate = await senderWallet.estimateFeeRate(6);
+      flowResults.estimateFeeRate = feeEstimate;
+      pushStep({ step: 'estimateFeeRate', status: 'success', data: feeEstimate });
+    } catch (e: any) {
+      pushStep({ step: 'estimateFeeRate', status: 'error', error: e.message });
+    }
+
+    // ── sendBtc (convenience: begin→sign→end in one call) ──────────
+    pushStep({ step: 'sendBtc', status: 'running' });
+    try {
+      const extraAddress = await receiverWallet.getAddress();
+      const txid = await senderWallet.sendBtc({ address: extraAddress, amount: 3000, feeRate: 1 });
+      flowResults.sendBtc = { txid };
+      pushStep({ step: 'sendBtc', status: 'success', data: { txid } });
+    } catch (e: any) {
+      pushStep({ step: 'sendBtc', status: 'error', error: e.message });
+    }
+
+    // ── createUtxos (convenience: begin→sign→end in one call) ──────
+    pushStep({ step: 'createUtxos', status: 'running' });
+    try {
+      const numUtxos = await senderWallet.createUtxos({ upTo: true, num: 2, size: 1000, feeRate: 1 });
+      flowResults.createUtxos = { numUtxos };
+      pushStep({ step: 'createUtxos', status: 'success', data: { numUtxos } });
+    } catch (e: any) {
+      pushStep({ step: 'createUtxos', status: 'error', error: e.message });
+    }
+
+    // ── sendBegin / estimateFee / sendEnd (manual two-step) ────────
+    pushStep({ step: 'sendBeginEnd', status: 'running' });
+    try {
+      const rcvInvoice = await receiverWallet.witnessReceive({ assetId: asset1.assetId, amount: 5 });
+      const unsignedPsbt = await senderWallet.sendBegin({ invoice: rcvInvoice.invoice, assetId: asset1.assetId, amount: 5 });
+      const feeInfo = await senderWallet.estimateFee(unsignedPsbt);
+      const signedPsbt2 = await senderWallet.signPsbt(unsignedPsbt);
+      const sendRes = await senderWallet.sendEnd({ signedPsbt: signedPsbt2 });
+      flowResults.sendBeginEnd = { fee: feeInfo, txid: sendRes.txid };
+      pushStep({ step: 'sendBeginEnd', status: 'success', data: { txid: sendRes.txid } });
+    } catch (e: any) {
+      pushStep({ step: 'sendBeginEnd', status: 'error', error: e.message });
+    }
+
+    // ── failTransfers ──────────────────────────────────────────────
+    pushStep({ step: 'failTransfers', status: 'running' });
+    try {
+      const failed = await senderWallet.failTransfers({ batchTransferIdx: -1, noAssetOnly: true });
+      flowResults.failTransfers = { result: failed };
+      pushStep({ step: 'failTransfers', status: 'success', data: { failed } });
+    } catch (e: any) {
+      pushStep({ step: 'failTransfers', status: 'error', error: e.message });
+    }
+
+    // ── issueAssetIfa + inflate ────────────────────────────────────
+    pushStep({ step: 'issueAssetIfa', status: 'running' });
+    try {
+      const ifa = await senderWallet.issueAssetIfa({
+        ticker: 'IFA1', name: 'Inflatable One', precision: 0,
+        amounts: [1000], inflationAmounts: [500],
+        replaceRightsNum: 0, rejectListUrl: null,
+      });
+      flowResults.issueAssetIfa = ifa;
+      pushStep({ step: 'issueAssetIfa', status: 'success', data: { assetId: ifa.assetId } });
+
+      // inflate (convenience: begin→sign→end)
+      pushStep({ step: 'inflate', status: 'running' });
+      const inflateResult = await senderWallet.inflate({ assetId: ifa.assetId, inflationAmounts: [100] });
+      flowResults.inflate = inflateResult;
+      pushStep({ step: 'inflate', status: 'success', data: inflateResult });
+
+      // inflateBegin + inflateEnd (manual two-step)
+      pushStep({ step: 'inflateBegin', status: 'running' });
+      const inflatePsbt = await senderWallet.inflateBegin({ assetId: ifa.assetId, inflationAmounts: [50] });
+      flowResults.inflateBegin = { psbtLength: inflatePsbt.length };
+      pushStep({ step: 'inflateBegin', status: 'success', data: { psbtLength: inflatePsbt.length } });
+
+      pushStep({ step: 'inflateEnd', status: 'running' });
+      const signedInflatePsbt = await senderWallet.signPsbt(inflatePsbt);
+      const inflateEndResult = await senderWallet.inflateEnd({ signedPsbt: signedInflatePsbt });
+      flowResults.inflateEnd = inflateEndResult;
+      pushStep({ step: 'inflateEnd', status: 'success', data: inflateEndResult });
+    } catch (e: any) {
+      pushStep({ step: 'issueAssetIfa', status: 'error', error: e.message });
+    }
+
+    // ── signMessage / verifyMessage (wallet instance) ──────────────
+    pushStep({ step: 'walletSignVerify', status: 'running' });
+    try {
+      const sig = await senderWallet.signMessage('hello wallet');
+      const valid = await senderWallet.verifyMessage('hello wallet', sig);
+      flowResults.walletSignVerify = { sig: sig.slice(0, 16) + '…', valid };
+      pushStep({ step: 'walletSignVerify', status: 'success', data: { valid } });
+    } catch (e: any) {
+      pushStep({ step: 'walletSignVerify', status: 'error', error: e.message });
+    }
+
+    // ── createBackup + restoreFromBackup ───────────────────────────
+    pushStep({ step: 'createBackup', status: 'running' });
+    try {
+      const backupPath = `${documentDirectory ?? ''}test-backup.bak`;
+      const backupPassword = 'test-password-123';
+      await senderWallet.createBackup({ backupPath, password: backupPassword });
+      flowResults.createBackup = { path: backupPath };
+      pushStep({ step: 'createBackup', status: 'success', data: { path: backupPath } });
+
+      // restoreFromBackup
+      pushStep({ step: 'restoreFromBackup', status: 'running' });
+      const restoreResult = await restoreFromBackup({
+        backupFilePath: backupPath,
+        password: backupPassword,
+        dataDir: `${documentDirectory ?? ''}restore/`,
+      });
+      flowResults.restoreFromBackup = restoreResult;
+      pushStep({ step: 'restoreFromBackup', status: 'success' });
+    } catch (e: any) {
+      pushStep({ step: 'createBackup', status: 'error', error: e.message });
+    }
+
+    // ── goOnline (reconnect) ───────────────────────────────────────
+    pushStep({ step: 'goOnline', status: 'running' });
+    try {
+      await senderWallet.goOnline(RGB_MANAGER_ENDPOINT, true);
+      pushStep({ step: 'goOnline', status: 'success' });
+    } catch (e: any) {
+      pushStep({ step: 'goOnline', status: 'error', error: e.message });
+    }
+
+    // ── dispose / isDisposed ───────────────────────────────────────
+    pushStep({ step: 'dispose', status: 'running' });
+    await senderWallet.dispose();
+    const disposed = senderWallet.isDisposed();
+    flowResults.dispose = { disposed };
+    pushStep({ step: 'dispose', status: disposed ? 'success' : 'error' });
 
     flowResults.success = true;
     return flowResults;
@@ -378,4 +534,164 @@ export async function runWalletFlow() {
   }
 }
 
+/**
+ * UTEXO / Lightning Module flow
+ *
+ * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridgeAPI.
+ * Some steps require a running signet node and bridge server; failures are captured gracefully.
+ */
+export async function runUTEXOFlow() {
+  console.log('Starting UTEXO Flow');
+  console.log('='.repeat(50));
 
+  const results: any = { steps: [], success: false, error: null };
+  const pushStep = (step: any) => results.steps.push(step);
+
+  try {
+    // ── UTEXOWallet: instantiation ──────────────────────────
+    pushStep({ step: 'utexoWalletInstantiate', status: 'running' });
+    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC);
+    results.instantiation = true;
+    pushStep({ step: 'utexoWalletInstantiate', status: 'success' });
+
+    // ── UTEXOWallet: throws before initialize() ─────────────
+    pushStep({ step: 'throwsBeforeInit', status: 'running' });
+    try {
+      utexoWallet.getXpub();
+      results.throwsBeforeInit = false;
+      pushStep({ step: 'throwsBeforeInit', status: 'error', error: 'Expected throw but resolved' });
+    } catch (e: any) {
+      results.throwsBeforeInit = e.message.toLowerCase().includes('init');
+      pushStep({ step: 'throwsBeforeInit', status: results.throwsBeforeInit ? 'success' : 'error' });
+    }
+
+    // ── UTEXOWallet: derivePublicKeys (pure crypto, no server) ──
+    pushStep({ step: 'derivePublicKeys', status: 'running' });
+    try {
+      const keys = await utexoWallet.derivePublicKeys('testnet');
+      results.derivePublicKeys = { xpub: keys.xpub?.slice(0, 20) + '...' };
+      pushStep({ step: 'derivePublicKeys', status: 'success', data: results.derivePublicKeys });
+    } catch (e: any) {
+      results.derivePublicKeys = { error: e.message };
+      pushStep({ step: 'derivePublicKeys', status: 'error', error: e.message });
+    }
+
+    // ── UTEXOWallet: initialize (needs signet node – may fail) ──
+    pushStep({ step: 'initialize', status: 'running' });
+    try {
+      await utexoWallet.initialize();
+      results.initialized = true;
+      pushStep({ step: 'initialize', status: 'success' });
+
+      // ── getXpub / getNetwork / isDisposed after init ─────
+      pushStep({ step: 'walletGetters', status: 'running' });
+      const xpub = utexoWallet.getXpub();
+      const network = utexoWallet.getNetwork();
+      const notDisposed = !utexoWallet.isDisposed();
+      results.walletGetters = { network, notDisposed, xpubVan: xpub.xpubVan?.slice(0, 20) + '...' };
+      pushStep({ step: 'walletGetters', status: 'success', data: { network, notDisposed } });
+
+      // ── dispose ──────────────────────────────────────────
+      pushStep({ step: 'dispose', status: 'running' });
+      await utexoWallet.dispose();
+      results.disposed = utexoWallet.isDisposed();
+      pushStep({ step: 'dispose', status: 'success' });
+    } catch (e: any) {
+      results.initialized = false;
+      results.initError = e.message;
+      pushStep({ step: 'initialize', status: 'error', error: e.message });
+    }
+
+    // ── LightningProtocol: stub throws "not implemented" ────
+    pushStep({ step: 'lightningProtocolStubs', status: 'running' });
+    try {
+      const lp = new LightningProtocol();
+      const stubResults: Record<string, boolean> = {};
+      for (const [methodName, call] of [
+        ['createLightningInvoice', () => lp.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any)],
+        ['getLightningReceiveRequest', () => lp.getLightningReceiveRequest('id')],
+        ['getLightningSendRequest', () => lp.getLightningSendRequest('id')],
+        ['payLightningInvoiceBegin', () => lp.payLightningInvoiceBegin({ lnInvoice: 'lnbc1' } as any)],
+        ['listLightningPayments', () => lp.listLightningPayments()],
+      ] as [string, () => Promise<any>][]) {
+        try {
+          await call();
+          stubResults[methodName] = false;
+        } catch (e: any) {
+          stubResults[methodName] = e.message.includes('not implemented');
+        }
+      }
+      results.lightningProtocolStubs = stubResults;
+      pushStep({ step: 'lightningProtocolStubs', status: 'success' });
+    } catch (e: any) {
+      pushStep({ step: 'lightningProtocolStubs', status: 'error', error: e.message });
+    }
+
+    // ── OnchainProtocol: stub throws "not implemented" ──────
+    pushStep({ step: 'onchainProtocolStubs', status: 'running' });
+    try {
+      const op = new OnchainProtocol();
+      const stubResults: Record<string, boolean> = {};
+      for (const [methodName, call] of [
+        ['onchainReceive', () => op.onchainReceive({ assetId: 'a', amount: 1 } as any)],
+        ['onchainSendBegin', () => op.onchainSendBegin({ invoice: 'inv' } as any)],
+        ['onchainSendEnd', () => op.onchainSendEnd({ signedPsbt: '' } as any)],
+        ['getOnchainSendStatus', () => op.getOnchainSendStatus('inv')],
+        ['listOnchainTransfers', () => op.listOnchainTransfers()],
+      ] as [string, () => Promise<any>][]) {
+        try {
+          await call();
+          stubResults[methodName] = false;
+        } catch (e: any) {
+          stubResults[methodName] = e.message.includes('not implemented');
+        }
+      }
+      results.onchainProtocolStubs = stubResults;
+      pushStep({ step: 'onchainProtocolStubs', status: 'success' });
+    } catch (e: any) {
+      pushStep({ step: 'onchainProtocolStubs', status: 'error', error: e.message });
+    }
+
+    // ── UTEXOProtocol: inherits both stub sets ───────────────
+    pushStep({ step: 'utexoProtocolStubs', status: 'running' });
+    try {
+      const up = new UTEXOProtocol();
+      let lightningThrows = false;
+      let onchainThrows = false;
+      try { await up.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any); }
+      catch (e: any) { lightningThrows = e.message.includes('not implemented'); }
+      try { await up.onchainReceive({ assetId: 'a', amount: 1 } as any); }
+      catch (e: any) { onchainThrows = e.message.includes('not implemented'); }
+      results.utexoProtocolStubs = { lightningThrows, onchainThrows };
+      pushStep({ step: 'utexoProtocolStubs', status: 'success' });
+    } catch (e: any) {
+      pushStep({ step: 'utexoProtocolStubs', status: 'error', error: e.message });
+    }
+
+    // ── bridgeAPI: configure and query ──────────────────────
+    pushStep({ step: 'bridgeAPIConfig', status: 'running' });
+    bridgeAPI.setBaseUrl('http://localhost:8081/');
+    results.bridgeAPIConfigured = true;
+    pushStep({ step: 'bridgeAPIConfig', status: 'success' });
+
+    pushStep({ step: 'bridgeAPIQuery', status: 'running' });
+    try {
+      const transfer = await bridgeAPI.getTransferByMainnetInvoice('test-invoice', 94);
+      results.bridgeAPIQuery = {
+        returned: transfer === null ? 'null (not found – expected)' : 'found (unexpected)',
+      };
+      pushStep({ step: 'bridgeAPIQuery', status: 'success' });
+    } catch (e: any) {
+      results.bridgeAPIQuery = { error: e.message };
+      pushStep({ step: 'bridgeAPIQuery', status: 'error', error: e.message });
+    }
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    console.error('Error in UTEXO flow:', error);
+    results.success = false;
+    results.error = { message: error.message || 'Unknown error' };
+    return results;
+  }
+}

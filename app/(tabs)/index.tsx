@@ -7,19 +7,74 @@ import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 
-import { runWalletFlow } from '@/utils/wallet-flow';
+import { runWalletFlow, runUTEXOFlow } from '@/utils/wallet-flow';
 import {
-  configureLogging,
+  wallet,
   deriveKeysFromMnemonic,
+  deriveKeysFromMnemonicOrSeed,
   deriveKeysFromSeed,
   deriveKeysFromXpriv,
   generateKeys,
   getXprivFromMnemonic,
   getXpubFromXpriv,
-  LogLevel,
   restoreKeys,
+  accountXpubsFromMnemonic,
   signPsbt,
-  ValidationError
+  signPsbtSync,
+  signPsbtFromSeed,
+  signMessage,
+  verifyMessage,
+  createWalletManager,
+  toUnitsNumber,
+  fromUnitsNumber,
+  // Error classes
+  SDKError,
+  NetworkError,
+  ValidationError,
+  WalletError,
+  CryptoError,
+  ConfigurationError,
+  BadRequestError,
+  NotFoundError,
+  ConflictError,
+  RgbNodeError,
+  // Logger
+  logger,
+  configureLogging,
+  LogLevel,
+  // Validation
+  validateNetwork,
+  normalizeNetwork,
+  validateMnemonic,
+  validatePsbt,
+  validateBase64,
+  validateHex,
+  validateRequired,
+  validateString,
+  // Constants
+  COIN_RGB_MAINNET,
+  COIN_RGB_TESTNET,
+  COIN_BITCOIN_MAINNET,
+  COIN_BITCOIN_TESTNET,
+  NETWORK_MAP,
+  BIP32_VERSIONS,
+  DERIVATION_PURPOSE,
+  DERIVATION_ACCOUNT,
+  KEYCHAIN_RGB,
+  KEYCHAIN_BTC,
+  DEFAULT_NETWORK,
+  DEFAULT_API_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_LOG_LEVEL,
+  utexoNetworkMap,
+  utexoNetworkIdMap,
+  getDestinationAsset,
+  // UTEXO
+  UTEXOWallet,
+  LightningProtocol,
+  OnchainProtocol,
+  UTEXOProtocol,
+  bridgeAPI,
 } from '@utexo/rgb-sdk-rn';
 // import wdk from '@tetherto/wdk';
 
@@ -53,14 +108,14 @@ export default function HomeScreen() {
   const [testResults, setTestResults] = useState<any>(null);
   const [walletFlowResults, setWalletFlowResults] = useState<any>(null);
   const [runningWalletFlow, setRunningWalletFlow] = useState(false);
+  const [utexoFlowResults, setUtexoFlowResults] = useState<any>(null);
+  const [runningUTEXOFlow, setRunningUTEXOFlow] = useState(false);
   const [account, setAccount] = useState<any>(null);
   const [balance, setBalance] = useState<any>(null);
   const [address, setAddress] = useState<string | null>(null);
   const [keyPair, setKeyPair] = useState<any>(null);
 
   useEffect(() => {
-    // Enable DEBUG logging for rgb-sdk
-    configureLogging(LogLevel.DEBUG);
     async function testKeyFunctions() {
       try {
         setLoading(true);
@@ -321,7 +376,7 @@ export default function HomeScreen() {
           
           // Test empty xpriv
           try {
-            await deriveKeysFromXpriv('testnet', '');
+            await deriveKeysFromXpriv('');
             errorTests.emptyXpriv = false;
           } catch (err: any) {
             errorTests.emptyXpriv = err instanceof ValidationError && err.message.includes('xpriv');
@@ -370,6 +425,349 @@ export default function HomeScreen() {
           };
         }
 
+        // ========== Test: signMessage + verifyMessage ==========
+        console.log('=== Testing signMessage + verifyMessage ===');
+        try {
+          const { mnemonicToSeedSync } = require('@scure/bip39');
+          const seed = Buffer.from(mnemonicToSeedSync(testMnemonic));
+          const keys = await deriveKeysFromMnemonic('testnet', testMnemonic);
+          const testMessage = 'hello rgb';
+
+          const signature = await signMessage({ message: testMessage, seed, network: 'testnet' });
+          console.log('Signature:', signature);
+
+          const validSig = await verifyMessage({ message: testMessage, signature, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
+          const wrongMsg = await verifyMessage({ message: 'wrong message', signature, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
+          const wrongKey = await verifyMessage({ message: testMessage, signature, accountXpub: keys.accountXpubColored, network: 'testnet' });
+
+          results.signVerifyMessage = {
+            success: true,
+            signature: signature?.slice(0, 20) + '…',
+            tests: {
+              signatureProduced: !!signature && signature.length > 0,
+              validSignature: validSig === true,
+              wrongMessageFails: wrongMsg === false,
+              wrongKeyFails: wrongKey === false,
+            },
+          };
+          console.log('✅ signMessage + verifyMessage:', results.signVerifyMessage.tests);
+        } catch (err: any) {
+          console.error('❌ signMessage/verifyMessage failed:', err);
+          results.signVerifyMessage = { success: false, error: err.message };
+        }
+
+        // ========== Test: toUnitsNumber + fromUnitsNumber ==========
+        console.log('=== Testing toUnitsNumber + fromUnitsNumber ===');
+        try {
+          const units = toUnitsNumber('1.5', 8);
+          const back = fromUnitsNumber(units, 8);
+          const zeroPrec = toUnitsNumber('100', 0);
+          results.units = {
+            success: true,
+            tests: {
+              toUnits: units === 150000000,
+              fromUnits: back === 1.5,
+              zeroPrecision: zeroPrec === 100,
+              roundTrip: fromUnitsNumber(toUnitsNumber('42.123456', 6), 6) === 42.123456,
+            },
+          };
+          console.log('✅ units:', results.units.tests);
+        } catch (err: any) {
+          results.units = { success: false, error: err.message };
+          console.error('❌ units failed:', err);
+        }
+
+        // ========== Test: deriveKeysFromMnemonicOrSeed ==========
+        console.log('=== Testing deriveKeysFromMnemonicOrSeed ===');
+        try {
+          const { mnemonicToSeedSync } = require('@scure/bip39');
+          const seedHex = Buffer.from(mnemonicToSeedSync(testMnemonic)).toString('hex');
+          const fromMnemonic = await deriveKeysFromMnemonicOrSeed('testnet', testMnemonic);
+          const fromHex = await deriveKeysFromMnemonicOrSeed('testnet', seedHex);
+          const fromArray = await deriveKeysFromMnemonicOrSeed('testnet', new Uint8Array(Buffer.from(mnemonicToSeedSync(testMnemonic))));
+          results.deriveKeysFromMnemonicOrSeed = {
+            success: true,
+            tests: {
+              mnemonicRoute: fromMnemonic.xpub === expectedKeys.xpub,
+              hexSeedRoute: fromHex.xpub === expectedKeys.xpub,
+              arrayRoute: fromArray.xpub === expectedKeys.xpub,
+            },
+          };
+          console.log('✅ deriveKeysFromMnemonicOrSeed:', results.deriveKeysFromMnemonicOrSeed.tests);
+        } catch (err: any) {
+          results.deriveKeysFromMnemonicOrSeed = { success: false, error: err.message };
+          console.error('❌ deriveKeysFromMnemonicOrSeed failed:', err);
+        }
+
+        // ========== Test: accountXpubsFromMnemonic ==========
+        console.log('=== Testing accountXpubsFromMnemonic ===');
+        try {
+          const xpubs = await accountXpubsFromMnemonic('testnet', testMnemonic);
+          results.accountXpubsFromMnemonic = {
+            success: true,
+            tests: {
+              vanillaXpub: xpubs.account_xpub_vanilla === expectedKeys.accountXpubVanilla,
+              coloredXpub: xpubs.account_xpub_colored === expectedKeys.accountXpubColored,
+            },
+          };
+          console.log('✅ accountXpubsFromMnemonic:', results.accountXpubsFromMnemonic.tests);
+        } catch (err: any) {
+          results.accountXpubsFromMnemonic = { success: false, error: err.message };
+          console.error('❌ accountXpubsFromMnemonic failed:', err);
+        }
+
+        // ========== Test: signPsbtSync ==========
+        console.log('=== Testing signPsbtSync ===');
+        try {
+          const signedSync = await signPsbtSync(testMnemonic, utxoUnsignedPsbt, 'testnet');
+          results.signPsbtSync = {
+            success: true,
+            tests: {
+              matchesAsync: signedSync === utxoSignedPsbt,
+            },
+          };
+          console.log('✅ signPsbtSync:', results.signPsbtSync.tests);
+        } catch (err: any) {
+          results.signPsbtSync = { success: false, error: err.message };
+          console.error('❌ signPsbtSync failed:', err);
+        }
+
+        // ========== Test: signPsbtFromSeed ==========
+        // signPsbtFromSeed is intentionally unsupported (throws CryptoError); test that it throws correctly.
+        console.log('=== Testing signPsbtFromSeed ===');
+        try {
+          const { mnemonicToSeedSync } = require('@scure/bip39');
+          const seed = new Uint8Array(Buffer.from(mnemonicToSeedSync(testMnemonic)));
+          await signPsbtFromSeed(seed, utxoUnsignedPsbt, 'testnet');
+          results.signPsbtFromSeed = { success: false, error: 'Expected throw, but resolved' };
+        } catch (err: any) {
+          results.signPsbtFromSeed = {
+            success: true,
+            tests: {
+              throwsNotSupported: (err.message as string).includes('not supported'),
+            },
+          };
+          console.log('✅ signPsbtFromSeed correctly throws:', err.message);
+        }
+
+        // ========== Test: createWalletManager ==========
+        console.log('=== Testing createWalletManager ===');
+        try {
+          const keys = await deriveKeysFromMnemonic('testnet', testMnemonic);
+          const wm = createWalletManager({
+            xpubVan: keys.accountXpubVanilla,
+            xpubCol: keys.accountXpubColored,
+            masterFingerprint: keys.masterFingerprint,
+            mnemonic: testMnemonic,
+            network: 'testnet',
+          });
+          results.createWalletManager = {
+            success: true,
+            tests: {
+              returnsInstance: wm !== null && typeof wm.initialize === 'function',
+              notDisposed: wm.isDisposed() === false,
+              correctXpub: wm.getXpub().xpubVan === keys.accountXpubVanilla,
+              correctNetwork: wm.getNetwork() === 'testnet',
+            },
+          };
+          console.log('✅ createWalletManager:', results.createWalletManager.tests);
+        } catch (err: any) {
+          results.createWalletManager = { success: false, error: err.message };
+          console.error('❌ createWalletManager failed:', err);
+        }
+
+        // ========== Test: wallet singleton ==========
+        console.log('=== Testing wallet singleton ===');
+        try {
+          const walletTests: Record<string, boolean> = {};
+          walletTests.isProxy = wallet !== null && typeof wallet === 'object';
+          // Proxy throws WalletError when accessed before initialization
+          try {
+            void (wallet as any).initialize;
+            walletTests.throwsWhenUninitialized = false;
+          } catch (e: any) {
+            walletTests.throwsWhenUninitialized = e instanceof WalletError && e.message.includes('not initialised');
+          }
+          results.walletSingleton = { success: true, tests: walletTests };
+          console.log('✅ wallet singleton:', walletTests);
+        } catch (err: any) {
+          results.walletSingleton = { success: false, error: err.message };
+          console.error('❌ wallet singleton failed:', err);
+        }
+
+        // ========== Test: Error classes ==========
+        console.log('=== Testing Error classes ===');
+        try {
+          const sdkErr = new SDKError('msg', 'CODE');
+          const netErr = new NetworkError('msg', 503);
+          const walletErr = new WalletError('msg');
+          const cryptoErr = new CryptoError('msg');
+          const configErr = new ConfigurationError('msg');
+          const badReqErr = new BadRequestError('msg');
+          const notFoundErr = new NotFoundError('msg');
+          const conflictErr = new ConflictError('msg');
+          const rgbNodeErr = new RgbNodeError('msg', 500);
+          const valErr = new ValidationError('msg', 'field');
+          results.errorClasses = {
+            success: true,
+            tests: {
+              SDKError: sdkErr instanceof SDKError && sdkErr.code === 'CODE',
+              NetworkError: netErr instanceof SDKError && netErr.statusCode === 503,
+              WalletError: walletErr instanceof SDKError && walletErr.name === 'WalletError',
+              CryptoError: cryptoErr instanceof SDKError && cryptoErr.name === 'CryptoError',
+              ConfigurationError: configErr instanceof SDKError && configErr.name === 'ConfigurationError',
+              BadRequestError: badReqErr instanceof SDKError && badReqErr.statusCode === 400,
+              NotFoundError: notFoundErr instanceof SDKError && notFoundErr.statusCode === 404,
+              ConflictError: conflictErr instanceof SDKError && conflictErr.statusCode === 409,
+              RgbNodeError: rgbNodeErr instanceof SDKError && rgbNodeErr.statusCode === 500,
+              ValidationError: valErr instanceof SDKError && valErr.field === 'field',
+            },
+          };
+          console.log('✅ Error classes:', results.errorClasses.tests);
+        } catch (err: any) {
+          results.errorClasses = { success: false, error: err.message };
+          console.error('❌ Error classes failed:', err);
+        }
+
+        // ========== Test: Logger ==========
+        console.log('=== Testing Logger ===');
+        try {
+          const LV = LogLevel as any;
+          configureLogging(LV.DEBUG);
+          configureLogging(LV.ERROR);
+          results.loggerModule = {
+            success: true,
+            tests: {
+              LogLevelEnum: LV.DEBUG === 0 && LV.INFO === 1 && LV.WARN === 2 && LV.ERROR === 3 && LV.NONE === 4,
+              configureLogging: true,
+              loggerInstance: logger !== null && typeof (logger as any).debug === 'function' && typeof (logger as any).error === 'function',
+            },
+          };
+          console.log('✅ Logger:', results.loggerModule.tests);
+        } catch (err: any) {
+          results.loggerModule = { success: false, error: err.message };
+          console.error('❌ Logger failed:', err);
+        }
+
+        // ========== Test: Validation functions ==========
+        console.log('=== Testing Validation functions ===');
+        try {
+          const valTests: Record<string, boolean> = {};
+          valTests.normalizeNetwork = normalizeNetwork('mainnet') === 'mainnet' && normalizeNetwork('testnet') === 'testnet' && normalizeNetwork('regtest') === 'regtest';
+          try { validateNetwork('bad-network'); valTests.validateNetworkThrows = false; } catch { valTests.validateNetworkThrows = true; }
+          try { validateMnemonic('not a mnemonic'); valTests.validateMnemonicThrows = false; } catch { valTests.validateMnemonicThrows = true; }
+          validatePsbt(utxoUnsignedPsbt); valTests.validatePsbt = true;
+          validateBase64(utxoUnsignedPsbt); valTests.validateBase64 = true;
+          try { validateHex('not-hex!!'); valTests.validateHexThrows = false; } catch { valTests.validateHexThrows = true; }
+          validateHex('deadbeef'); valTests.validateHex = true;
+          try { validateRequired(null, 'field'); valTests.validateRequiredThrows = false; } catch { valTests.validateRequiredThrows = true; }
+          validateRequired('value', 'field'); valTests.validateRequired = true;
+          try { validateString(42 as any, 'field'); valTests.validateStringThrows = false; } catch { valTests.validateStringThrows = true; }
+          validateString('hello', 'field'); valTests.validateString = true;
+          results.validation = { success: true, tests: valTests };
+          console.log('✅ Validation:', valTests);
+        } catch (err: any) {
+          results.validation = { success: false, error: err.message };
+          console.error('❌ Validation failed:', err);
+        }
+
+        // ========== Test: Constants ==========
+        console.log('=== Testing Constants ===');
+        try {
+          results.constants = {
+            success: true,
+            tests: {
+              COIN_RGB_MAINNET: COIN_RGB_MAINNET === 827166,
+              COIN_RGB_TESTNET: COIN_RGB_TESTNET === 827167,
+              COIN_BITCOIN_MAINNET: COIN_BITCOIN_MAINNET === 0,
+              COIN_BITCOIN_TESTNET: COIN_BITCOIN_TESTNET === 1,
+              NETWORK_MAP: NETWORK_MAP['mainnet'] === 'mainnet' && NETWORK_MAP['regtest'] === 'regtest',
+              BIP32_VERSIONS: typeof BIP32_VERSIONS.mainnet?.public === 'number',
+              DERIVATION_PURPOSE: DERIVATION_PURPOSE === 86,
+              DERIVATION_ACCOUNT: DERIVATION_ACCOUNT === 0,
+              KEYCHAIN_RGB: KEYCHAIN_RGB === 0,
+              KEYCHAIN_BTC: KEYCHAIN_BTC === 0,
+              DEFAULT_NETWORK: DEFAULT_NETWORK === 'regtest',
+              DEFAULT_API_TIMEOUT: typeof DEFAULT_API_TIMEOUT === 'number',
+              DEFAULT_MAX_RETRIES: DEFAULT_MAX_RETRIES === 3,
+              DEFAULT_LOG_LEVEL: typeof DEFAULT_LOG_LEVEL === 'number',
+              utexoNetworkMap: utexoNetworkMap.mainnet === 'testnet' && utexoNetworkMap.utexo === 'signet',
+              utexoNetworkIdMap: utexoNetworkIdMap.utexo.networkName === 'UTEXO' && utexoNetworkIdMap.mainnet.networkId === 36,
+              getDestinationAsset: typeof getDestinationAsset === 'function' && getDestinationAsset('mainnet', 'utexo', null) !== undefined,
+            },
+          };
+          console.log('✅ Constants:', results.constants.tests);
+        } catch (err: any) {
+          results.constants = { success: false, error: err.message };
+          console.error('❌ Constants failed:', err);
+        }
+
+        // ========== Test: UTEXO Module (instantiation + stubs) ==========
+        console.log('=== Testing UTEXO Module ===');
+        try {
+          const utexoTests: Record<string, boolean> = {};
+
+          // UTEXOWallet can be instantiated
+          const utexoWallet = new UTEXOWallet(testMnemonic);
+          utexoTests.utexoWalletInstantiated =
+            utexoWallet !== null && typeof utexoWallet.initialize === 'function';
+
+          // getXpub() throws before initialize()
+          try {
+            utexoWallet.getXpub();
+            utexoTests.throwsBeforeInit = false;
+          } catch (e: any) {
+            utexoTests.throwsBeforeInit = e.message.toLowerCase().includes('init');
+          }
+
+          // derivePublicKeys works (pure crypto, no server)
+          const pubKeys = await utexoWallet.derivePublicKeys('testnet');
+          utexoTests.derivePublicKeys = pubKeys.xpub?.startsWith('tpub') ?? false;
+
+          // LightningProtocol stubs throw "not implemented"
+          const lp = new LightningProtocol();
+          try {
+            await lp.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any);
+            utexoTests.lightningStubThrows = false;
+          } catch (e: any) {
+            utexoTests.lightningStubThrows = e.message.includes('not implemented');
+          }
+
+          // OnchainProtocol stubs throw "not implemented"
+          const op = new OnchainProtocol();
+          try {
+            await op.onchainReceive({ assetId: 'a', amount: 1 } as any);
+            utexoTests.onchainStubThrows = false;
+          } catch (e: any) {
+            utexoTests.onchainStubThrows = e.message.includes('not implemented');
+          }
+
+          // UTEXOProtocol inherits both stub sets
+          const up = new UTEXOProtocol();
+          try {
+            await up.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any);
+            utexoTests.utexoProtocolLightningStub = false;
+          } catch (e: any) {
+            utexoTests.utexoProtocolLightningStub = e.message.includes('not implemented');
+          }
+          try {
+            await up.onchainReceive({ assetId: 'a', amount: 1 } as any);
+            utexoTests.utexoProtocolOnchainStub = false;
+          } catch (e: any) {
+            utexoTests.utexoProtocolOnchainStub = e.message.includes('not implemented');
+          }
+
+          // bridgeAPI can be configured
+          bridgeAPI.setBaseUrl('http://localhost:8081/');
+          utexoTests.bridgeAPIConfigurable = true;
+
+          results.utexoModule = { success: true, tests: utexoTests };
+          console.log('✅ UTEXO Module:', utexoTests);
+        } catch (err: any) {
+          results.utexoModule = { success: false, error: err.message };
+          console.error('❌ UTEXO Module failed:', err);
+        }
+
         setTestResults(results);
         console.log('=== All Tests Complete ===');
         console.log('Full results:', JSON.stringify(results, null, 2));
@@ -408,6 +806,23 @@ export default function HomeScreen() {
     }
   }
 
+  async function runUTEXOFlowTest() {
+    try {
+      setRunningUTEXOFlow(true);
+      setError(null);
+      console.log('=== Starting UTEXO Flow Test ===');
+      const flowResults = await runUTEXOFlow();
+      setUtexoFlowResults(flowResults);
+      console.log('=== UTEXO Flow Complete ===');
+      console.log('UTEXO flow results:', JSON.stringify(flowResults, null, 2));
+    } catch (err) {
+      console.error('Error in UTEXO flow:', err);
+      setError(err instanceof Error ? err.message : 'Unknown error occurred');
+    } finally {
+      setRunningUTEXOFlow(false);
+    }
+  }
+
   return (
     <ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
@@ -423,7 +838,7 @@ export default function HomeScreen() {
       </ThemedView>
 
       <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Wallet Status</ThemedText>
+        <ThemedText type="subtitle">Wallet Status V3</ThemedText>
         {loading && <ThemedText>Loading wallet...</ThemedText>}
         {error && (
           <ThemedView style={styles.errorContainer}>
@@ -517,6 +932,177 @@ export default function HomeScreen() {
                 )}
               </ThemedView>
             )}
+            {testResults.signVerifyMessage && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">signMessage + verifyMessage:</ThemedText>
+                {testResults.signVerifyMessage.success ? (
+                  <>
+                    <ThemedText style={styles.monoText}>
+                      sig: {testResults.signVerifyMessage.signature}
+                    </ThemedText>
+                    {Object.entries(testResults.signVerifyMessage.tests).map(([k, v]) => (
+                      <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                        {(v as boolean) ? '✓' : '✗'} {k}
+                      </ThemedText>
+                    ))}
+                  </>
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>
+                    ❌ Failed: {testResults.signVerifyMessage.error}
+                  </ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.units && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">toUnitsNumber / fromUnitsNumber:</ThemedText>
+                {Object.entries(testResults.units.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.units.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.units.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.deriveKeysFromMnemonicOrSeed && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">deriveKeysFromMnemonicOrSeed:</ThemedText>
+                {Object.entries(testResults.deriveKeysFromMnemonicOrSeed.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.deriveKeysFromMnemonicOrSeed.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.deriveKeysFromMnemonicOrSeed.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.accountXpubsFromMnemonic && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">accountXpubsFromMnemonic:</ThemedText>
+                {Object.entries(testResults.accountXpubsFromMnemonic.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.accountXpubsFromMnemonic.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.accountXpubsFromMnemonic.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.signPsbtSync && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">signPsbtSync:</ThemedText>
+                {Object.entries(testResults.signPsbtSync.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.signPsbtSync.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.signPsbtSync.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.signPsbtFromSeed && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">signPsbtFromSeed:</ThemedText>
+                {Object.entries(testResults.signPsbtFromSeed.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.signPsbtFromSeed.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.signPsbtFromSeed.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.createWalletManager && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">createWalletManager:</ThemedText>
+                {Object.entries(testResults.createWalletManager.tests || {}).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+                {!testResults.createWalletManager.success && <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.createWalletManager.error}</ThemedText>}
+              </ThemedView>
+            )}
+            {testResults.walletSingleton && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">wallet (singleton):</ThemedText>
+                {testResults.walletSingleton.success ? (
+                  Object.entries(testResults.walletSingleton.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.walletSingleton.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.errorClasses && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">Error classes:</ThemedText>
+                {testResults.errorClasses.success ? (
+                  Object.entries(testResults.errorClasses.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.errorClasses.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.loggerModule && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">Logger (logger / configureLogging / LogLevel):</ThemedText>
+                {testResults.loggerModule.success ? (
+                  Object.entries(testResults.loggerModule.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.loggerModule.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.validation && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">Validation functions:</ThemedText>
+                {testResults.validation.success ? (
+                  Object.entries(testResults.validation.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.validation.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.constants && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">Constants:</ThemedText>
+                {testResults.constants.success ? (
+                  Object.entries(testResults.constants.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.constants.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
+            {testResults.utexoModule && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">UTEXO Module (instantiation + stubs):</ThemedText>
+                {testResults.utexoModule.success ? (
+                  Object.entries(testResults.utexoModule.tests || {}).map(([k, v]) => (
+                    <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                      {(v as boolean) ? '✓' : '✗'} {k}
+                    </ThemedText>
+                  ))
+                ) : (
+                  <ThemedText style={[styles.monoText, styles.errorText]}>❌ {testResults.utexoModule.error}</ThemedText>
+                )}
+              </ThemedView>
+            )}
             <ThemedView style={styles.infoContainer}>
               <ThemedText type="defaultSemiBold">Full Results:</ThemedText>
               <ThemedText style={styles.monoText} numberOfLines={10}>
@@ -587,8 +1173,405 @@ export default function HomeScreen() {
                 </ThemedText>
               </ThemedView>
             )}
+            {walletFlowResults.decodedInvoice && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">decodeRGBInvoice() ✓</ThemedText>
+                <ThemedText style={styles.monoText} numberOfLines={8}>
+                  {JSON.stringify(walletFlowResults.decodedInvoice, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.walletGetters && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">getXpub / getNetwork / isDisposed ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  network: {walletFlowResults.walletGetters.network}{'\n'}
+                  notDisposed: {String(walletFlowResults.walletGetters.notDisposed)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.estimateFeeRate && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">estimateFeeRate() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {JSON.stringify(walletFlowResults.estimateFeeRate, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.sendBtc && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">sendBtc() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>txid: {walletFlowResults.sendBtc.txid}</ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.createUtxos && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">createUtxos() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>utxos: {walletFlowResults.createUtxos.numUtxos}</ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.sendBeginEnd && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">sendBegin / estimateFee / sendEnd ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  txid: {walletFlowResults.sendBeginEnd.txid}{'\n'}
+                  fee: {JSON.stringify(walletFlowResults.sendBeginEnd.fee)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.failTransfers !== undefined && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">failTransfers() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {String(walletFlowResults.failTransfers.result)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.issueAssetIfa && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">issueAssetIfa() ✓</ThemedText>
+                <ThemedText style={styles.monoText} numberOfLines={3}>
+                  {JSON.stringify(walletFlowResults.issueAssetIfa, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.inflate && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">inflate() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {JSON.stringify(walletFlowResults.inflate, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.inflateBegin && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">inflateBegin() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  psbt length: {walletFlowResults.inflateBegin.psbtLength}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.inflateEnd && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">inflateEnd() ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {JSON.stringify(walletFlowResults.inflateEnd, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.walletSignVerify && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">wallet.signMessage / verifyMessage ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  sig: {walletFlowResults.walletSignVerify.sig}{'\n'}
+                  valid: {String(walletFlowResults.walletSignVerify.valid)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.createBackup && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">createBackup ✓</ThemedText>
+                <ThemedText style={styles.monoText}>{walletFlowResults.createBackup.path}</ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.restoreFromBackup && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">restoreFromBackup ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {JSON.stringify(walletFlowResults.restoreFromBackup, null, 2)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {walletFlowResults.dispose && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">dispose / isDisposed ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  disposed: {String(walletFlowResults.dispose.disposed)}
+                </ThemedText>
+              </ThemedView>
+            )}
           </>
         )}
+      </ThemedView>
+
+      <ThemedView style={styles.stepContainer}>
+        <ThemedText type="subtitle">UTEXO / Lightning Flow</ThemedText>
+        {runningUTEXOFlow && <ThemedText>Running UTEXO flow...</ThemedText>}
+        {!runningUTEXOFlow && !utexoFlowResults && (
+          <ThemedView style={styles.infoContainer}>
+            <ThemedText>
+              Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridgeAPI.
+              {'\n'}Steps requiring a signet node or bridge server are captured gracefully.
+            </ThemedText>
+            <TouchableOpacity style={styles.button} onPress={runUTEXOFlowTest}>
+              <ThemedText style={styles.buttonText}>▶ Run UTEXO Flow</ThemedText>
+            </TouchableOpacity>
+          </ThemedView>
+        )}
+        {utexoFlowResults && (
+          <>
+            <ThemedView style={styles.infoContainer}>
+              <ThemedText type="defaultSemiBold">Flow Status:</ThemedText>
+              <ThemedText style={styles.monoText}>
+                {utexoFlowResults.success ? '✅ Completed' : '❌ Failed'}
+                {utexoFlowResults.error && `\nError: ${utexoFlowResults.error.message}`}
+              </ThemedText>
+            </ThemedView>
+            <ThemedView style={styles.infoContainer}>
+              <ThemedText type="defaultSemiBold">Steps:</ThemedText>
+              <ThemedText style={styles.monoText}>
+                {utexoFlowResults.steps?.map((step: any, idx: number) =>
+                  `${idx + 1}. ${step.step}: ${step.status === 'success' ? '✅' : step.status === 'running' ? '⏳' : '❌'}${step.error ? ` (${step.error})` : ''}\n`
+                ).join('')}
+              </ThemedText>
+            </ThemedView>
+            {utexoFlowResults.derivePublicKeys && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">derivePublicKeys ✓</ThemedText>
+                <ThemedText style={styles.monoText}>{utexoFlowResults.derivePublicKeys.xpub ?? utexoFlowResults.derivePublicKeys.error}</ThemedText>
+              </ThemedView>
+            )}
+            {utexoFlowResults.walletGetters && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">getXpub / getNetwork / isDisposed ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  network: {utexoFlowResults.walletGetters.network}{'\n'}
+                  notDisposed: {String(utexoFlowResults.walletGetters.notDisposed)}
+                </ThemedText>
+              </ThemedView>
+            )}
+            {utexoFlowResults.initError && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">initialize() (needs signet node):</ThemedText>
+                <ThemedText style={[styles.monoText, styles.errorText]}>{utexoFlowResults.initError}</ThemedText>
+              </ThemedView>
+            )}
+            {utexoFlowResults.lightningProtocolStubs && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">LightningProtocol stubs:</ThemedText>
+                {Object.entries(utexoFlowResults.lightningProtocolStubs).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+              </ThemedView>
+            )}
+            {utexoFlowResults.onchainProtocolStubs && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">OnchainProtocol stubs:</ThemedText>
+                {Object.entries(utexoFlowResults.onchainProtocolStubs).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+              </ThemedView>
+            )}
+            {utexoFlowResults.utexoProtocolStubs && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">UTEXOProtocol stubs:</ThemedText>
+                {Object.entries(utexoFlowResults.utexoProtocolStubs).map(([k, v]) => (
+                  <ThemedText key={k} style={[styles.monoText, (v as boolean) ? styles.covered : styles.uncovered]}>
+                    {(v as boolean) ? '✓' : '✗'} {k}
+                  </ThemedText>
+                ))}
+              </ThemedView>
+            )}
+            {utexoFlowResults.bridgeAPIQuery && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">bridgeAPI.getTransferByMainnetInvoice:</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {utexoFlowResults.bridgeAPIQuery.returned ?? `error: ${utexoFlowResults.bridgeAPIQuery.error}`}
+                </ThemedText>
+              </ThemedView>
+            )}
+            <TouchableOpacity style={styles.button} onPress={runUTEXOFlowTest}>
+              <ThemedText style={styles.buttonText}>↺ Re-run UTEXO Flow</ThemedText>
+            </TouchableOpacity>
+          </>
+        )}
+      </ThemedView>
+
+      <ThemedView style={styles.stepContainer}>
+        <ThemedText type="subtitle">SDK Coverage</ThemedText>
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Standalone Functions</ThemedText>
+        {[
+          { name: 'wallet', covered: true },
+          { name: 'generateKeys', covered: true },
+          { name: 'createWallet', covered: true },
+          { name: 'deriveKeysFromMnemonic', covered: true },
+          { name: 'deriveKeysFromSeed', covered: true },
+          { name: 'deriveKeysFromXpriv', covered: true },
+          { name: 'restoreKeys', covered: true },
+          { name: 'getXprivFromMnemonic', covered: true },
+          { name: 'getXpubFromXpriv', covered: true },
+          { name: 'signPsbt', covered: true },
+          { name: 'signPsbtSync', covered: true },
+          { name: 'signPsbtFromSeed', covered: true },
+          { name: 'signMessage', covered: true },
+          { name: 'verifyMessage', covered: true },
+          { name: 'deriveKeysFromMnemonicOrSeed', covered: true },
+          { name: 'accountXpubsFromMnemonic', covered: true },
+          { name: 'createWalletManager', covered: true },
+          { name: 'restoreFromBackup', covered: true },
+          { name: 'toUnitsNumber', covered: true },
+          { name: 'fromUnitsNumber', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>WalletManager Methods</ThemedText>
+        {[
+          { name: 'initialize()', covered: true },
+          { name: 'getBtcBalance()', covered: true },
+          { name: 'getAddress()', covered: true },
+          { name: 'syncWallet()', covered: true },
+          { name: 'refreshWallet()', covered: true },
+          { name: 'createUtxosBegin()', covered: true },
+          { name: 'createUtxosEnd()', covered: true },
+          { name: 'signPsbt()', covered: true },
+          { name: 'issueAssetNia()', covered: true },
+          { name: 'listAssets()', covered: true },
+          { name: 'sendBtcBegin()', covered: true },
+          { name: 'sendBtcEnd()', covered: true },
+          { name: 'blindReceive()', covered: true },
+          { name: 'witnessReceive()', covered: true },
+          { name: 'send()', covered: true },
+          { name: 'getAssetBalance()', covered: true },
+          { name: 'listTransfers()', covered: true },
+          { name: 'listTransactions()', covered: true },
+          { name: 'listUnspents()', covered: true },
+          { name: 'goOnline()', covered: true },
+          { name: 'getXpub()', covered: true },
+          { name: 'getNetwork()', covered: true },
+          { name: 'dispose()', covered: true },
+          { name: 'isDisposed()', covered: true },
+          { name: 'createUtxos()', covered: true },
+          { name: 'sendBegin()', covered: true },
+          { name: 'sendEnd()', covered: true },
+          { name: 'sendBtc()', covered: true },
+          { name: 'issueAssetIfa()', covered: true },
+          { name: 'inflateBegin()', covered: true },
+          { name: 'inflateEnd()', covered: true },
+          { name: 'inflate()', covered: true },
+          { name: 'decodeRGBInvoice()', covered: true },
+          { name: 'failTransfers()', covered: true },
+          { name: 'estimateFeeRate()', covered: true },
+          { name: 'estimateFee()', covered: true },
+          { name: 'createBackup()', covered: true },
+          { name: 'signMessage()', covered: true },
+          { name: 'verifyMessage()', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Error Classes</ThemedText>
+        {[
+          { name: 'SDKError', covered: true },
+          { name: 'NetworkError', covered: true },
+          { name: 'ValidationError', covered: true },
+          { name: 'WalletError', covered: true },
+          { name: 'CryptoError', covered: true },
+          { name: 'ConfigurationError', covered: true },
+          { name: 'BadRequestError', covered: true },
+          { name: 'NotFoundError', covered: true },
+          { name: 'ConflictError', covered: true },
+          { name: 'RgbNodeError', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Logger</ThemedText>
+        {[
+          { name: 'logger', covered: true },
+          { name: 'configureLogging', covered: true },
+          { name: 'LogLevel', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Validation</ThemedText>
+        {[
+          { name: 'validateNetwork', covered: true },
+          { name: 'normalizeNetwork', covered: true },
+          { name: 'validateMnemonic', covered: true },
+          { name: 'validatePsbt', covered: true },
+          { name: 'validateBase64', covered: true },
+          { name: 'validateHex', covered: true },
+          { name: 'validateRequired', covered: true },
+          { name: 'validateString', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Constants</ThemedText>
+        {[
+          { name: 'COIN_RGB_MAINNET', covered: true },
+          { name: 'COIN_RGB_TESTNET', covered: true },
+          { name: 'COIN_BITCOIN_MAINNET', covered: true },
+          { name: 'COIN_BITCOIN_TESTNET', covered: true },
+          { name: 'NETWORK_MAP', covered: true },
+          { name: 'BIP32_VERSIONS', covered: true },
+          { name: 'DERIVATION_PURPOSE', covered: true },
+          { name: 'DERIVATION_ACCOUNT', covered: true },
+          { name: 'KEYCHAIN_RGB', covered: true },
+          { name: 'KEYCHAIN_BTC', covered: true },
+          { name: 'DEFAULT_NETWORK', covered: true },
+          { name: 'DEFAULT_API_TIMEOUT', covered: true },
+          { name: 'DEFAULT_MAX_RETRIES', covered: true },
+          { name: 'DEFAULT_LOG_LEVEL', covered: true },
+          { name: 'utexoNetworkMap', covered: true },
+          { name: 'utexoNetworkIdMap', covered: true },
+          { name: 'getDestinationAsset', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
+
+        <ThemedText type="defaultSemiBold" style={styles.coverageSection}>UTEXO / Lightning Module</ThemedText>
+        {[
+          { name: 'UTEXOWallet', covered: true },
+          { name: 'UTEXOProtocol', covered: true },
+          { name: 'LightningProtocol', covered: true },
+          { name: 'OnchainProtocol', covered: true },
+          { name: 'bridgeAPI', covered: true },
+        ].map(({ name, covered }) => (
+          <ThemedView key={name} style={styles.coverageRow}>
+            <ThemedText style={[styles.coverageIcon, covered ? styles.covered : styles.uncovered]}>
+              {covered ? '✓' : '✗'}
+            </ThemedText>
+            <ThemedText style={styles.coverageName}>{name}</ThemedText>
+          </ThemedView>
+        ))}
       </ThemedView>
 
       <ThemedView style={styles.stepContainer}>
@@ -654,5 +1637,31 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#ffffff',
     fontWeight: 'bold',
+  },
+  coverageSection: {
+    marginTop: 10,
+    marginBottom: 2,
+  },
+  coverageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  coverageIcon: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    width: 16,
+    textAlign: 'center',
+  },
+  coverageName: {
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+    fontSize: 12,
+  },
+  covered: {
+    color: '#2e7d32',
+  },
+  uncovered: {
+    color: '#c62828',
   },
 });

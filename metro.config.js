@@ -2,33 +2,22 @@
 const { getDefaultConfig } = require('expo/metro-config');
 const path = require('path');
 
+const localSdkPath = path.resolve(__dirname, '../rgb-sdk-rn');
+
 /** @type {import('expo/metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
-// Add watchFolders to include the parent directory where the local package is located
-// config.watchFolders = [
-//   path.resolve(__dirname, '../../rgb'),
-// ];
+// Watch the local SDK package so Metro picks up changes
+config.watchFolders = [localSdkPath];
 
-// Ensure Metro can resolve symlinks and handle WASM files
-// config.resolver = {
-//   ...config.resolver,
-//   nodeModulesPaths: [
-//     path.resolve(__dirname, 'node_modules'),
-//   ],
-//   // Add support for WASM files
-//   sourceExts: [...(config.resolver.sourceExts || []), 'wasm'],
-//   // Resolve bare exports properly
-//   unstable_enablePackageExports: true,
-// };
-
-// Configure transformer to handle WASM files
-// config.transformer = {
-//   ...config.transformer,
-//   assetPlugins: config.transformer?.assetPlugins || [],
-// };
+// Ensure Metro resolves modules from the demo's node_modules first,
+// avoiding duplicate React/React-Native instances from the local package
+config.resolver = {
+  ...config.resolver,
+  nodeModulesPaths: [
+    path.resolve(__dirname, 'node_modules'),
+    path.resolve(localSdkPath, 'node_modules'),
+  ],
+};
 
 module.exports = config;
-// const config = {};
-
-// module.exports = mergeConfig(getDefaultConfig(__dirname), config);
