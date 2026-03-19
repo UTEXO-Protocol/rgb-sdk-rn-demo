@@ -491,13 +491,103 @@ export async function runWalletFlow() {
 
       // restoreFromBackup
       pushStep({ step: 'restoreFromBackup', status: 'running' });
+      const restoreDir = `${documentDirectory ?? ''}restore/`;
       const restoreResult = await restoreFromBackup({
         backupFilePath: backupPath,
         password: backupPassword,
-        dataDir: `${documentDirectory ?? ''}restore/`,
+        dataDir: restoreDir,
       });
       flowResults.restoreFromBackup = restoreResult;
       pushStep({ step: 'restoreFromBackup', status: 'success' });
+
+      // ── verifyRestoredWallet ───────────────────────────────────────
+      pushStep({ step: 'verifyRestoredWallet', status: 'running' });
+      const restoredWallet = new WalletManager({
+        xpubVan: senderKeys.accountXpubVanilla,
+        xpubCol: senderKeys.accountXpubColored,
+        masterFingerprint: senderKeys.masterFingerprint,
+        mnemonic: senderKeys.mnemonic,
+        network: 'regtest',
+        dataDir: restoreDir,
+      });
+      await restoredWallet.initialize();
+      // Sync UTXO state from indexer, then refresh RGB transfer statuses
+      await restoredWallet.syncWallet();
+      await restoredWallet.refreshWallet();
+
+      const [
+        restoredBtcBalance,
+        restoredAddress,
+        restoredAssets,
+        restoredTransactions,
+        restoredUnspents,
+      ] = await Promise.all([
+        restoredWallet.getBtcBalance(),
+        restoredWallet.getAddress(),
+        restoredWallet.listAssets(),
+        restoredWallet.listTransactions(),
+        restoredWallet.listUnspents(),
+      ]);
+
+      // Per-asset balances and transfer history for every NIA asset
+      const niaDetails = await Promise.all(
+        (restoredAssets.nia ?? []).map(async (asset) => {
+          const [balance, transfers] = await Promise.all([
+            restoredWallet.getAssetBalance(asset.assetId),
+            restoredWallet.listTransfers(asset.assetId),
+          ]);
+          return {
+            assetId: asset.assetId,
+            ticker: asset.ticker,
+            name: asset.name,
+            issuedSupply: asset.issuedSupply,
+            balance,
+            transferCount: transfers.length,
+            transferStatuses: transfers.reduce((acc: Record<string, number>, t) => {
+              acc[t.status] = (acc[t.status] ?? 0) + 1;
+              return acc;
+            }, {}),
+          };
+        })
+      );
+
+      // Per-asset balances and transfer history for every IFA asset
+      const ifaDetails = await Promise.all(
+        (restoredAssets.ifa ?? []).map(async (asset) => {
+          const [balance, transfers] = await Promise.all([
+            restoredWallet.getAssetBalance(asset.assetId),
+            restoredWallet.listTransfers(asset.assetId),
+          ]);
+          return {
+            assetId: asset.assetId,
+            ticker: asset.ticker,
+            name: asset.name,
+            balance,
+            transferCount: transfers.length,
+            transferStatuses: transfers.reduce((acc: Record<string, number>, t) => {
+              acc[t.status] = (acc[t.status] ?? 0) + 1;
+              return acc;
+            }, {}),
+          };
+        })
+      );
+
+      // RGB allocations per UTXO (unspents that carry colored assignments)
+      const rgbUtxos = restoredUnspents.filter(u => u.rgbAllocations.length > 0);
+
+      flowResults.verifyRestoredWallet = {
+        btcBalance: restoredBtcBalance,
+        address: restoredAddress,
+        niaAssets: niaDetails,
+        ifaAssets: ifaDetails,
+        totalAssetsFound: (restoredAssets.nia?.length ?? 0) + (restoredAssets.ifa?.length ?? 0),
+        transactionCount: restoredTransactions.length,
+        unspentCount: restoredUnspents.length,
+        coloredUtxoCount: rgbUtxos.length,
+      };
+      pushStep({ step: 'verifyRestoredWallet', status: 'success', data: flowResults.verifyRestoredWallet });
+
+      await restoredWallet.dispose();
     } catch (e: any) {
       pushStep({ step: 'createBackup', status: 'error', error: e.message });
     }

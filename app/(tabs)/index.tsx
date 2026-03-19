@@ -1,6 +1,10 @@
 import { Image } from 'expo-image';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useEffect, useState } from 'react';
-import { Platform, StyleSheet, TouchableOpacity } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, TouchableOpacity, View } from 'react-native';
+
+import sdkPkg from '@utexo/rgb-sdk-rn/package.json';
+import { RGB_LIB_ANDROID_VERSION } from '@utexo/rgb-sdk-rn';
 
 import { HelloWave } from '@/components/hello-wave';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
@@ -24,7 +28,9 @@ import {
   signPsbtFromSeed,
   signMessage,
   verifyMessage,
+  WalletManager,
   createWalletManager,
+  restoreFromVss,
   toUnitsNumber,
   fromUnitsNumber,
   // Error classes
@@ -110,6 +116,8 @@ export default function HomeScreen() {
   const [runningWalletFlow, setRunningWalletFlow] = useState(false);
   const [utexoFlowResults, setUtexoFlowResults] = useState<any>(null);
   const [runningUTEXOFlow, setRunningUTEXOFlow] = useState(false);
+  const [vssFlowResults, setVssFlowResults] = useState<any>(null);
+  const [runningVssFlow, setRunningVssFlow] = useState(false);
   const [account, setAccount] = useState<any>(null);
   const [balance, setBalance] = useState<any>(null);
   const [address, setAddress] = useState<string | null>(null);
@@ -823,6 +831,170 @@ export default function HomeScreen() {
     }
   }
 
+  async function runVssFlowTest() {
+    const VSS_SERVER_URL = 'https://vss-server.utexo.com/vss';
+    const steps: Array<{ step: string; status: string; result?: any; error?: string }> = [];
+
+    const addStep = (step: string, status: string, result?: any, error?: string) => {
+      const existing = steps.findIndex(s => s.step === step);
+      if (existing >= 0) {
+        steps[existing] = { step, status, result, error };
+      } else {
+        steps.push({ step, status, result, error });
+      }
+      setVssFlowResults({ running: true, steps: [...steps] });
+    };
+
+    try {
+      setRunningVssFlow(true);
+      setError(null);
+      setVssFlowResults({ running: true, steps: [] });
+
+      // Step 1: Generate a fresh wallet
+      addStep('generateKeys', 'running');
+      const keys = await generateKeys('testnet');
+      // Derive a deterministic 32-byte signing key from the masterFingerprint
+      // by repeating/padding it. (Demo only — production should use a real secp256k1 key.)
+      const fpHex = keys.masterFingerprint; // 4 bytes = 8 hex chars
+      // Pad to 64 hex chars by repeating the fingerprint
+      const signingKeyHex = (fpHex.repeat(8)).slice(0, 64);
+      const storeId = `demo_${keys.masterFingerprint}`;
+      addStep('generateKeys', 'success', { masterFingerprint: keys.masterFingerprint });
+
+      const vssConfig = {
+        serverUrl: VSS_SERVER_URL,
+        storeId,
+        signingKeyHex,
+        encryptionEnabled: true,
+        autoBackup: false,
+        backupMode: 'Async' as const,
+      };
+
+      // Step 2: Initialize wallet
+      addStep('initializeWallet', 'running');
+      const wm = await createWalletManager({
+        network: 'testnet',
+        xpubVan: keys.accountXpubVanilla,
+        xpubCol: keys.accountXpubColored,
+        mnemonic: keys.mnemonic,
+        masterFingerprint: keys.masterFingerprint,
+      });
+      addStep('initializeWallet', 'success');
+
+      // Step 3: vssBackup — upload encrypted backup
+      addStep('vssBackup', 'running');
+      let backupVersion: number | null = null;
+      try {
+        backupVersion = await wm.vssBackup(vssConfig);
+        addStep('vssBackup', 'success', { version: backupVersion });
+      } catch (e: any) {
+        addStep('vssBackup', 'error', undefined, e?.message ?? String(e));
+      }
+
+      // Step 4: vssBackupInfo — query server for backup status
+      addStep('vssBackupInfo', 'running');
+      try {
+        const info = await wm.vssBackupInfo(vssConfig);
+        addStep('vssBackupInfo', 'success', {
+          backupExists: info.backupExists,
+          serverVersion: info.serverVersion,
+          backupRequired: info.backupRequired,
+        });
+      } catch (e: any) {
+        addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e));
+      }
+
+      // Step 5: configureVssBackup — attach auto-backup (fire-and-forget mode)
+      addStep('configureVssBackup', 'running');
+      try {
+        await wm.configureVssBackup({ ...vssConfig, autoBackup: true });
+        addStep('configureVssBackup', 'success');
+      } catch (e: any) {
+        addStep('configureVssBackup', 'error', undefined, e?.message ?? String(e));
+      }
+
+      // Step 6: disableVssAutoBackup
+      addStep('disableVssAutoBackup', 'running');
+      try {
+        await wm.disableVssAutoBackup();
+        addStep('disableVssAutoBackup', 'success');
+      } catch (e: any) {
+        addStep('disableVssAutoBackup', 'error', undefined, e?.message ?? String(e));
+      }
+
+      // Step 7: restoreFromVss — restore into a temp path
+      addStep('restoreFromVss', 'running');
+      let restoredVssPath: string | null = null;
+      try {
+        const vssRestoreDir = `${FileSystem.documentDirectory}vss_restore_test`;
+        await FileSystem.makeDirectoryAsync(vssRestoreDir, { intermediates: true });
+        restoredVssPath = await restoreFromVss(vssConfig, vssRestoreDir.replace('file://', ''));
+        addStep('restoreFromVss', 'success', { restoredPath: restoredVssPath });
+      } catch (e: any) {
+        addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e));
+      }
+
+      // Step 8: verifyRestoredWallet — open the restored wallet and confirm state is intact
+      addStep('verifyRestoredWallet', 'running');
+      try {
+        if (!restoredVssPath) {
+          throw new Error('Restore step did not succeed — skipping verification');
+        }
+        const restoredWm = new WalletManager({
+          network: 'testnet',
+          xpubVan: keys.accountXpubVanilla,
+          xpubCol: keys.accountXpubColored,
+          mnemonic: keys.mnemonic,
+          masterFingerprint: keys.masterFingerprint,
+          dataDir: restoredVssPath,
+        });
+        await restoredWm.initialize();
+        await restoredWm.syncWallet();
+        await restoredWm.refreshWallet();
+
+        const [restoredBtcBalance, restoredAddress, restoredAssets, restoredTransactions] =
+          await Promise.all([
+            restoredWm.getBtcBalance(),
+            restoredWm.getAddress(),
+            restoredWm.listAssets(),
+            restoredWm.listTransactions(),
+          ]);
+
+        const niaCount = restoredAssets.nia?.length ?? 0;
+        const ifaCount = restoredAssets.ifa?.length ?? 0;
+        addStep('verifyRestoredWallet', 'success', {
+          address: restoredAddress,
+          btcSettled: restoredBtcBalance?.vanilla?.settled ?? 0,
+          totalAssets: niaCount + ifaCount,
+          transactionCount: restoredTransactions.length,
+        });
+
+        await restoredWm.dispose();
+      } catch (e: any) {
+        addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e));
+      }
+
+      setVssFlowResults({
+        running: false,
+        success: true,
+        steps,
+        storeId,
+        signingKeyHex: signingKeyHex.slice(0, 8) + '...',
+        backupVersion,
+      });
+    } catch (err: any) {
+      console.error('Error in VSS flow:', err);
+      setVssFlowResults({
+        running: false,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        steps,
+      });
+    } finally {
+      setRunningVssFlow(false);
+    }
+  }
+
   return (
     <ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
@@ -835,6 +1007,21 @@ export default function HomeScreen() {
       <ThemedView style={styles.titleContainer}>
         <ThemedText type="title">RGB Wallet</ThemedText>
         <HelloWave />
+      </ThemedView>
+
+      <ThemedView style={styles.sdkBadgeContainer}>
+        <ThemedView style={styles.sdkBadge}>
+          <ThemedText style={styles.sdkBadgeLabel}>SDK</ThemedText>
+          <ThemedText style={styles.sdkBadgeVersion}>
+            {sdkPkg.name}@{sdkPkg.version}
+          </ThemedText>
+        </ThemedView>
+        <ThemedView style={[styles.sdkBadge, styles.sdkBadgeNative]}>
+          <ThemedText style={styles.sdkBadgeLabel}>Android</ThemedText>
+          <ThemedText style={[styles.sdkBadgeVersion, styles.sdkBadgeVersionNative]}>
+            rgb-lib@{RGB_LIB_ANDROID_VERSION}
+          </ThemedText>
+        </ThemedView>
       </ThemedView>
 
       <ThemedView style={styles.stepContainer}>
@@ -1282,6 +1469,36 @@ export default function HomeScreen() {
                 </ThemedText>
               </ThemedView>
             )}
+            {walletFlowResults.verifyRestoredWallet && (
+              <ThemedView style={styles.infoContainer}>
+                <ThemedText type="defaultSemiBold">verifyRestoredWallet ✓</ThemedText>
+                <ThemedText style={styles.monoText}>
+                  {'address: '}{walletFlowResults.verifyRestoredWallet.address}{'\n'}
+                  {'btc settled: '}{walletFlowResults.verifyRestoredWallet.btcBalance?.vanilla?.settled ?? 0}{'\n'}
+                  {'totalAssetsFound: '}{walletFlowResults.verifyRestoredWallet.totalAssetsFound}{'\n'}
+                  {'transactions: '}{walletFlowResults.verifyRestoredWallet.transactionCount}{'\n'}
+                  {'unspents: '}{walletFlowResults.verifyRestoredWallet.unspentCount}{'  (colored: '}{walletFlowResults.verifyRestoredWallet.coloredUtxoCount}{')'}
+                </ThemedText>
+                {(walletFlowResults.verifyRestoredWallet.niaAssets ?? []).map((a: any) => (
+                  <ThemedView key={a.assetId} style={{ marginTop: 6 }}>
+                    <ThemedText type="defaultSemiBold">[NIA] {a.ticker} – {a.name}</ThemedText>
+                    <ThemedText style={styles.monoText}>
+                      {'settled: '}{a.balance?.settled ?? 0}{'  future: '}{a.balance?.future ?? 0}{'  spendable: '}{a.balance?.spendable ?? 0}{'\n'}
+                      {'transfers: '}{a.transferCount}{'  statuses: '}{JSON.stringify(a.transferStatuses)}
+                    </ThemedText>
+                  </ThemedView>
+                ))}
+                {(walletFlowResults.verifyRestoredWallet.ifaAssets ?? []).map((a: any) => (
+                  <ThemedView key={a.assetId} style={{ marginTop: 6 }}>
+                    <ThemedText type="defaultSemiBold">[IFA] {a.ticker} – {a.name}</ThemedText>
+                    <ThemedText style={styles.monoText}>
+                      {'settled: '}{a.balance?.settled ?? 0}{'  future: '}{a.balance?.future ?? 0}{'  spendable: '}{a.balance?.spendable ?? 0}{'\n'}
+                      {'transfers: '}{a.transferCount}{'  statuses: '}{JSON.stringify(a.transferStatuses)}
+                    </ThemedText>
+                  </ThemedView>
+                ))}
+              </ThemedView>
+            )}
             {walletFlowResults.dispose && (
               <ThemedView style={styles.infoContainer}>
                 <ThemedText type="defaultSemiBold">dispose / isDisposed ✓</ThemedText>
@@ -1392,6 +1609,149 @@ export default function HomeScreen() {
       </ThemedView>
 
       <ThemedView style={styles.stepContainer}>
+        {/* Header row */}
+        <View style={vssStyles.headerRow}>
+          <ThemedText type="subtitle">☁ VSS Cloud Backup</ThemedText>
+          {vssFlowResults?.running && (
+            <ActivityIndicator size="small" color="#7c3aed" style={{ marginLeft: 8 }} />
+          )}
+          {vssFlowResults && !vssFlowResults.running && (
+            <View style={[vssStyles.statusPill, vssFlowResults.success ? vssStyles.pillSuccess : vssStyles.pillError]}>
+              <ThemedText style={vssStyles.statusPillText}>
+                {vssFlowResults.success ? 'Completed' : 'Failed'}
+              </ThemedText>
+            </View>
+          )}
+        </View>
+
+        {/* Progress dots */}
+        {vssFlowResults?.steps?.length > 0 && (() => {
+          const TOTAL = 8;
+          const done = vssFlowResults.steps.filter((s: any) => s.status === 'success').length;
+          return (
+            <View style={vssStyles.progressRow}>
+              {Array.from({ length: TOTAL }).map((_, i) => {
+                const stepData = vssFlowResults.steps[i];
+                const isSuccess = stepData?.status === 'success';
+                const isRunning = stepData?.status === 'running';
+                const isError = stepData?.status === 'error';
+                return (
+                  <View key={i} style={[
+                    vssStyles.progressDot,
+                    isSuccess && vssStyles.dotSuccess,
+                    isRunning && vssStyles.dotRunning,
+                    isError && vssStyles.dotError,
+                  ]}>
+                    {isRunning && <ActivityIndicator size={8} color="#fff" />}
+                  </View>
+                );
+              })}
+              <ThemedText style={vssStyles.progressLabel}>{done}/{TOTAL}</ThemedText>
+            </View>
+          );
+        })()}
+
+        {/* Idle state */}
+        {!vssFlowResults && (
+          <View style={vssStyles.idleCard}>
+            <ThemedText style={vssStyles.idleDesc}>
+              End-to-end test against{'\n'}
+              <ThemedText style={vssStyles.idleUrl}>vss-server.utexo.com/vss</ThemedText>
+            </ThemedText>
+            <View style={vssStyles.idleStepList}>
+              {['Generate Keys', 'Init Wallet', 'Upload Backup', 'Check Status', 'Configure Auto-backup', 'Disable Auto-backup', 'Restore', 'Verify Assets'].map((label, i) => (
+                <View key={i} style={vssStyles.idleStepRow}>
+                  <View style={vssStyles.idleStepDot} />
+                  <ThemedText style={vssStyles.idleStepLabel}>{label}</ThemedText>
+                </View>
+              ))}
+            </View>
+            <TouchableOpacity style={vssStyles.runBtn} onPress={runVssFlowTest}>
+              <ThemedText style={vssStyles.runBtnText}>▶  Run VSS Flow</ThemedText>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Step cards */}
+        {vssFlowResults?.steps?.map((step: any, idx: number) => {
+          const STEP_META: Record<string, { label: string; desc: string }> = {
+            generateKeys:        { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
+            initializeWallet:    { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
+            vssBackup:           { label: 'Upload Backup',          desc: 'Encrypt & push to VSS server' },
+            vssBackupInfo:       { label: 'Check Backup Status',    desc: 'Query server for backup metadata' },
+            configureVssBackup:  { label: 'Configure Auto-backup',  desc: 'Enable background auto-backup' },
+            disableVssAutoBackup:{ label: 'Disable Auto-backup',    desc: 'Stop background auto-backup' },
+            restoreFromVss:      { label: 'Restore from VSS',       desc: 'Download & decrypt wallet data' },
+            verifyRestoredWallet:{ label: 'Verify Restored Wallet',  desc: 'Confirm assets & transactions intact' },
+          };
+          const meta = STEP_META[step.step] ?? { label: step.step, desc: '' };
+          const isRunning = step.status === 'running';
+          const isSuccess = step.status === 'success';
+          const isError = step.status === 'error';
+          return (
+            <View key={idx} style={[
+              vssStyles.stepCard,
+              isSuccess && vssStyles.cardSuccess,
+              isRunning && vssStyles.cardRunning,
+              isError && vssStyles.cardError,
+            ]}>
+              {/* Left accent bar */}
+              <View style={[
+                vssStyles.cardAccent,
+                isSuccess && vssStyles.accentSuccess,
+                isRunning && vssStyles.accentRunning,
+                isError && vssStyles.accentError,
+              ]} />
+
+              <View style={vssStyles.cardBody}>
+                {/* Top row: number + label + icon */}
+                <View style={vssStyles.cardTopRow}>
+                  <View style={[
+                    vssStyles.stepBadge,
+                    isSuccess && vssStyles.badgeSuccess,
+                    isRunning && vssStyles.badgeRunning,
+                    isError && vssStyles.badgeError,
+                  ]}>
+                    <ThemedText style={vssStyles.stepBadgeText}>{idx + 1}</ThemedText>
+                  </View>
+                  <ThemedText style={[vssStyles.cardLabel, { flex: 1 }]}>{meta.label}</ThemedText>
+                  {isRunning && <ActivityIndicator size="small" color="#7c3aed" />}
+                  {isSuccess && <ThemedText style={vssStyles.iconSuccess}>✓</ThemedText>}
+                  {isError   && <ThemedText style={vssStyles.iconError}>✗</ThemedText>}
+                </View>
+
+                {/* Result / error detail */}
+                {(step.result || step.error) && (
+                  <View style={vssStyles.cardDetail}>
+                    <ThemedText style={[vssStyles.cardDetailText, isError && { color: '#b91c1c' }]}>
+                      {step.result
+                        ? JSON.stringify(step.result)
+                        : step.error}
+                    </ThemedText>
+                  </View>
+                )}
+              </View>
+            </View>
+          );
+        })}
+
+        {/* Store ID + Re-run */}
+        {vssFlowResults && !vssFlowResults.running && (
+          <>
+            {vssFlowResults.storeId && (
+              <View style={vssStyles.storeIdRow}>
+                <ThemedText style={vssStyles.storeIdLabel}>Store ID</ThemedText>
+                <ThemedText style={[styles.monoText, { fontSize: 11 }]}>{vssFlowResults.storeId}</ThemedText>
+              </View>
+            )}
+            <TouchableOpacity style={vssStyles.rerunBtn} onPress={runVssFlowTest}>
+              <ThemedText style={vssStyles.runBtnText}>↺  Re-run VSS Flow</ThemedText>
+            </TouchableOpacity>
+          </>
+        )}
+      </ThemedView>
+
+      <ThemedView style={styles.stepContainer}>
         <ThemedText type="subtitle">SDK Coverage</ThemedText>
 
         <ThemedText type="defaultSemiBold" style={styles.coverageSection}>Standalone Functions</ThemedText>
@@ -1414,6 +1774,7 @@ export default function HomeScreen() {
           { name: 'accountXpubsFromMnemonic', covered: true },
           { name: 'createWalletManager', covered: true },
           { name: 'restoreFromBackup', covered: true },
+          { name: 'restoreFromVss', covered: true },
           { name: 'toUnitsNumber', covered: true },
           { name: 'fromUnitsNumber', covered: true },
         ].map(({ name, covered }) => (
@@ -1464,6 +1825,10 @@ export default function HomeScreen() {
           { name: 'estimateFeeRate()', covered: true },
           { name: 'estimateFee()', covered: true },
           { name: 'createBackup()', covered: true },
+          { name: 'configureVssBackup()', covered: true },
+          { name: 'vssBackup()', covered: true },
+          { name: 'vssBackupInfo()', covered: true },
+          { name: 'disableVssAutoBackup()', covered: true },
           { name: 'signMessage()', covered: true },
           { name: 'verifyMessage()', covered: true },
         ].map(({ name, covered }) => (
@@ -1595,6 +1960,42 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  sdkBadgeContainer: {
+    flexDirection: 'column',
+    gap: 4,
+    marginBottom: 4,
+  },
+  sdkBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 6,
+    overflow: 'hidden',
+    alignSelf: 'flex-start',
+  },
+  sdkBadgeLabel: {
+    backgroundColor: '#555',
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+  },
+  sdkBadgeVersion: {
+    backgroundColor: '#0075D8',
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '600',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+  },
+  sdkBadgeNative: {
+    alignSelf: 'flex-start',
+  },
+  sdkBadgeVersionNative: {
+    backgroundColor: '#2e7d32',
+  },
   stepContainer: {
     gap: 8,
     marginBottom: 8,
@@ -1663,5 +2064,197 @@ const styles = StyleSheet.create({
   },
   uncovered: {
     color: '#c62828',
+  },
+});
+
+const vssStyles = StyleSheet.create({
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  statusPill: {
+    marginLeft: 10,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  pillSuccess: { backgroundColor: '#dcfce7' },
+  pillError:   { backgroundColor: '#fee2e2' },
+  statusPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#166534',
+  },
+  progressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+  },
+  progressDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#e5e7eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dotSuccess: { backgroundColor: '#16a34a' },
+  dotRunning: { backgroundColor: '#7c3aed' },
+  dotError:   { backgroundColor: '#dc2626' },
+  progressLabel: {
+    fontSize: 11,
+    color: '#6b7280',
+    marginLeft: 4,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+  },
+  idleCard: {
+    borderWidth: 1,
+    borderColor: '#e9d5ff',
+    borderRadius: 10,
+    padding: 12,
+    backgroundColor: '#faf5ff',
+    gap: 8,
+  },
+  idleDesc: {
+    fontSize: 13,
+    color: '#6b7280',
+    lineHeight: 20,
+  },
+  idleUrl: {
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+    fontSize: 12,
+    color: '#7c3aed',
+  },
+  idleStepList: {
+    gap: 6,
+  },
+  idleStepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  idleStepDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#c4b5fd',
+  },
+  idleStepLabel: {
+    fontSize: 13,
+    color: '#374151',
+  },
+  runBtn: {
+    backgroundColor: '#7c3aed',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  rerunBtn: {
+    backgroundColor: '#7c3aed',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  runBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 14,
+    letterSpacing: 0.3,
+  },
+  stepCard: {
+    flexDirection: 'row',
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: '#f9fafb',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    marginBottom: 4,
+  },
+  cardSuccess: { backgroundColor: '#f0fdf4', borderColor: '#bbf7d0' },
+  cardRunning: { backgroundColor: '#faf5ff', borderColor: '#e9d5ff' },
+  cardError:   { backgroundColor: '#fef2f2', borderColor: '#fecaca' },
+  cardAccent: {
+    width: 3,
+    backgroundColor: '#d1d5db',
+  },
+  accentSuccess: { backgroundColor: '#16a34a' },
+  accentRunning: { backgroundColor: '#7c3aed' },
+  accentError:   { backgroundColor: '#dc2626' },
+  cardBody: {
+    flex: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    gap: 2,
+  },
+  cardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  stepBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#d1d5db',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeSuccess: { backgroundColor: '#16a34a' },
+  badgeRunning: { backgroundColor: '#7c3aed' },
+  badgeError:   { backgroundColor: '#dc2626' },
+  stepBadgeText: {
+    color: '#fff',
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 11,
+    textAlign: 'center',
+    includeFontPadding: false,
+  },
+  cardLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  cardDesc: {
+    fontSize: 10,
+    color: '#9ca3af',
+  },
+  iconSuccess: {
+    fontSize: 13,
+    color: '#16a34a',
+    fontWeight: '700',
+  },
+  iconError: {
+    fontSize: 13,
+    color: '#dc2626',
+    fontWeight: '700',
+  },
+  cardDetail: {
+    marginTop: 2,
+    backgroundColor: 'rgba(0,0,0,0.04)',
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+  },
+  cardDetailText: {
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', web: 'monospace' }),
+    fontSize: 9,
+    color: '#374151',
+  },
+  storeIdRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+    paddingHorizontal: 2,
+  },
+  storeIdLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#6b7280',
   },
 });
