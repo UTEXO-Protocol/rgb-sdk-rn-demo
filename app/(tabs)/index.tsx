@@ -1,87 +1,87 @@
-import { Image } from 'expo-image';
 import * as FileSystem from 'expo-file-system/legacy';
+import { Image } from 'expo-image';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, TouchableOpacity, View } from 'react-native';
 
-import sdkPkg from '@utexo/rgb-sdk-rn/package.json';
 import { RGB_LIB_ANDROID_VERSION } from '@utexo/rgb-sdk-rn';
+import sdkPkg from '@utexo/rgb-sdk-rn/package.json';
 
 import { HelloWave } from '@/components/hello-wave';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 
-import { runWalletFlow, runUTEXOFlow } from '@/utils/wallet-flow';
+import { runUTEXOFlow, runWalletFlow } from '@/utils/wallet-flow';
 import {
-  wallet,
+  accountXpubsFromMnemonic,
+  BadRequestError,
+  ConfigurationError,
+  configureLogging,
+  createWalletManager,
+  CryptoError,
   deriveKeysFromMnemonic,
   deriveKeysFromMnemonicOrSeed,
   deriveKeysFromSeed,
   deriveKeysFromXpriv,
+  fromUnitsNumber,
   generateKeys,
   getXprivFromMnemonic,
   getXpubFromXpriv,
-  restoreKeys,
-  accountXpubsFromMnemonic,
-  signPsbt,
-  signPsbtSync,
-  signPsbtFromSeed,
-  signMessage,
-  verifyMessage,
-  WalletManager,
-  createWalletManager,
-  restoreFromVss,
-  toUnitsNumber,
-  fromUnitsNumber,
-  // Error classes
-  SDKError,
-  NetworkError,
-  ValidationError,
-  WalletError,
-  CryptoError,
-  ConfigurationError,
-  BadRequestError,
-  NotFoundError,
-  ConflictError,
-  RgbNodeError,
+  LightningProtocol,
   // Logger
   logger,
-  configureLogging,
   LogLevel,
-  // Validation
-  validateNetwork,
+  NetworkError,
   normalizeNetwork,
-  validateMnemonic,
-  validatePsbt,
-  validateBase64,
-  validateHex,
-  validateRequired,
-  validateString,
-  // Constants
-  COIN_RGB_MAINNET,
-  COIN_RGB_TESTNET,
-  COIN_BITCOIN_MAINNET,
-  COIN_BITCOIN_TESTNET,
-  NETWORK_MAP,
-  BIP32_VERSIONS,
-  DERIVATION_PURPOSE,
-  DERIVATION_ACCOUNT,
-  KEYCHAIN_RGB,
-  KEYCHAIN_BTC,
-  DEFAULT_NETWORK,
-  DEFAULT_API_TIMEOUT,
-  DEFAULT_MAX_RETRIES,
-  DEFAULT_LOG_LEVEL,
-  utexoNetworkMap,
-  utexoNetworkIdMap,
-  getDestinationAsset,
+  NotFoundError,
+  OnchainProtocol,
+  restoreFromVss,
+  restoreKeys,
+  // Error classes
+  SDKError,
+  signMessage,
+  signPsbt,
+  signPsbtFromSeed,
+  toUnitsNumber,
+  UTEXOProtocol,
   // UTEXO
   UTEXOWallet,
-  LightningProtocol,
-  OnchainProtocol,
-  UTEXOProtocol,
-  bridgeAPI,
+  validateBase64,
+  validateHex,
+  validateMnemonic,
+  // Validation
+  validateNetwork,
+  validatePsbt,
+  validateRequired,
+  validateString,
+  ValidationError,
+  verifyMessage,
+  wallet,
+  WalletError,
+  WalletManager
 } from '@utexo/rgb-sdk-rn';
+
+import {
+  BIP32_VERSIONS,
+  COIN_BITCOIN_MAINNET,
+  COIN_BITCOIN_TESTNET,
+  COIN_RGB_MAINNET,
+  COIN_RGB_TESTNET,
+  ConflictError,
+  DEFAULT_API_TIMEOUT,
+  DEFAULT_LOG_LEVEL,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_NETWORK,
+  DERIVATION_ACCOUNT,
+  DERIVATION_PURPOSE,
+  getDestinationAsset,
+  KEYCHAIN_BTC,
+  KEYCHAIN_RGB,
+  NETWORK_MAP,
+  RgbNodeError,
+  utexoNetworkIdMap,
+  utexoNetworkMap
+} from '@utexo/rgb-sdk-core';
 // import wdk from '@tetherto/wdk';
 
 
@@ -524,22 +524,6 @@ export default function HomeScreen() {
           console.error('❌ accountXpubsFromMnemonic failed:', err);
         }
 
-        // ========== Test: signPsbtSync ==========
-        console.log('=== Testing signPsbtSync ===');
-        try {
-          const signedSync = await signPsbtSync(testMnemonic, utxoUnsignedPsbt, 'testnet');
-          results.signPsbtSync = {
-            success: true,
-            tests: {
-              matchesAsync: signedSync === utxoSignedPsbt,
-            },
-          };
-          console.log('✅ signPsbtSync:', results.signPsbtSync.tests);
-        } catch (err: any) {
-          results.signPsbtSync = { success: false, error: err.message };
-          console.error('❌ signPsbtSync failed:', err);
-        }
-
         // ========== Test: signPsbtFromSeed ==========
         // signPsbtFromSeed is intentionally unsupported (throws CryptoError); test that it throws correctly.
         console.log('=== Testing signPsbtFromSeed ===');
@@ -765,9 +749,7 @@ export default function HomeScreen() {
             utexoTests.utexoProtocolOnchainStub = e.message.includes('not implemented');
           }
 
-          // bridgeAPI can be configured
-          bridgeAPI.setBaseUrl('http://localhost:8081/');
-          utexoTests.bridgeAPIConfigurable = true;
+    
 
           results.utexoModule = { success: true, tests: utexoTests };
           console.log('✅ UTEXO Module:', utexoTests);
@@ -864,7 +846,7 @@ export default function HomeScreen() {
       const vssConfig = {
         serverUrl: VSS_SERVER_URL,
         storeId,
-        signingKeyHex,
+        signingKey: signingKeyHex,
         encryptionEnabled: true,
         autoBackup: false,
         backupMode: 'Async' as const,

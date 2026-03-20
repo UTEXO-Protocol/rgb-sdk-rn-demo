@@ -7,7 +7,7 @@ import {
   LightningProtocol, OnchainProtocol, UTEXOProtocol,
   UTEXOWallet,
   WalletManager,
-  bridgeAPI,
+  getBridgeAPI,
   createWallet,
   restoreFromBackup, type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
@@ -666,6 +666,18 @@ export async function runUTEXOFlow() {
       pushStep({ step: 'derivePublicKeys', status: 'error', error: e.message });
     }
 
+    // ── UTEXOWallet: derive + sign/verify (pure crypto path) ──
+    pushStep({ step: 'walletSignVerify', status: 'running' });
+    try {
+      const sig = await utexoWallet.signMessage('hello utexo');
+      const valid = await utexoWallet.verifyMessage('hello utexo', sig);
+      results.walletSignVerify = { valid, sigPrefix: sig.slice(0, 12) + '...' };
+      pushStep({ step: 'walletSignVerify', status: valid ? 'success' : 'error', data: { valid } });
+    } catch (e: any) {
+      results.walletSignVerify = { error: e.message };
+      pushStep({ step: 'walletSignVerify', status: 'error', error: e.message });
+    }
+
     // ── UTEXOWallet: initialize (needs signet node – may fail) ──
     pushStep({ step: 'initialize', status: 'running' });
     try {
@@ -758,11 +770,13 @@ export async function runUTEXOFlow() {
       pushStep({ step: 'utexoProtocolStubs', status: 'error', error: e.message });
     }
 
-    // ── bridgeAPI: configure and query ──────────────────────
-    pushStep({ step: 'bridgeAPIConfig', status: 'running' });
-    bridgeAPI.setBaseUrl('http://localhost:8081/');
-    results.bridgeAPIConfigured = true;
-    pushStep({ step: 'bridgeAPIConfig', status: 'success' });
+    // ── bridge API client: create + query ───────────────────
+    pushStep({ step: 'bridgeAPIClient', status: 'running' });
+    const bridgeAPI = getBridgeAPI('testnet');
+    results.bridgeAPIConfigured =
+      bridgeAPI !== null &&
+      typeof (bridgeAPI as any).getTransferByMainnetInvoice === 'function';
+    pushStep({ step: 'bridgeAPIClient', status: results.bridgeAPIConfigured ? 'success' : 'error' });
 
     pushStep({ step: 'bridgeAPIQuery', status: 'running' });
     try {
