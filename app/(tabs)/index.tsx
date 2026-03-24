@@ -1,87 +1,87 @@
-import { Image } from 'expo-image';
 import * as FileSystem from 'expo-file-system/legacy';
+import { Image } from 'expo-image';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, TouchableOpacity, View } from 'react-native';
 
+import {
+  accountXpubsFromMnemonic,
+  BadRequestError,
+  BIP32_VERSIONS,
+  bridgeAPI,
+  COIN_BITCOIN_MAINNET,
+  COIN_BITCOIN_TESTNET,
+  // Constants
+  COIN_RGB_MAINNET,
+  COIN_RGB_TESTNET,
+  ConfigurationError,
+  configureLogging,
+  ConflictError,
+  createWalletManager,
+  CryptoError,
+  DEFAULT_API_TIMEOUT,
+  DEFAULT_LOG_LEVEL,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_NETWORK,
+  DERIVATION_ACCOUNT,
+  DERIVATION_PURPOSE,
+  deriveKeysFromMnemonic,
+  deriveKeysFromMnemonicOrSeed,
+  deriveKeysFromSeed,
+  deriveKeysFromXpriv,
+  fromUnitsNumber,
+  generateKeys,
+  getDestinationAsset,
+  getXprivFromMnemonic,
+  getXpubFromXpriv,
+  KEYCHAIN_BTC,
+  KEYCHAIN_RGB,
+  LightningProtocol,
+  // Logger
+  logger,
+  LogLevel,
+  NETWORK_MAP,
+  NetworkError,
+  normalizeNetwork,
+  NotFoundError,
+  OnchainProtocol,
+  restoreFromVss,
+  restoreKeys,
+  RGB_LIB_ANDROID_VERSION,
+  RgbNodeError,
+  // Error classes
+  SDKError,
+  signMessage,
+  signPsbt,
+  signPsbtFromSeed,
+  signPsbtSync,
+  toUnitsNumber,
+  utexoNetworkIdMap,
+  utexoNetworkMap,
+  UTEXOProtocol,
+  // UTEXO
+  UTEXOWallet,
+  validateBase64,
+  validateHex,
+  validateMnemonic,
+  // Validation
+  validateNetwork,
+  validatePsbt,
+  validateRequired,
+  validateString,
+  ValidationError,
+  verifyMessage,
+  wallet,
+  WalletError,
+  WalletManager,
+} from '@utexo/rgb-sdk-rn';
 import sdkPkg from '@utexo/rgb-sdk-rn/package.json';
-import { RGB_LIB_ANDROID_VERSION } from '@utexo/rgb-sdk-rn';
 
 import { HelloWave } from '@/components/hello-wave';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 
-import { runWalletFlow, runUTEXOFlow } from '@/utils/wallet-flow';
-import {
-  wallet,
-  deriveKeysFromMnemonic,
-  deriveKeysFromMnemonicOrSeed,
-  deriveKeysFromSeed,
-  deriveKeysFromXpriv,
-  generateKeys,
-  getXprivFromMnemonic,
-  getXpubFromXpriv,
-  restoreKeys,
-  accountXpubsFromMnemonic,
-  signPsbt,
-  signPsbtSync,
-  signPsbtFromSeed,
-  signMessage,
-  verifyMessage,
-  WalletManager,
-  createWalletManager,
-  restoreFromVss,
-  toUnitsNumber,
-  fromUnitsNumber,
-  // Error classes
-  SDKError,
-  NetworkError,
-  ValidationError,
-  WalletError,
-  CryptoError,
-  ConfigurationError,
-  BadRequestError,
-  NotFoundError,
-  ConflictError,
-  RgbNodeError,
-  // Logger
-  logger,
-  configureLogging,
-  LogLevel,
-  // Validation
-  validateNetwork,
-  normalizeNetwork,
-  validateMnemonic,
-  validatePsbt,
-  validateBase64,
-  validateHex,
-  validateRequired,
-  validateString,
-  // Constants
-  COIN_RGB_MAINNET,
-  COIN_RGB_TESTNET,
-  COIN_BITCOIN_MAINNET,
-  COIN_BITCOIN_TESTNET,
-  NETWORK_MAP,
-  BIP32_VERSIONS,
-  DERIVATION_PURPOSE,
-  DERIVATION_ACCOUNT,
-  KEYCHAIN_RGB,
-  KEYCHAIN_BTC,
-  DEFAULT_NETWORK,
-  DEFAULT_API_TIMEOUT,
-  DEFAULT_MAX_RETRIES,
-  DEFAULT_LOG_LEVEL,
-  utexoNetworkMap,
-  utexoNetworkIdMap,
-  getDestinationAsset,
-  // UTEXO
-  UTEXOWallet,
-  LightningProtocol,
-  OnchainProtocol,
-  UTEXOProtocol,
-  bridgeAPI,
-} from '@utexo/rgb-sdk-rn';
+import { runUTEXOFlow, runUtexoVssFlow, runWalletFlow } from '@/utils/wallet-flow';
 // import wdk from '@tetherto/wdk';
 
 
@@ -116,6 +116,8 @@ export default function HomeScreen() {
   const [runningWalletFlow, setRunningWalletFlow] = useState(false);
   const [utexoFlowResults, setUtexoFlowResults] = useState<any>(null);
   const [runningUTEXOFlow, setRunningUTEXOFlow] = useState(false);
+  const [utexoVssFlowResults, setUtexoVssFlowResults] = useState<any>(null);
+  const [runningUtexoVssFlow, setRunningUtexoVssFlow] = useState(false);
   const [vssFlowResults, setVssFlowResults] = useState<any>(null);
   const [runningVssFlow, setRunningVssFlow] = useState(false);
   const [account, setAccount] = useState<any>(null);
@@ -831,9 +833,29 @@ export default function HomeScreen() {
     }
   }
 
+  async function runUtexoVssFlowTest() {
+    try {
+      setRunningUtexoVssFlow(true);
+      setError(null);
+      setUtexoVssFlowResults({ running: true, steps: [] });
+      const res = await runUtexoVssFlow();
+      setUtexoVssFlowResults({ ...res, running: false });
+    } catch (err: any) {
+      setError(err instanceof Error ? err.message : String(err));
+      setUtexoVssFlowResults((prev: any) => ({
+        ...(prev ?? {}),
+        running: false,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    } finally {
+      setRunningUtexoVssFlow(false);
+    }
+  }
+
   async function runVssFlowTest() {
     const VSS_SERVER_URL = 'https://vss-server.utexo.com/vss';
-    const steps: Array<{ step: string; status: string; result?: any; error?: string }> = [];
+    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
 
     const addStep = (step: string, status: string, result?: any, error?: string) => {
       const existing = steps.findIndex(s => s.step === step);
@@ -1605,6 +1627,131 @@ export default function HomeScreen() {
               <ThemedText style={styles.buttonText}>↺ Re-run UTEXO Flow</ThemedText>
             </TouchableOpacity>
           </>
+        )}
+      </ThemedView>
+
+      {/* ── UTEXO VSS E2E Flow ───────────────────────────────────────── */}
+      <ThemedView style={styles.stepContainer}>
+        <View style={vssStyles.headerRow}>
+          <ThemedText type="subtitle">🔐 UTEXO VSS E2E Flow</ThemedText>
+          {utexoVssFlowResults?.running && (
+            <ActivityIndicator size="small" color="#0891b2" style={{ marginLeft: 8 }} />
+          )}
+          {utexoVssFlowResults && !utexoVssFlowResults.running && (
+            <View style={[vssStyles.statusPill, utexoVssFlowResults.success ? vssStyles.pillSuccess : vssStyles.pillError]}>
+              <ThemedText style={vssStyles.statusPillText}>
+                {utexoVssFlowResults.success ? 'Completed' : 'Failed'}
+              </ThemedText>
+            </View>
+          )}
+        </View>
+
+        {utexoVssFlowResults?.steps?.length > 0 && (() => {
+          const TOTAL = 15;
+          return (
+            <View style={vssStyles.progressRow}>
+              {Array.from({ length: TOTAL }).map((_, i) => {
+                const stepData = utexoVssFlowResults.steps[i];
+                const isSuccess = stepData?.status === 'success';
+                const isRunning = stepData?.status === 'running';
+                const isError = stepData?.status === 'error';
+                return (
+                  <View
+                    key={i}
+                    style={[
+                      vssStyles.progressDot,
+                      isSuccess && vssStyles.dotSuccess,
+                      isRunning && vssStyles.dotRunning,
+                      isError && vssStyles.dotError,
+                    ]}
+                  />
+                );
+              })}
+            </View>
+          );
+        })()}
+
+        {!utexoVssFlowResults && (
+          <View style={vssStyles.idleCard}>
+            <ThemedText style={vssStyles.idleDesc}>
+              Full lifecycle test:{'\n'}
+              Create → Fund → Issue NIA → VSS Backup → Destroy → Restore → Verify
+            </ThemedText>
+            <TouchableOpacity style={[vssStyles.runBtn, { backgroundColor: '#0891b2' }]} onPress={runUtexoVssFlowTest}>
+              <ThemedText style={vssStyles.runBtnText}>▶  Run UTEXO VSS Flow</ThemedText>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {utexoVssFlowResults?.steps?.map((step: any, idx: number) => {
+          const STEP_META: Record<string, { label: string; desc: string }> = {
+            createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet' },
+            getAddress:           { label: 'Get Deposit Address',   desc: 'Derive a receive address' },
+            fundWallet:           { label: 'Fund via Faucet',       desc: 'Send sats from thunderstack faucet' },
+            waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
+            createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
+            issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
+            listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
+            getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
+            vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
+            vssBackupInfo:        { label: 'VSS Backup Info',       desc: 'Verify backup exists on server' },
+            disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet handles' },
+            deleteState:          { label: 'Delete Local State',    desc: 'Prepare restore directory' },
+            restoreFromVss:       { label: 'Restore from VSS',      desc: 'Download & decrypt backup' },
+            verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Check assets & balances match' },
+            cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
+          };
+          const meta = STEP_META[step.step] ?? { label: step.step, desc: '' };
+          const isSuccess = step.status === 'success';
+          const isRunning = step.status === 'running';
+          const isError = step.status === 'error';
+          return (
+            <View key={idx} style={[
+              vssStyles.stepCard,
+              isSuccess && vssStyles.cardSuccess,
+              isRunning && vssStyles.cardRunning,
+              isError && vssStyles.cardError,
+            ]}>
+              <View style={[
+                vssStyles.cardAccent,
+                isSuccess && vssStyles.accentSuccess,
+                isRunning && { backgroundColor: '#0891b2' },
+                isError && vssStyles.accentError,
+              ]} />
+              <View style={vssStyles.cardBody}>
+                <View style={vssStyles.cardTopRow}>
+                  <View style={[
+                    vssStyles.stepBadge,
+                    isSuccess && vssStyles.badgeSuccess,
+                    isRunning && { backgroundColor: '#0891b2' },
+                    isError && vssStyles.badgeError,
+                  ]}>
+                    <ThemedText style={vssStyles.stepBadgeText}>{idx + 1}</ThemedText>
+                  </View>
+                  <ThemedText style={[vssStyles.cardLabel, { flex: 1 }]}>{meta.label}</ThemedText>
+                  {isRunning && <ActivityIndicator size="small" color="#0891b2" />}
+                  {isSuccess && <ThemedText style={vssStyles.iconSuccess}>✓</ThemedText>}
+                  {isError   && <ThemedText style={vssStyles.iconError}>✗</ThemedText>}
+                </View>
+                <ThemedText style={vssStyles.cardDesc}>{meta.desc}</ThemedText>
+                {(step.data || step.error) && (
+                  <View style={vssStyles.cardDetail}>
+                    <ThemedText style={[vssStyles.cardDetailText, isError && { color: '#b91c1c' }]}>
+                      {step.data
+                        ? JSON.stringify(step.data)
+                        : step.error}
+                    </ThemedText>
+                  </View>
+                )}
+              </View>
+            </View>
+          );
+        })}
+
+        {utexoVssFlowResults && !utexoVssFlowResults.running && (
+          <TouchableOpacity style={[vssStyles.rerunBtn, { backgroundColor: '#0e7490' }]} onPress={runUtexoVssFlowTest}>
+            <ThemedText style={vssStyles.runBtnText}>↺  Re-run UTEXO VSS Flow</ThemedText>
+          </TouchableOpacity>
         )}
       </ThemedView>
 
