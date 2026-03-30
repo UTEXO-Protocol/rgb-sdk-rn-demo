@@ -71,6 +71,7 @@ import {
   ValidationError,
   verifyMessage,
   wallet,
+  VssBackupConfig,
   WalletError,
   WalletManager,
 } from '@utexo/rgb-sdk-rn';
@@ -838,7 +839,7 @@ export default function HomeScreen() {
       setRunningUtexoVssFlow(true);
       setError(null);
       setUtexoVssFlowResults({ running: true, steps: [] });
-      const res = await runUtexoVssFlow();
+      const res = await runUtexoVssFlow((progress) => setUtexoVssFlowResults(progress));
       setUtexoVssFlowResults({ ...res, running: false });
     } catch (err: any) {
       setError(err instanceof Error ? err.message : String(err));
@@ -883,13 +884,13 @@ export default function HomeScreen() {
       const storeId = `demo_${keys.masterFingerprint}`;
       addStep('generateKeys', 'success', { masterFingerprint: keys.masterFingerprint });
 
-      const vssConfig = {
+      const vssConfig: VssBackupConfig = {
         serverUrl: VSS_SERVER_URL,
         storeId,
-        signingKeyHex,
+        signingKey: signingKeyHex,
         encryptionEnabled: true,
         autoBackup: false,
-        backupMode: 'Async' as const,
+        backupMode: 'Async',
       };
 
       // Step 2: Initialize wallet
