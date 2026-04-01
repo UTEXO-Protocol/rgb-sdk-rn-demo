@@ -9,47 +9,18 @@ import {
   WalletManager,
   bridgeAPI,
   createWallet,
+  DEFAULT_INDEXER_URLS,
   restoreFromBackup, type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
-import { Platform } from 'react-native';
 
 const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
 
-// Configuration
-// Network endpoint configuration for different platforms:
-// - Android Emulator: use 10.0.2.2 to access host machine's localhost
-// - iOS Simulator: use localhost or 127.0.0.1 (works fine)
-// - Physical Device: use your computer's IP address (e.g., 192.168.1.100:8000)
-//   You can find your IP with: ifconfig (Mac/Linux) or ipconfig (Windows)
-
-// You can override this by setting an environment variable or changing the default
-const getRGBManagerEndpoint = () => {
-
-
-  // Check if there's an override (useful for physical devices)
-  // You can set this in your app config or environment
+const getIndexerEndpoint = (network: keyof typeof DEFAULT_INDEXER_URLS) => {
   const overrideEndpoint = process.env.RGB_ENDPOINT || null;
-  if (overrideEndpoint) {
-    return overrideEndpoint;
-  }
-
-  if (Platform.OS === 'android') {
-    // Android emulator uses 10.0.2.2 to access host machine's localhost
-    // For physical Android device, you'll need to use your computer's IP
-    return "http://10.0.2.2:8000";
-  } else if (Platform.OS === 'ios') {
-    // iOS simulator can use localhost
-    // For physical iOS device, you'll need to use your computer's IP
-    return "http://127.0.0.1:8000";
-  } else {
-    // Web or other platforms
-    return "http://127.0.0.1:8000";
-  }
+  return overrideEndpoint ?? DEFAULT_INDEXER_URLS[network];
 };
-
-const RGB_MANAGER_ENDPOINT = getRGBManagerEndpoint();
 const BITCOIN_NODE_ENDPOINT = "http://18.119.98.232:5000/execute";
 
 /**
@@ -120,9 +91,6 @@ export async function initWallet(vanillaKeychain: any = null) {
   console.log("Keys generated:", keys);
   // return;
 
-  // // Initialize wallet manager
-  // const rgbEndpoint = getRGBManagerEndpoint();
-  // console.log(`Using RGB endpoint: ${rgbEndpoint} (Platform: ${Platform.OS})`);
   const wallet = new WalletManager({
     xpubVan: keys.accountXpubVanilla,
     xpubCol: keys.accountXpubColored,
@@ -596,7 +564,7 @@ export async function runWalletFlow() {
     // ── goOnline (reconnect) ───────────────────────────────────────
     pushStep({ step: 'goOnline', status: 'running' });
     try {
-      await senderWallet.goOnline(RGB_MANAGER_ENDPOINT, true);
+      await senderWallet.goOnline(getIndexerEndpoint('testnet'), true);
       pushStep({ step: 'goOnline', status: 'success' });
     } catch (e: any) {
       pushStep({ step: 'goOnline', status: 'error', error: e.message });
@@ -641,7 +609,7 @@ export async function runUTEXOFlow() {
   try {
     // ── UTEXOWallet: instantiation ──────────────────────────
     pushStep({ step: 'utexoWalletInstantiate', status: 'running' });
-    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC);
+    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: 'testnet' });
     results.instantiation = true;
     pushStep({ step: 'utexoWalletInstantiate', status: 'success' });
 
@@ -805,7 +773,7 @@ const FUND_POLL_TIMEOUT_MS = 90000;
  *   4. Dispose the wallet and delete local state
  *   5. Restore from VSS and verify everything is intact
  */
-export async function runUtexoVssFlow() {
+export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
   console.log('Starting UTEXO VSS E2E Flow');
   console.log('='.repeat(50));
 
@@ -819,6 +787,7 @@ export async function runUtexoVssFlow() {
     } else {
       results.steps.push(entry);
     }
+    onProgress?.({ ...results, steps: [...results.steps], running: true });
   };
 
   let wallet: UTEXOWallet | null = null;
@@ -827,13 +796,19 @@ export async function runUtexoVssFlow() {
   let preBtcBalance: any = null;
   let preAssetBalance: any = null;
   const restoreDir = `${documentDirectory ?? ''}utexo_vss_restore`;
+  const utexoVssNetwork: 'testnet' = 'testnet';
 
   try {
     // ── Step 1: Create & initialise UTEXOWallet ─────────────────────────────
     addStep('createUtexoWallet', 'running');
-    wallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC);
-    await wallet.initialize();
-    addStep('createUtexoWallet', 'success', { network: wallet.getNetwork() });
+    try {
+      wallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
+      await wallet.initialize();
+      addStep('createUtexoWallet', 'success', { network: wallet.getNetwork() });
+    } catch (e: any) {
+      addStep('createUtexoWallet', 'error', undefined, e?.message ?? String(e));
+      throw e;
+    }
 
     // ── Step 2: Get deposit address ──────────────────────────────────────────
     addStep('getAddress', 'running');
@@ -918,7 +893,18 @@ export async function runUtexoVssFlow() {
       const created = await wallet.createUtxos({ upTo: true, num: 5, feeRate: 5 });
       addStep('createUtxos', 'success', { created });
     } catch (e: any) {
-      addStep('createUtxos', 'error', undefined, e?.message ?? String(e));
+      // AllocationsAlreadyAvailable means the wallet already has enough UTXOs —
+      // this is a benign "nothing to do" result when upTo: true is set.
+      const isAlreadyAvailable =
+        e?.code === 'AllocationsAlreadyAvailable' ||
+        String(e?.message ?? e).includes('AllocationsAlreadyAvailable');
+      if (isAlreadyAvailable) {
+        addStep('createUtxos', 'success', { created: 0, note: 'AllocationsAlreadyAvailable' });
+      } else {
+        console.error('[UTEXO VSS] createUtxos failed:', e);
+        const errMsg = e?.message || (e?.code ? `[${e.code}] ${String(e)}` : String(e)) || 'Unknown error';
+        addStep('createUtxos', 'error', undefined, errMsg);
+      }
     }
 
     // ── Step 6: Issue NIA asset ──────────────────────────────────────────────
@@ -970,7 +956,7 @@ export async function runUtexoVssFlow() {
     addStep('vssBackup', 'running');
     let vssConfig: any = null;
     try {
-      vssConfig = wallet.getDefaultVssConfig();
+      vssConfig = await wallet.getDefaultVssConfig();
       const version = await wallet.vssBackup();
       addStep('vssBackup', 'success', {
         version,
@@ -1002,6 +988,10 @@ export async function runUtexoVssFlow() {
     // ── Step 12: Delete local state ──────────────────────────────────────────
     addStep('deleteState', 'running');
     try {
+      // Always delete then recreate so rgb-lib gets a clean target directory.
+      // On subsequent runs the fingerprint subdirectory would already exist,
+      // causing the native restoreFromVss to fail with "path already exists".
+      await FileSystem.deleteAsync(restoreDir, { idempotent: true });
       await FileSystem.makeDirectoryAsync(restoreDir, { intermediates: true });
       addStep('deleteState', 'success', { restoreDir });
     } catch (e: any) {
@@ -1030,7 +1020,7 @@ export async function runUtexoVssFlow() {
     addStep('verifyRestoredWallet', 'running');
     let restoredWallet: UTEXOWallet | null = null;
     try {
-      restoredWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC);
+      restoredWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
       await restoredWallet.initialize();
 
       const [btcBalance, assets, transactions] = await Promise.all([

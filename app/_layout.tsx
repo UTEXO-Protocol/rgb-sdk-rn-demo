@@ -1,5 +1,5 @@
 // MUST be first import - polyfill for crypto.getRandomValues()
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Buffer } from 'buffer';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -14,22 +14,34 @@ import 'path-browserify';
 // Make Buffer available globally
 global.Buffer = Buffer;
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { AppColors } from '@/constants/theme';
+
+// Custom dark theme matching the UTEXO palette
+const UTEXODarkTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    primary: AppColors.primary,
+    background: AppColors.bgBase,
+    card: AppColors.bgCard,
+    text: AppColors.textPrimary,
+    border: AppColors.border,
+    notification: AppColors.primary,
+  },
+};
 
 export const unstable_settings = {
   anchor: '(tabs)',
 };
 
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
-
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <ThemeProvider value={UTEXODarkTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
       </Stack>
-      <StatusBar style="auto" />
+      <StatusBar style="light" />
     </ThemeProvider>
   );
 }

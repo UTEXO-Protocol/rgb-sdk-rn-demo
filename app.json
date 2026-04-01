@@ -28,6 +28,7 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "./plugins/withExcludeX86SimulatorArch",
       "expo-dev-client",
       [
         "expo-build-properties",
