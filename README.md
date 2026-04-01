@@ -16,18 +16,39 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npm run prebuild
    ```
 
+   > This also runs the `withExcludeX86SimulatorArch` config plugin which automatically patches the iOS `Podfile` to exclude `x86_64` simulator architectures. This is required because `bdk-rn`'s `BdkRnFramework.xcframework` only ships `arm64` slices — without this patch the build fails with `ld: library 'bdkffi' not found`.
+
 3. Install iOS dependencies (CocoaPods)
 
    ```bash
-   cd ios && pod install && cd ..
+   cd ios && LANG=en_US.UTF-8 pod install && cd ..
    ```
+
+   > `LANG=en_US.UTF-8` is required to avoid a Ruby/CocoaPods encoding error on some macOS setups.
 
 4. Run the app
 
    ```bash
-   npm run ios
+   # iOS (Release)
+   npm run ios:release
+
+   # Android (Release)
+   npm run android:release
    ```
 
+### Prerequisites
+
+- **iOS**: Xcode installed with at least one iOS Simulator runtime. Accept the Xcode license before first use:
+  ```bash
+  sudo xcodebuild -license accept
+  ```
+- **Android**: Android Studio installed with the Android SDK. Add the following to your shell profile (`~/.zshrc` or `~/.bashrc`):
+  ```bash
+  export ANDROID_HOME=$HOME/Library/Android/sdk
+  export PATH=$PATH:$ANDROID_HOME/platform-tools
+  export PATH=$PATH:$ANDROID_HOME/emulator
+  ```
+  Then reload: `source ~/.zshrc`
 
 In the output, you'll find options to open the app in a
 

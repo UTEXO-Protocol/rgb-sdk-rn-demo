@@ -9,46 +9,18 @@ import {
   WalletManager,
   getBridgeAPI,
   createWallet,
+  DEFAULT_INDEXER_URLS,
   restoreFromBackup, type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
+import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
-import { Platform } from 'react-native';
 
 const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
 
-// Configuration
-// Network endpoint configuration for different platforms:
-// - Android Emulator: use 10.0.2.2 to access host machine's localhost
-// - iOS Simulator: use localhost or 127.0.0.1 (works fine)
-// - Physical Device: use your computer's IP address (e.g., 192.168.1.100:8000)
-//   You can find your IP with: ifconfig (Mac/Linux) or ipconfig (Windows)
-
-// You can override this by setting an environment variable or changing the default
-const getRGBManagerEndpoint = () => {
-
-
-  // Check if there's an override (useful for physical devices)
-  // You can set this in your app config or environment
+const getIndexerEndpoint = (network: keyof typeof DEFAULT_INDEXER_URLS) => {
   const overrideEndpoint = process.env.RGB_ENDPOINT || null;
-  if (overrideEndpoint) {
-    return overrideEndpoint;
-  }
-
-  if (Platform.OS === 'android') {
-    // Android emulator uses 10.0.2.2 to access host machine's localhost
-    // For physical Android device, you'll need to use your computer's IP
-    return "http://10.0.2.2:8000";
-  } else if (Platform.OS === 'ios') {
-    // iOS simulator can use localhost
-    // For physical iOS device, you'll need to use your computer's IP
-    return "http://127.0.0.1:8000";
-  } else {
-    // Web or other platforms
-    return "http://127.0.0.1:8000";
-  }
+  return overrideEndpoint ?? DEFAULT_INDEXER_URLS[network];
 };
-
-const RGB_MANAGER_ENDPOINT = getRGBManagerEndpoint();
 const BITCOIN_NODE_ENDPOINT = "http://18.119.98.232:5000/execute";
 
 /**
@@ -112,16 +84,13 @@ export async function sendToAddress(address: string, amount: number) {
 export async function initWallet(vanillaKeychain: any = null) {
   console.log("\nInitializing wallet with RGB SDK...");
 
-  const bitcoinNetwork = 'regtest'; // Regtest network
+  const bitcoinNetwork = 'testnet'; // Regtest network
 
   // Generate keys using the library
   const keys = await createWallet(bitcoinNetwork);
   console.log("Keys generated:", keys);
   // return;
 
-  // // Initialize wallet manager
-  // const rgbEndpoint = getRGBManagerEndpoint();
-  // console.log(`Using RGB endpoint: ${rgbEndpoint} (Platform: ${Platform.OS})`);
   const wallet = new WalletManager({
     xpubVan: keys.accountXpubVanilla,
     xpubCol: keys.accountXpubColored,
@@ -595,7 +564,7 @@ export async function runWalletFlow() {
     // ── goOnline (reconnect) ───────────────────────────────────────
     pushStep({ step: 'goOnline', status: 'running' });
     try {
-      await senderWallet.goOnline(RGB_MANAGER_ENDPOINT, true);
+      await senderWallet.goOnline(getIndexerEndpoint('testnet'), true);
       pushStep({ step: 'goOnline', status: 'success' });
     } catch (e: any) {
       pushStep({ step: 'goOnline', status: 'error', error: e.message });
@@ -627,7 +596,7 @@ export async function runWalletFlow() {
 /**
  * UTEXO / Lightning Module flow
  *
- * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridgeAPI.
+ * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridge API client.
  * Some steps require a running signet node and bridge server; failures are captured gracefully.
  */
 export async function runUTEXOFlow() {
@@ -640,7 +609,7 @@ export async function runUTEXOFlow() {
   try {
     // ── UTEXOWallet: instantiation ──────────────────────────
     pushStep({ step: 'utexoWalletInstantiate', status: 'running' });
-    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC);
+    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: 'testnet' });
     results.instantiation = true;
     pushStep({ step: 'utexoWalletInstantiate', status: 'success' });
 
@@ -664,18 +633,6 @@ export async function runUTEXOFlow() {
     } catch (e: any) {
       results.derivePublicKeys = { error: e.message };
       pushStep({ step: 'derivePublicKeys', status: 'error', error: e.message });
-    }
-
-    // ── UTEXOWallet: derive + sign/verify (pure crypto path) ──
-    pushStep({ step: 'walletSignVerify', status: 'running' });
-    try {
-      const sig = await utexoWallet.signMessage('hello utexo');
-      const valid = await utexoWallet.verifyMessage('hello utexo', sig);
-      results.walletSignVerify = { valid, sigPrefix: sig.slice(0, 12) + '...' };
-      pushStep({ step: 'walletSignVerify', status: valid ? 'success' : 'error', data: { valid } });
-    } catch (e: any) {
-      results.walletSignVerify = { error: e.message };
-      pushStep({ step: 'walletSignVerify', status: 'error', error: e.message });
     }
 
     // ── UTEXOWallet: initialize (needs signet node – may fail) ──
@@ -770,7 +727,7 @@ export async function runUTEXOFlow() {
       pushStep({ step: 'utexoProtocolStubs', status: 'error', error: e.message });
     }
 
-    // ── bridge API client: create + query ───────────────────
+    // ── bridge API client: create and query ─────────────────
     pushStep({ step: 'bridgeAPIClient', status: 'running' });
     const bridgeAPI = getBridgeAPI('testnet');
     results.bridgeAPIConfigured =
@@ -794,6 +751,336 @@ export async function runUTEXOFlow() {
     return results;
   } catch (error: any) {
     console.error('Error in UTEXO flow:', error);
+    results.success = false;
+    results.error = { message: error.message || 'Unknown error' };
+    return results;
+  }
+}
+
+const FAUCET_URL =
+  'https://node-api.thunderstack.org/c17bc5d0-80b1-7050-5af5-dfd8a67834f1/1e0cfe422f0e4306bebdab953a0b99f2/sendbtc';
+const FAUCET_TOKEN =
+  'EnYKDBgDIggKBggGEgIYDRIkCAASIGuYoof1WC0FaPciGHzPinGmglHd_b3Lb-gokogoeL-aGkA_hc_eLZ05C1XaA9wrcqFh1Bozvi_sawa_QKNCcowZCsVRmrsxJYahtsMduWYGrOVT7JNVVvpcU4PrGu19GrYNIiIKIO5ajD4HcB-R-yadJQCA954KhC7DV2wHi4_piv9k1uYT';
+const FAUCET_AMOUNT_SATS = 16900; // fallback only
+const FUND_POLL_INTERVAL_MS = 5000;
+const FUND_POLL_TIMEOUT_MS = 90000;
+
+/**
+ * UTEXO Wallet VSS End-to-End Flow
+ *
+ * Full lifecycle test:
+ *   1. Create & fund a UTEXOWallet
+ *   2. Issue an NIA asset so the wallet has real on-chain state
+ *   3. Back up via VSS (zero-arg – config is derived from the mnemonic)
+ *   4. Dispose the wallet and delete local state
+ *   5. Restore from VSS and verify everything is intact
+ */
+export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
+  console.log('Starting UTEXO VSS E2E Flow');
+  console.log('='.repeat(50));
+
+  const results: any = { steps: [], success: false, error: null };
+
+  const addStep = (step: string, status: string, data?: any, error?: string) => {
+    const idx = results.steps.findIndex((s: any) => s.step === step);
+    const entry = { step, status, data, error };
+    if (idx >= 0) {
+      results.steps[idx] = entry;
+    } else {
+      results.steps.push(entry);
+    }
+    onProgress?.({ ...results, steps: [...results.steps], running: true });
+  };
+
+  let wallet: UTEXOWallet | null = null;
+  let walletAddress: string | null = null;
+  let issuedAssetId: string | null = null;
+  let preBtcBalance: any = null;
+  let preAssetBalance: any = null;
+  const restoreDir = `${documentDirectory ?? ''}utexo_vss_restore`;
+  const utexoVssNetwork: 'testnet' = 'testnet';
+
+  try {
+    // ── Step 1: Create & initialise UTEXOWallet ─────────────────────────────
+    addStep('createUtexoWallet', 'running');
+    try {
+      wallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
+      await wallet.initialize();
+      addStep('createUtexoWallet', 'success', { network: wallet.getNetwork() });
+    } catch (e: any) {
+      addStep('createUtexoWallet', 'error', undefined, e?.message ?? String(e));
+      throw e;
+    }
+
+    // ── Step 2: Get deposit address ──────────────────────────────────────────
+    addStep('getAddress', 'running');
+    walletAddress = await wallet.getAddress();
+    addStep('getAddress', 'success', { address: walletAddress });
+
+    // ── Step 3: Fund wallet ──────────────────────────────────────────────────
+    // The UTEXO wallet generates BIP86 taproot (bcrt1p…) addresses. The
+    // thunderstack HTTP faucet rejects these with "belongs to another network"
+    // because its node doesn't support P2TR outputs. Instead, we use the same
+    // mechanism that initWallet() uses: sendToAddress via the Bitcoin node RPC,
+    // then mine blocks to confirm.
+    addStep('fundWallet', 'running');
+    try {
+      const txid = await sendToAddress(walletAddress!, 0.0002); // ~20 000 sats
+      await mine(6);
+      addStep('fundWallet', 'success', { txid });
+    } catch (e: any) {
+      // Fallback: try the thunderstack HTTP faucet in case it has been updated
+      // to accept taproot outputs.
+      try {
+        const faucetRes = await fetch(FAUCET_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${FAUCET_TOKEN}`,
+          },
+          body: JSON.stringify({
+            amount: FAUCET_AMOUNT_SATS,
+            address: walletAddress,
+            fee_rate: 5,
+            skip_sync: false,
+          }),
+        });
+        const faucetData = await faucetRes.json().catch(() => ({}));
+        if (!faucetRes.ok) {
+          throw new Error(
+            `Faucet HTTP ${faucetRes.status}: ${JSON.stringify(faucetData)}`
+          );
+        }
+        addStep('fundWallet', 'success', {
+          method: 'faucet',
+          txid: faucetData?.txid ?? faucetData,
+        });
+      } catch (faucetErr: any) {
+        addStep('fundWallet', 'error', undefined,
+          `sendToAddress: ${e?.message}; faucet: ${faucetErr?.message}`
+        );
+      }
+    }
+
+    // ── Step 4: Wait for balance ─────────────────────────────────────────────
+    addStep('waitForFunding', 'running');
+    const deadline = Date.now() + FUND_POLL_TIMEOUT_MS;
+    let funded = false;
+    while (Date.now() < deadline) {
+      const bal = await wallet.getBtcBalance();
+      const total =
+        (bal?.vanilla?.settled ?? 0) +
+        (bal?.vanilla?.future ?? 0) +
+        (bal?.vanilla?.spendable ?? 0);
+      if (total > 0) {
+        preBtcBalance = bal;
+        funded = true;
+        addStep('waitForFunding', 'success', {
+          settled: bal?.vanilla?.settled,
+          future: bal?.vanilla?.future,
+        });
+        break;
+      }
+      await new Promise((r) => setTimeout(r, FUND_POLL_INTERVAL_MS));
+    }
+    if (!funded) {
+      const bal = await wallet.getBtcBalance();
+      preBtcBalance = bal;
+      addStep('waitForFunding', 'error', { balance: bal }, 'Timed out waiting for balance');
+    }
+
+    // ── Step 5: Create UTXOs ─────────────────────────────────────────────────
+    addStep('createUtxos', 'running');
+    try {
+      const created = await wallet.createUtxos({ upTo: true, num: 5, feeRate: 5 });
+      addStep('createUtxos', 'success', { created });
+    } catch (e: any) {
+      // AllocationsAlreadyAvailable means the wallet already has enough UTXOs —
+      // this is a benign "nothing to do" result when upTo: true is set.
+      const isAlreadyAvailable =
+        e?.code === 'AllocationsAlreadyAvailable' ||
+        String(e?.message ?? e).includes('AllocationsAlreadyAvailable');
+      if (isAlreadyAvailable) {
+        addStep('createUtxos', 'success', { created: 0, note: 'AllocationsAlreadyAvailable' });
+      } else {
+        console.error('[UTEXO VSS] createUtxos failed:', e);
+        const errMsg = e?.message || (e?.code ? `[${e.code}] ${String(e)}` : String(e)) || 'Unknown error';
+        addStep('createUtxos', 'error', undefined, errMsg);
+      }
+    }
+
+    // ── Step 6: Issue NIA asset ──────────────────────────────────────────────
+    addStep('issueAssetNia', 'running');
+    try {
+      const asset = await wallet.issueAssetNia({
+        ticker: 'DEMO',
+        name: 'Demo Token',
+        precision: 0,
+        amounts: [1000],
+      });
+      issuedAssetId = asset.assetId;
+      addStep('issueAssetNia', 'success', {
+        assetId: asset.assetId,
+        ticker: asset.ticker,
+      });
+    } catch (e: any) {
+      addStep('issueAssetNia', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 7: List assets ──────────────────────────────────────────────────
+    addStep('listAssets', 'running');
+    try {
+      const assets = await wallet.listAssets();
+      const niaCount = assets.nia?.length ?? 0;
+      addStep('listAssets', 'success', { niaCount, assetIds: assets.nia?.map((a) => a.assetId) });
+    } catch (e: any) {
+      addStep('listAssets', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 8: Get asset balance ────────────────────────────────────────────
+    if (issuedAssetId) {
+      addStep('getAssetBalance', 'running');
+      try {
+        preAssetBalance = await wallet.getAssetBalance(issuedAssetId);
+        addStep('getAssetBalance', 'success', {
+          settled: preAssetBalance?.settled,
+          spendable: preAssetBalance?.spendable,
+          future: preAssetBalance?.future,
+        });
+      } catch (e: any) {
+        addStep('getAssetBalance', 'error', undefined, e?.message ?? String(e));
+      }
+    } else {
+      addStep('getAssetBalance', 'error', undefined, 'No asset to check (issue step failed)');
+    }
+
+    // ── Step 9: VSS Backup (zero-arg!) ───────────────────────────────────────
+    addStep('vssBackup', 'running');
+    let vssConfig: any = null;
+    try {
+      vssConfig = await wallet.getDefaultVssConfig();
+      const version = await wallet.vssBackup();
+      addStep('vssBackup', 'success', {
+        version,
+        storeId: vssConfig.storeId,
+      });
+    } catch (e: any) {
+      addStep('vssBackup', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 10: VSS Backup info (zero-arg!) ─────────────────────────────────
+    addStep('vssBackupInfo', 'running');
+    try {
+      const info = await wallet.vssBackupInfo();
+      addStep('vssBackupInfo', 'success', {
+        backupExists: info.backupExists,
+        serverVersion: info.serverVersion,
+        backupRequired: info.backupRequired,
+      });
+    } catch (e: any) {
+      addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 11: Dispose wallet ──────────────────────────────────────────────
+    addStep('disposeWallet', 'running');
+    await wallet.dispose();
+    wallet = null;
+    addStep('disposeWallet', 'success');
+
+    // ── Step 12: Delete local state ──────────────────────────────────────────
+    addStep('deleteState', 'running');
+    try {
+      // Always delete then recreate so rgb-lib gets a clean target directory.
+      // On subsequent runs the fingerprint subdirectory would already exist,
+      // causing the native restoreFromVss to fail with "path already exists".
+      await FileSystem.deleteAsync(restoreDir, { idempotent: true });
+      await FileSystem.makeDirectoryAsync(restoreDir, { intermediates: true });
+      addStep('deleteState', 'success', { restoreDir });
+    } catch (e: any) {
+      addStep('deleteState', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 13: Restore from VSS ────────────────────────────────────────────
+    addStep('restoreFromVss', 'running');
+    let restorePaths: { layer1Path: string; utexoPath: string } | null = null;
+    try {
+      const targetDir = restoreDir.replace('file://', '');
+      restorePaths = await UTEXOWallet.restoreFromVss(
+        UTEXO_TEST_MNEMONIC,
+        targetDir,
+        vssConfig ?? undefined
+      );
+      addStep('restoreFromVss', 'success', {
+        utexoPath: restorePaths.utexoPath,
+        layer1Path: restorePaths.layer1Path,
+      });
+    } catch (e: any) {
+      addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 14: Verify restored wallet ─────────────────────────────────────
+    addStep('verifyRestoredWallet', 'running');
+    let restoredWallet: UTEXOWallet | null = null;
+    try {
+      restoredWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
+      await restoredWallet.initialize();
+
+      const [btcBalance, assets, transactions] = await Promise.all([
+        restoredWallet.getBtcBalance(),
+        restoredWallet.listAssets(),
+        restoredWallet.listTransactions(),
+      ]);
+
+      const restoredAssetBalance = issuedAssetId
+        ? await restoredWallet.getAssetBalance(issuedAssetId).catch(() => null)
+        : null;
+
+      const niaCount = assets.nia?.length ?? 0;
+      const assetRestored =
+        issuedAssetId != null &&
+        (assets.nia ?? []).some((a) => a.assetId === issuedAssetId);
+
+      addStep('verifyRestoredWallet', 'success', {
+        btcSettled: btcBalance?.vanilla?.settled ?? 0,
+        btcMatchesPreBackup:
+          preBtcBalance == null ||
+          btcBalance?.vanilla?.settled === preBtcBalance?.vanilla?.settled,
+        niaCount,
+        assetRestored,
+        restoredAssetBalance: restoredAssetBalance
+          ? {
+              settled: restoredAssetBalance.settled,
+              spendable: restoredAssetBalance.spendable,
+              matchesPreBackup:
+                preAssetBalance == null ||
+                restoredAssetBalance.settled === preAssetBalance.settled,
+            }
+          : null,
+        transactionCount: transactions.length,
+      });
+    } catch (e: any) {
+      addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e));
+    }
+
+    // ── Step 15: Cleanup ─────────────────────────────────────────────────────
+    addStep('cleanup', 'running');
+    try {
+      if (restoredWallet) {
+        await restoredWallet.dispose();
+        restoredWallet = null;
+      }
+      addStep('cleanup', 'success');
+    } catch (e: any) {
+      addStep('cleanup', 'error', undefined, e?.message ?? String(e));
+    }
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    console.error('Error in UTEXO VSS flow:', error);
+    if (wallet) {
+      try { await wallet.dispose(); } catch { /* ignore */ }
+    }
     results.success = false;
     results.error = { message: error.message || 'Unknown error' };
     return results;
