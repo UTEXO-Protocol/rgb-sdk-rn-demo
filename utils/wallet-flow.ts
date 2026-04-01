@@ -7,7 +7,7 @@ import {
   LightningProtocol, OnchainProtocol, UTEXOProtocol,
   UTEXOWallet,
   WalletManager,
-  bridgeAPI,
+  getBridgeAPI,
   createWallet,
   DEFAULT_INDEXER_URLS,
   restoreFromBackup, type InvoiceData,
@@ -596,7 +596,7 @@ export async function runWalletFlow() {
 /**
  * UTEXO / Lightning Module flow
  *
- * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridgeAPI.
+ * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridge API client.
  * Some steps require a running signet node and bridge server; failures are captured gracefully.
  */
 export async function runUTEXOFlow() {
@@ -727,11 +727,13 @@ export async function runUTEXOFlow() {
       pushStep({ step: 'utexoProtocolStubs', status: 'error', error: e.message });
     }
 
-    // ── bridgeAPI: configure and query ──────────────────────
-    pushStep({ step: 'bridgeAPIConfig', status: 'running' });
-    bridgeAPI.setBaseUrl('http://localhost:8081/');
-    results.bridgeAPIConfigured = true;
-    pushStep({ step: 'bridgeAPIConfig', status: 'success' });
+    // ── bridge API client: create and query ─────────────────
+    pushStep({ step: 'bridgeAPIClient', status: 'running' });
+    const bridgeAPI = getBridgeAPI('testnet');
+    results.bridgeAPIConfigured =
+      bridgeAPI !== null &&
+      typeof (bridgeAPI as any).getTransferByMainnetInvoice === 'function';
+    pushStep({ step: 'bridgeAPIClient', status: results.bridgeAPIConfigured ? 'success' : 'error' });
 
     pushStep({ step: 'bridgeAPIQuery', status: 'running' });
     try {
