@@ -28,7 +28,7 @@
     "@react-navigation/elements": "^2.6.3",
     "@react-navigation/native": "^7.1.8",
     "@tetherto/wdk": "^1.0.0-beta.4",
-    "@utexo/rgb-sdk-core": "file:../rgb-sdk-core",
+    "@utexo/rgb-sdk-core": "1.0.0-beta.1",
     "@utexo/rgb-sdk-rn": "file:../rgb-sdk-rn",
     "bare-node-runtime": "^1.1.4",
     "buffer": "^6.0.3",
