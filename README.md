@@ -7,10 +7,20 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 1. Install dependencies
 
    ```bash
-   npm install
+   npm install --install-strategy=nested
    ```
 
-2. Generate native folders (Android and iOS)
+   > `@utexo/rgb-sdk-rn` expects a nested dependency path during its install script, so this project uses npm's nested install strategy.
+
+2. Build `uniffi-bindgen-react-native` manually
+
+   ```bash
+   cd node_modules/uniffi-bindgen-react-native && npx tsc --project tsconfig.json && cd ../..
+   ```
+
+   > This generates `typescript/dist/index.js`, which is required by Metro when resolving `uniffi-bindgen-react-native`.
+
+3. Generate native folders (Android and iOS)
 
    ```bash
    npm run prebuild
@@ -18,7 +28,7 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 
    > This also runs the `withExcludeX86SimulatorArch` config plugin which automatically patches the iOS `Podfile` to exclude `x86_64` simulator architectures. This is required because `bdk-rn`'s `BdkRnFramework.xcframework` only ships `arm64` slices — without this patch the build fails with `ld: library 'bdkffi' not found`.
 
-3. Install iOS dependencies (CocoaPods)
+4. Install iOS dependencies (CocoaPods)
 
    ```bash
    cd ios && LANG=en_US.UTF-8 pod install && cd ..
@@ -26,7 +36,7 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 
    > `LANG=en_US.UTF-8` is required to avoid a Ruby/CocoaPods encoding error on some macOS setups.
 
-4. Run the app
+5. Run the app
 
    ```bash
    # iOS (Release)
