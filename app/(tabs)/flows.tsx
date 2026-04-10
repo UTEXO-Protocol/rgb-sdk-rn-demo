@@ -417,6 +417,18 @@ const TESTNET_WALLET_STEP_META: Record<string, { label: string; desc: string }> 
   dispose:            { label: 'Dispose',                desc: 'Release native wallet handle' },
 };
 
+const REUSE_ADDRESS_FLOW_STEP_META: Record<string, { label: string; desc: string }> = {
+  generateKeys:              { label: 'Generate Keys',              desc: 'deriveKeys for Bitcoin testnet' },
+  createWalletReuse:         { label: 'Create WalletManager',        desc: 'reuseAddresses: true + DEFAULT_INDEXER_URLS.testnet' },
+  initialize:                { label: 'Initialize (go online)',     desc: 'Connect Electrum indexer' },
+  syncWallet:                { label: 'Sync Wallet',                desc: 'syncWallet()' },
+  refreshWallet:             { label: 'Refresh Wallet',             desc: 'refreshWallet()' },
+  addressPairBeforeRotate:   { label: 'Two getAddress (before)',    desc: 'reuse mode: both calls must return the same address' },
+  rotateAddresses:           { label: 'Rotate vanilla + colored', desc: 'rotateVanillaAddress() then rotateColoredAddress()' },
+  addressPairAfterRotate:    { label: 'Two getAddress (after)',     desc: 'reuse mode: pair still matches; value may differ from before' },
+  dispose:                   { label: 'Dispose',                    desc: 'Release native wallet handle' },
+};
+
 const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
   initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
@@ -442,6 +454,9 @@ export default function FlowsScreen() {
 
   const [testnetWalletFlowResults, setTestnetWalletFlowResults] = useState<FlowResults>(null);
   const [runningTestnetWalletFlow, setRunningTestnetWalletFlow] = useState(false);
+
+  const [reuseAddressFlowResults, setReuseAddressFlowResults] = useState<FlowResults>(null);
+  const [runningReuseAddressFlow, setRunningReuseAddressFlow] = useState(false);
 
   // ── On-mount SDK tests ────────────────────────────────────────────────────
 
@@ -852,6 +867,123 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleReuseAddressFlow() {
+    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
+
+    const addStep = (step: string, status: string, result?: any, error?: string) => {
+      const i = steps.findIndex((s) => s.step === step);
+      const entry = { step, status, result, error };
+      if (i >= 0) steps[i] = entry;
+      else steps.push(entry);
+      setReuseAddressFlowResults({ running: true, steps: [...steps] });
+    };
+
+    let wm: WalletManager | null = null;
+    let addressBeforeRotate: string | null = null;
+    try {
+      setRunningReuseAddressFlow(true);
+      setReuseAddressFlowResults({ running: true, steps: [] });
+
+      addStep('generateKeys', 'running');
+      const keys = await generateKeys('testnet');
+      addStep('generateKeys', 'success', {
+        masterFingerprint: keys.masterFingerprint,
+        xpubPrefix: keys.xpub.slice(0, 4),
+      });
+
+      addStep('createWalletReuse', 'running');
+      const indexerUrl = DEFAULT_INDEXER_URLS['testnet'];
+      wm = createWalletManager({
+        network: 'testnet',
+        xpubVan: keys.accountXpubVanilla,
+        xpubCol: keys.accountXpubColored,
+        mnemonic: keys.mnemonic,
+        masterFingerprint: keys.masterFingerprint,
+        indexerUrl,
+        reuseAddresses: true,
+      });
+      addStep('createWalletReuse', 'success', {
+        network: wm.getNetwork(),
+        reuseAddresses: true,
+        indexerUrl,
+      });
+
+      addStep('initialize', 'running');
+      await wm.initialize();
+      addStep('initialize', 'success', { online: true });
+
+      addStep('syncWallet', 'running');
+      await wm.syncWallet();
+      addStep('syncWallet', 'success');
+
+      addStep('refreshWallet', 'running');
+      await wm.refreshWallet();
+      addStep('refreshWallet', 'success');
+
+      addStep('addressPairBeforeRotate', 'running');
+      const b1 = await wm.getAddress();
+      const b2 = await wm.getAddress();
+      addressBeforeRotate = b1;
+      if (b1 !== b2) {
+        addStep(
+          'addressPairBeforeRotate',
+          'error',
+          { first: b1, second: b2, match: false },
+          'Expected identical addresses with reuseAddresses before rotation'
+        );
+      } else {
+        addStep('addressPairBeforeRotate', 'success', { address: b1, match: true });
+      }
+
+      addStep('rotateAddresses', 'running');
+      const nextVanilla = await wm.rotateVanillaAddress();
+      const nextColored = await wm.rotateColoredAddress();
+      addStep('rotateAddresses', 'success', { nextVanilla, nextColored });
+
+      addStep('addressPairAfterRotate', 'running');
+      const a1 = await wm.getAddress();
+      const a2 = await wm.getAddress();
+      if (a1 !== a2) {
+        addStep(
+          'addressPairAfterRotate',
+          'error',
+          { first: a1, second: a2, match: false },
+          'Expected identical addresses with reuseAddresses after rotation'
+        );
+      } else {
+        addStep('addressPairAfterRotate', 'success', {
+          address: a1,
+          match: true,
+          changedFromBefore: addressBeforeRotate != null && a1 !== addressBeforeRotate,
+        });
+      }
+
+      addStep('dispose', 'running');
+      await wm.dispose();
+      wm = null;
+      addStep('dispose', 'success');
+
+      const failed = steps.some((s) => s.status === 'error');
+      setReuseAddressFlowResults({ running: false, success: !failed, steps });
+    } catch (e: any) {
+      if (wm) {
+        try {
+          await wm.dispose();
+        } catch {
+          /* ignore */
+        }
+      }
+      setReuseAddressFlowResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps,
+      });
+    } finally {
+      setRunningReuseAddressFlow(false);
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -900,6 +1032,32 @@ export default function FlowsScreen() {
                 label={meta.label}
                 desc={meta.desc}
                 accentColor="#0D9488"
+                isLast={idx === arr.length - 1}
+              />
+            );
+          })}
+        </FlowCard>
+
+        {/* ── Testnet WalletManager: reuseAddresses + rotation ─────────────── */}
+        <FlowCard
+          title="Reuse address + rotation"
+          subtitle="WalletManager · reuseAddresses"
+          description="Init with reuseAddresses: true → two getAddress() (must match) → rotateVanilla + rotateColored → two getAddress() again (must match; may differ from pre-rotate)."
+          accentColor="#0F766E"
+          totalSteps={9}
+          results={reuseAddressFlowResults}
+          running={runningReuseAddressFlow}
+          onRun={handleReuseAddressFlow}>
+          {reuseAddressFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = REUSE_ADDRESS_FLOW_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#0F766E"
                 isLast={idx === arr.length - 1}
               />
             );

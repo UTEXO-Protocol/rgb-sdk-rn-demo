@@ -4,13 +4,15 @@
  */
 
 import {
-  LightningProtocol, OnchainProtocol, UTEXOProtocol,
-  UTEXOWallet,
-  WalletManager,
-  getBridgeAPI,
   createWallet,
   DEFAULT_INDEXER_URLS,
-  restoreFromBackup, type InvoiceData,
+  getBridgeAPI,
+  LightningProtocol, OnchainProtocol,
+  restoreFromBackup,
+  UTEXOProtocol,
+  UTEXOWallet,
+  WalletManager,
+  type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
@@ -350,6 +352,36 @@ export async function runWalletFlow() {
     const notDisposed = !senderWallet.isDisposed();
     flowResults.walletGetters = { xpubs, network, notDisposed };
     pushStep({ step: 'walletGetters', status: 'success', data: { network, notDisposed } });
+
+    // ── address rotation ──────────────────────────────────────────
+    pushStep({ step: 'addressRotation', status: 'running' });
+    try {
+      // Get current vanilla (BTC) address without rotating the derivation index
+ 
+      // Explicitly advance to the next vanilla and colored addresses
+      const nextVanilla = await senderWallet.rotateVanillaAddress();
+      const nextColored = await senderWallet.rotateColoredAddress();
+
+      // With reuseAddresses: true the same address is returned on every getAddress() call
+      const reuseWallet = new WalletManager({
+        xpubVan: senderKeys.accountXpubVanilla,
+        xpubCol: senderKeys.accountXpubColored,
+        masterFingerprint: senderKeys.masterFingerprint,
+        mnemonic: senderKeys.mnemonic,
+        network: 'testnet',
+        reuseAddresses: true,
+      });
+      await reuseWallet.initialize();
+      const addrA = await reuseWallet.getAddress();
+      const addrB = await reuseWallet.getAddress();
+      const addressReused = addrA === addrB;
+      await reuseWallet.dispose();
+
+      flowResults.addressRotation = { nextVanilla, nextColored, addressReused };
+      pushStep({ step: 'addressRotation', status: 'success', data: { vanillaAddr, nextVanilla, nextColored, addressReused } });
+    } catch (e: any) {
+      pushStep({ step: 'addressRotation', status: 'error', error: e.message });
+    }
 
     // ── estimateFeeRate ────────────────────────────────────────────
     pushStep({ step: 'estimateFeeRate', status: 'running' });
