@@ -25,6 +25,7 @@ import {
   ConflictError,
   createWalletManager,
   CryptoError,
+  DEFAULT_INDEXER_URLS,
   DEFAULT_API_TIMEOUT,
   DEFAULT_LOG_LEVEL,
   DEFAULT_MAX_RETRIES,
@@ -405,6 +406,17 @@ const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
 };
 
+const TESTNET_WALLET_STEP_META: Record<string, { label: string; desc: string }> = {
+  generateKeys:       { label: 'Generate Keys',          desc: 'deriveKeys for Bitcoin testnet' },
+  createWalletManager: { label: 'Create WalletManager',   desc: 'testnet + DEFAULT_INDEXER_URLS.testnet' },
+  initialize:         { label: 'Initialize (go online)', desc: 'Connect Electrum indexer; wallet syncs' },
+  syncWallet:         { label: 'Sync Wallet',            desc: 'syncWallet() — pull chain / indexer state' },
+  refreshWallet:      { label: 'Refresh Wallet',         desc: 'refreshWallet() — update RGB state' },
+  getAddress:         { label: 'Get Deposit Address',    desc: 'Fresh receive address' },
+  getBtcBalance:      { label: 'Get BTC Balance',        desc: 'Vanilla + colored settled sats' },
+  dispose:            { label: 'Dispose',                desc: 'Release native wallet handle' },
+};
+
 const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
   initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
@@ -427,6 +439,9 @@ export default function FlowsScreen() {
 
   const [vssFlowResults, setVssFlowResults] = useState<FlowResults>(null);
   const [runningVssFlow, setRunningVssFlow] = useState(false);
+
+  const [testnetWalletFlowResults, setTestnetWalletFlowResults] = useState<FlowResults>(null);
+  const [runningTestnetWalletFlow, setRunningTestnetWalletFlow] = useState(false);
 
   // ── On-mount SDK tests ────────────────────────────────────────────────────
 
@@ -749,6 +764,94 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleTestnetWalletFlow() {
+    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
+
+    const addStep = (step: string, status: string, result?: any, error?: string) => {
+      const i = steps.findIndex((s) => s.step === step);
+      const entry = { step, status, result, error };
+      if (i >= 0) steps[i] = entry;
+      else steps.push(entry);
+      setTestnetWalletFlowResults({ running: true, steps: [...steps] });
+    };
+
+    let wm: WalletManager | null = null;
+    try {
+      setRunningTestnetWalletFlow(true);
+      setTestnetWalletFlowResults({ running: true, steps: [] });
+
+      addStep('generateKeys', 'running');
+      const keys = await generateKeys('testnet');
+      addStep('generateKeys', 'success', {
+        masterFingerprint: keys.masterFingerprint,
+        xpubPrefix: keys.xpub.slice(0, 4),
+      });
+
+      addStep('createWalletManager', 'running');
+      const indexerUrl = DEFAULT_INDEXER_URLS['testnet'];
+      wm = createWalletManager({
+        network: 'testnet',
+        xpubVan: keys.accountXpubVanilla,
+        xpubCol: keys.accountXpubColored,
+        mnemonic: keys.mnemonic,
+        masterFingerprint: keys.masterFingerprint,
+        indexerUrl,
+      });
+      addStep('createWalletManager', 'success', {
+        network: wm.getNetwork(),
+        indexerUrl,
+      });
+
+      addStep('initialize', 'running');
+      await wm.initialize();
+      addStep('initialize', 'success', { online: true });
+
+      addStep('syncWallet', 'running');
+      await wm.syncWallet();
+      addStep('syncWallet', 'success');
+
+      addStep('refreshWallet', 'running');
+      await wm.refreshWallet();
+      addStep('refreshWallet', 'success');
+
+      addStep('getAddress', 'running');
+      const address = await wm.getAddress();
+      addStep('getAddress', 'success', { address });
+
+      addStep('getBtcBalance', 'running');
+      const balance = await wm.getBtcBalance();
+      addStep('getBtcBalance', 'success', {
+        vanillaSettled: balance.vanilla?.settled ?? 0,
+        vanillaSpendable: balance.vanilla?.spendable ?? 0,
+        coloredSettled: balance.colored?.settled ?? 0,
+        coloredSpendable: balance.colored?.spendable ?? 0,
+      });
+
+      addStep('dispose', 'running');
+      await wm.dispose();
+      wm = null;
+      addStep('dispose', 'success');
+
+      setTestnetWalletFlowResults({ running: false, success: true, steps });
+    } catch (e: any) {
+      if (wm) {
+        try {
+          await wm.dispose();
+        } catch {
+          /* ignore */
+        }
+      }
+      setTestnetWalletFlowResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps,
+      });
+    } finally {
+      setRunningTestnetWalletFlow(false);
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -776,6 +879,32 @@ export default function FlowsScreen() {
 
         {/* SDK Tests */}
         <TestSummaryCard results={testResults} loading={testLoading} />
+
+        {/* ── Testnet WalletManager (sync + address + balance) ─────────────── */}
+        <FlowCard
+          title="Testnet Wallet"
+          subtitle="Iris Electrum · testnet"
+          description="Live path: generateKeys(testnet) → WalletManager(testnet + DEFAULT_INDEXER_URLS) → initialize → sync → refresh → address → BTC balance → dispose."
+          accentColor="#0D9488"
+          totalSteps={8}
+          results={testnetWalletFlowResults}
+          running={runningTestnetWalletFlow}
+          onRun={handleTestnetWalletFlow}>
+          {testnetWalletFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = TESTNET_WALLET_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#0D9488"
+                isLast={idx === arr.length - 1}
+              />
+            );
+          })}
+        </FlowCard>
 
         {/* ── UTEXO VSS E2E Flow ────────────────────────────────────────── */}
         <FlowCard
