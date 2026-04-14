@@ -395,6 +395,7 @@ const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
   createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
   issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
+  sendIssuedAssetToReceiver: { label: 'Witness Send to Receiver', desc: 'Init receiver, witness invoice, send asset, then timed refreshes' },
   listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
   getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
   vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
@@ -1070,7 +1071,7 @@ export default function FlowsScreen() {
           subtitle="Create → Backup → Restore"
           description="Full lifecycle: create wallet → fund → issue NIA → VSS backup → destroy → restore → verify."
           accentColor="#0891B2"
-          totalSteps={15}
+          totalSteps={16}
           results={utexoVssFlowResults}
           running={runningUtexoVssFlow}
           onRun={handleUtexoVssFlow}>

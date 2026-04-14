@@ -959,7 +959,119 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('issueAssetNia', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 7: List assets ──────────────────────────────────────────────────
+    // ── Step 7: Send issued asset to receiver (witness invoice) ─────────────
+    if (issuedAssetId) {
+      addStep('sendIssuedAssetToReceiver', 'running');
+      let receiverWallet: UTEXOWallet | null = null;
+      try {
+        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: start', { issuedAssetId });
+        const receiverKeys = await createWallet(utexoVssNetwork);
+        receiverWallet = new UTEXOWallet(receiverKeys.mnemonic, { network: utexoVssNetwork });
+        await receiverWallet.initialize();
+        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: receiver initialized');
+
+        const witness = await receiverWallet.witnessReceive({
+          amount: 5,
+        });
+        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: witness invoice length', witness?.invoice?.length ?? 0);
+
+        // Witness invoices require sender-side witness parameters (see runWalletFlow witness send).
+        const sendResult = await wallet.send({
+          assetId: issuedAssetId,
+          amount: 5,
+          invoice: witness.invoice,
+          minConfirmations: 1,
+          witnessData: {
+            amountSat: 1000,
+            blinding: 0,
+          },
+        });
+        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: send ok', sendResult?.txid ?? sendResult);
+
+        const refreshRounds: Array<{
+          round: number;
+          senderSettled?: number;
+          receiverSettled?: number;
+        }> = [];
+        const refreshIntervalMs = 40_000;
+        const refreshCount = 3;
+        let finalSenderBal: any = null;
+        let finalReceiverBal: any = null;
+
+        for (let i = 0; i < refreshCount; i += 1) {
+          await wallet.refreshWallet();
+          await receiverWallet.refreshWallet();
+
+          const [senderBal, receiverBal] = await Promise.all([
+            wallet.getAssetBalance(issuedAssetId).catch(() => null),
+            receiverWallet.getAssetBalance(issuedAssetId).catch(() => null),
+          ]);
+          finalSenderBal = senderBal;
+          finalReceiverBal = receiverBal;
+
+          refreshRounds.push({
+            round: i + 1,
+            senderSettled: senderBal?.settled,
+            receiverSettled: receiverBal?.settled,
+          });
+
+          if (i < refreshCount - 1) {
+            await new Promise((r) => setTimeout(r, refreshIntervalMs));
+          }
+        }
+
+        addStep('sendIssuedAssetToReceiver', 'success', {
+          receiverAddress: await receiverWallet.getAddress(),
+          witnessInvoice: witness.invoice,
+          sendTxid: sendResult?.txid ?? sendResult,
+          refreshIntervalMs,
+          refreshRounds,
+          senderAssetBalance: finalSenderBal
+            ? {
+                settled: finalSenderBal.settled,
+                spendable: finalSenderBal.spendable,
+                future: finalSenderBal.future,
+              }
+            : null,
+          receiverAssetBalance: finalReceiverBal
+            ? {
+                settled: finalReceiverBal.settled,
+                spendable: finalReceiverBal.spendable,
+                future: finalReceiverBal.future,
+              }
+            : null,
+        });
+        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: success', { refreshRounds });
+      } catch (e: any) {
+        const errMsg =
+          e?.message ??
+          (typeof e === 'string' ? e : JSON.stringify(e, Object.getOwnPropertyNames(e)));
+        const errDetail = [
+          `issuedAssetId=${issuedAssetId}`,
+          errMsg,
+          e?.code ? `code=${e.code}` : null,
+          e?.stack ? `stack=${e.stack}` : null,
+        ]
+          .filter(Boolean)
+          .join(' | ');
+        console.error('[UTEXO VSS] sendIssuedAssetToReceiver: FAILED', errDetail, e);
+        // Do not pass `data` on error — Flows StepCard prefers detail over step.error.
+        addStep('sendIssuedAssetToReceiver', 'error', undefined, errDetail);
+      } finally {
+        if (receiverWallet) {
+          try {
+            await receiverWallet.dispose();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } else {
+      console.warn('[UTEXO VSS] sendIssuedAssetToReceiver: skipped — no issuedAssetId');
+      addStep('sendIssuedAssetToReceiver', 'error', undefined, 'No issued asset to send');
+    }
+
+    // ── Step 8: List assets ──────────────────────────────────────────────────
     addStep('listAssets', 'running');
     try {
       const assets = await wallet.listAssets();
@@ -969,7 +1081,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('listAssets', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 8: Get asset balance ────────────────────────────────────────────
+    // ── Step 9: Get asset balance ────────────────────────────────────────────
     if (issuedAssetId) {
       addStep('getAssetBalance', 'running');
       try {
@@ -986,7 +1098,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('getAssetBalance', 'error', undefined, 'No asset to check (issue step failed)');
     }
 
-    // ── Step 9: VSS Backup (zero-arg!) ───────────────────────────────────────
+    // ── Step 10: VSS Backup (zero-arg!) ──────────────────────────────────────
     addStep('vssBackup', 'running');
     let vssConfig: any = null;
     try {
@@ -1000,7 +1112,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('vssBackup', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 10: VSS Backup info (zero-arg!) ─────────────────────────────────
+    // ── Step 11: VSS Backup info (zero-arg!) ─────────────────────────────────
     addStep('vssBackupInfo', 'running');
     try {
       const info = await wallet.vssBackupInfo();
@@ -1013,13 +1125,13 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 11: Dispose wallet ──────────────────────────────────────────────
+    // ── Step 12: Dispose wallet ──────────────────────────────────────────────
     addStep('disposeWallet', 'running');
     await wallet.dispose();
     wallet = null;
     addStep('disposeWallet', 'success');
 
-    // ── Step 12: Delete local state ──────────────────────────────────────────
+    // ── Step 13: Delete local state ──────────────────────────────────────────
     addStep('deleteState', 'running');
     try {
       // Always delete then recreate so rgb-lib gets a clean target directory.
@@ -1032,7 +1144,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('deleteState', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 13: Restore from VSS ────────────────────────────────────────────
+    // ── Step 14: Restore from VSS ────────────────────────────────────────────
     addStep('restoreFromVss', 'running');
     let restorePaths: { layer1Path: string; utexoPath: string } | null = null;
     try {
@@ -1050,7 +1162,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 14: Verify restored wallet ─────────────────────────────────────
+    // ── Step 15: Verify restored wallet ─────────────────────────────────────
     addStep('verifyRestoredWallet', 'running');
     let restoredWallet: UTEXOWallet | null = null;
     try {
@@ -1094,7 +1206,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
       addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e));
     }
 
-    // ── Step 15: Cleanup ─────────────────────────────────────────────────────
+    // ── Step 16: Cleanup ─────────────────────────────────────────────────────
     addStep('cleanup', 'running');
     try {
       if (restoredWallet) {
