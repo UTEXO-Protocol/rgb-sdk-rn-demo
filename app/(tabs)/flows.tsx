@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -12,75 +12,42 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
-  accountXpubsFromMnemonic,
   BadRequestError,
-  BIP32_VERSIONS,
-  bridgeAPI,
-  COIN_BITCOIN_MAINNET,
-  COIN_BITCOIN_TESTNET,
-  COIN_RGB_MAINNET,
-  COIN_RGB_TESTNET,
   ConfigurationError,
-  configureLogging,
   ConflictError,
   createWalletManager,
   CryptoError,
   DEFAULT_INDEXER_URLS,
-  DEFAULT_API_TIMEOUT,
-  DEFAULT_LOG_LEVEL,
-  DEFAULT_MAX_RETRIES,
-  DEFAULT_NETWORK,
-  DERIVATION_ACCOUNT,
-  DERIVATION_PURPOSE,
   deriveKeysFromMnemonic,
-  deriveKeysFromMnemonicOrSeed,
-  deriveKeysFromSeed,
-  deriveKeysFromXpriv,
-  fromUnitsNumber,
   generateKeys,
-  getDestinationAsset,
-  getXprivFromMnemonic,
-  getXpubFromXpriv,
-  KEYCHAIN_BTC,
-  KEYCHAIN_RGB,
   LightningProtocol,
-  logger,
-  LogLevel,
-  NETWORK_MAP,
   NetworkError,
   normalizeNetwork,
   NotFoundError,
   OnchainProtocol,
   restoreFromVss,
-  restoreKeys,
   RgbNodeError,
   SDKError,
   signMessage,
   signPsbt,
   signPsbtFromSeed,
   signPsbtSync,
-  toUnitsNumber,
-  utexoNetworkIdMap,
-  utexoNetworkMap,
-  UTEXOProtocol,
   UTEXOWallet,
   validateBase64,
   validateHex,
   validateMnemonic,
   validateNetwork,
   validatePsbt,
-  validateRequired,
-  validateString,
   ValidationError,
   verifyMessage,
   VssBackupConfig,
   wallet,
   WalletError,
-  WalletManager,
+  WalletManager
 } from '@utexo/rgb-sdk-rn';
 
-import { runUtexoVssFlow } from '@/utils/wallet-flow';
 import { AppColors } from '@/constants/theme';
+import { runRlnPlaygroundFlow, runUtexoVssFlow } from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
 
@@ -127,6 +94,7 @@ function StepCard({
   desc,
   accentColor,
   isLast,
+  deferErrorDisplay = false,
 }: {
   idx: number;
   step: { status: string; data?: any; error?: string; result?: any };
@@ -134,10 +102,12 @@ function StepCard({
   desc: string;
   accentColor: string;
   isLast: boolean;
+  deferErrorDisplay?: boolean;
 }) {
   const isSuccess = step.status === 'success';
   const isRunning = step.status === 'running';
   const isError = step.status === 'error';
+  const showErrorState = isError && !deferErrorDisplay;
 
   const detail = step.data ?? step.result;
 
@@ -145,7 +115,7 @@ function StepCard({
     ? AppColors.success
     : isRunning
     ? accentColor
-    : isError
+    : showErrorState
     ? AppColors.error
     : AppColors.textTertiary;
 
@@ -153,7 +123,7 @@ function StepCard({
     ? AppColors.successBg
     : isRunning
     ? accentColor + '18'
-    : isError
+    : showErrorState
     ? AppColors.errorBg
     : AppColors.bgCardElevated;
 
@@ -166,7 +136,7 @@ function StepCard({
             <ActivityIndicator size={12} color={accentColor} />
           ) : isSuccess ? (
             <Text style={[sStyles.circleText, { color: AppColors.success }]}>✓</Text>
-          ) : isError ? (
+          ) : showErrorState ? (
             <Text style={[sStyles.circleText, { color: AppColors.error }]}>✗</Text>
           ) : (
             <Text style={[sStyles.circleText, { color: AppColors.textTertiary }]}>{idx + 1}</Text>
@@ -183,7 +153,7 @@ function StepCard({
           <Text style={[
             sStyles.stepLabel,
             isSuccess && { color: AppColors.textPrimary },
-            isError && { color: AppColors.error },
+            showErrorState && { color: AppColors.error },
             isRunning && { color: accentColor },
           ]}>
             {label}
@@ -193,7 +163,7 @@ function StepCard({
               <Text style={[sStyles.statusTagText, { color: accentColor }]}>running</Text>
             </View>
           )}
-          {isError && (
+          {showErrorState && (
             <View style={[sStyles.statusTag, { backgroundColor: AppColors.errorBg, borderColor: AppColors.errorBorder }]}>
               <Text style={[sStyles.statusTagText, { color: AppColors.error }]}>failed</Text>
             </View>
@@ -201,8 +171,8 @@ function StepCard({
         </View>
         <Text style={sStyles.stepDesc}>{desc}</Text>
         {(detail || step.error) && (
-          <View style={[sStyles.codeBox, isError && { borderColor: AppColors.errorBorder, backgroundColor: AppColors.errorBg }]}>
-            <Text style={[sStyles.codeText, isError && { color: '#FCA5A5' }]}>
+          <View style={[sStyles.codeBox, showErrorState && { borderColor: AppColors.errorBorder, backgroundColor: AppColors.errorBg }]}>
+            <Text style={[sStyles.codeText, showErrorState && { color: '#FCA5A5' }]}>
               {detail ? formatDetail(detail) : step.error}
             </Text>
           </View>
@@ -240,11 +210,19 @@ function FlowCard({
   const hasResults = results !== null;
   const success = results?.success;
   const steps = results?.steps ?? [];
+  const effectiveRunning = running || results?.running === true;
   const doneCount = steps.filter((s: any) => s.status === 'success').length;
   const total = totalSteps ?? steps.length;
+  const borderColor = !hasResults
+    ? AppColors.border
+    : effectiveRunning
+    ? AppColors.border
+    : success
+    ? AppColors.successBorder
+    : AppColors.errorBorder;
 
   return (
-    <View style={[fStyles.card, { borderColor: hasResults ? (success ? AppColors.successBorder : AppColors.errorBorder) : AppColors.border }]}>
+    <View style={[fStyles.card, { borderColor }]}>
       {/* Card header */}
       <View style={[fStyles.cardHeader, { borderBottomColor: AppColors.border }]}>
         <View style={[fStyles.cardAccentBar, { backgroundColor: accentColor }]} />
@@ -252,8 +230,8 @@ function FlowCard({
           <View style={fStyles.cardTitleRow}>
             <Text style={fStyles.cardTitle}>{title}</Text>
             {subtitle && <Text style={fStyles.cardSubtitle}>{subtitle}</Text>}
-            {running && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
-            {hasResults && !running && (
+            {effectiveRunning && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
+            {hasResults && !effectiveRunning && (
               <View style={[fStyles.statusPill, { backgroundColor: success ? AppColors.successBg : AppColors.errorBg, borderColor: success ? AppColors.successBorder : AppColors.errorBorder }]}>
                 <Text style={[fStyles.statusText, { color: success ? AppColors.success : AppColors.error }]}>
                   {success ? 'Passed' : 'Failed'}
@@ -277,7 +255,9 @@ function FlowCard({
               : s.status === 'running'
               ? accentColor
               : s.status === 'error'
-              ? AppColors.error
+              ? effectiveRunning
+                ? AppColors.border
+                : AppColors.error
               : AppColors.border;
             return (
               <View key={i} style={[fStyles.dot, { backgroundColor: dotColor }]}>
@@ -292,7 +272,7 @@ function FlowCard({
       )}
 
       {/* Idle state */}
-      {!hasResults && !running && (
+      {!hasResults && !effectiveRunning && (
         <View style={fStyles.idleBody}>
           <TouchableOpacity
             style={[fStyles.runBtn, { backgroundColor: accentColor }]}
@@ -314,7 +294,7 @@ function FlowCard({
       {extra}
 
       {/* Re-run button */}
-      {hasResults && !running && (
+      {hasResults && !effectiveRunning && (
         <TouchableOpacity
           style={[fStyles.rerunBtn, { borderColor: accentColor }]}
           onPress={onRun}
@@ -441,6 +421,17 @@ const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
 };
 
+const RLN_PLAYGROUND_STEP_META: Record<string, { label: string; desc: string }> = {
+  createSender: { label: 'Create Sender', desc: 'Initialize WalletManager in RLN mode' },
+  senderAddressBalance: { label: 'Sender Address/BTC', desc: 'Read address and current BTC balance' },
+  fundSender: { label: 'Fund Sender', desc: 'Send BTC to sender and mine confirmations' },
+  createUtxos: { label: 'Create UTXOs', desc: 'Prepare spendable UTXOs before issuance' },
+  issueAssetNia: { label: 'Issue NIA', desc: 'Issue a small test asset for playground cycles' },
+  createReceiver: { label: 'Create Receiver', desc: 'Initialize second WalletManager in RLN mode' },
+  onchainCycle: { label: 'Onchain Request Cycle', desc: 'Run onchain receive/status through RLN adapter' },
+  lightningCycle: { label: 'Lightning Request Cycle', desc: 'Run lightning invoice/status through RLN adapter' },
+};
+
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
@@ -458,6 +449,9 @@ export default function FlowsScreen() {
 
   const [reuseAddressFlowResults, setReuseAddressFlowResults] = useState<FlowResults>(null);
   const [runningReuseAddressFlow, setRunningReuseAddressFlow] = useState(false);
+  const [rlnPlaygroundResults, setRlnPlaygroundResults] = useState<FlowResults>(null);
+  const [runningRlnPlaygroundFlow, setRunningRlnPlaygroundFlow] = useState(false);
+  const rlnPlaygroundInFlightRef = useRef(false);
 
   // ── On-mount SDK tests ────────────────────────────────────────────────────
 
@@ -985,6 +979,29 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleRlnPlaygroundFlow() {
+    if (rlnPlaygroundInFlightRef.current) {
+      return;
+    }
+    rlnPlaygroundInFlightRef.current = true;
+    try {
+      setRunningRlnPlaygroundFlow(true);
+      setRlnPlaygroundResults({ running: true, steps: [] });
+      const r = await runRlnPlaygroundFlow();
+      setRlnPlaygroundResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnPlaygroundResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnPlaygroundFlow(false);
+      rlnPlaygroundInFlightRef.current = false;
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -1034,6 +1051,7 @@ export default function FlowsScreen() {
                 desc={meta.desc}
                 accentColor="#0D9488"
                 isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningTestnetWalletFlow}
               />
             );
           })}
@@ -1060,6 +1078,33 @@ export default function FlowsScreen() {
                 desc={meta.desc}
                 accentColor="#0F766E"
                 isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningReuseAddressFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="RLN Playground"
+          subtitle="RN binding scaffold"
+          description="Scaffold flow for rgb-lightning-node integration: RLN-mode managers + onchain/lightning request cycles through shared protocol types."
+          accentColor="#1D4ED8"
+          totalSteps={8}
+          results={rlnPlaygroundResults}
+          running={runningRlnPlaygroundFlow}
+          onRun={handleRlnPlaygroundFlow}>
+          {rlnPlaygroundResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_PLAYGROUND_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1D4ED8"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnPlaygroundFlow}
               />
             );
           })}
@@ -1078,7 +1123,7 @@ export default function FlowsScreen() {
           {utexoVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
             const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#0891B2" isLast={idx === arr.length - 1} />
+              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#0891B2" isLast={idx === arr.length - 1} deferErrorDisplay={runningUtexoVssFlow} />
             );
           })}
         </FlowCard>
@@ -1102,7 +1147,7 @@ export default function FlowsScreen() {
           {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
             const meta = VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#7C3AED" isLast={idx === arr.length - 1} />
+              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#7C3AED" isLast={idx === arr.length - 1} deferErrorDisplay={runningVssFlow} />
             );
           })}
         </FlowCard>

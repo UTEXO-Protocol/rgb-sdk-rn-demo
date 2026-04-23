@@ -46,6 +46,10 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npm run android:release
    ```
 
+## Playground flows
+
+The `Flows` tab includes an `RLN Playground` card used for the rgb-lightning-node rollout in React Native. It runs a scaffolded flow with `bindingMode: 'rln'` and reports explicit `not implemented yet` errors for protocol methods that are not wired yet.
+
 ### Prerequisites
 
 - **iOS**: Xcode installed with at least one iOS Simulator runtime. Accept the Xcode license before first use:
