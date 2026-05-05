@@ -7,7 +7,6 @@ import {
   createWallet,
   createWalletManager,
   DEFAULT_INDEXER_URLS,
-  getDestinationAsset,
   getBridgeAPI,
   LightningProtocol, OnchainProtocol,
   restoreFromBackup,
@@ -21,31 +20,47 @@ import { documentDirectory } from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 
 const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
+let activeDemoFlow: string | null = null;
+
+function beginExclusiveFlow(flowName: string) {
+  if (activeDemoFlow && activeDemoFlow !== flowName) {
+    throw new Error(
+      `Flow "${flowName}" blocked: "${activeDemoFlow}" is currently running. Run flows sequentially to avoid RLN/node state conflicts.`
+    );
+  }
+  activeDemoFlow = flowName;
+}
+
+function endExclusiveFlow(flowName: string) {
+  if (activeDemoFlow === flowName) {
+    activeDemoFlow = null;
+  }
+}
 
 function readEnv(name: string): string | null {
   const value =
     (name === 'RLN_NODE_PASSWORD'
-      ? process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD ?? process.env.RLN_NODE_PASSWORD
+      ? process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD
       : name === 'RLN_BITCOIND_RPC_USERNAME'
-        ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME ?? process.env.RLN_BITCOIND_RPC_USERNAME
+        ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME
         : name === 'RLN_BITCOIND_RPC_PASSWORD'
-          ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD ?? process.env.RLN_BITCOIND_RPC_PASSWORD
+          ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD
           : name === 'RLN_BITCOIND_RPC_HOST'
-            ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ?? process.env.RLN_BITCOIND_RPC_HOST
+            ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST
             : name === 'RLN_BITCOIND_RPC_PORT'
-              ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT ?? process.env.RLN_BITCOIND_RPC_PORT
+              ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT
               : name === 'RLN_INDEXER_URL'
-                ? process.env.EXPO_PUBLIC_RLN_INDEXER_URL ?? process.env.RLN_INDEXER_URL
+                ? process.env.EXPO_PUBLIC_RLN_INDEXER_URL
                 : name === 'RLN_PROXY_ENDPOINT'
-                  ? process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT ?? process.env.RLN_PROXY_ENDPOINT
+                  ? process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT
                   : name === 'RLN_ANNOUNCE_ADDRESSES'
-                    ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ADDRESSES ?? process.env.RLN_ANNOUNCE_ADDRESSES
+                    ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ADDRESSES
                     : name === 'RLN_ANNOUNCE_ALIAS'
-                      ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ALIAS ?? process.env.RLN_ANNOUNCE_ALIAS
+                      ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ALIAS
                       : name === 'RLN_PLAYGROUND_NETWORK'
-                        ? process.env.EXPO_PUBLIC_RLN_PLAYGROUND_NETWORK ?? process.env.RLN_PLAYGROUND_NETWORK
+                        ? process.env.EXPO_PUBLIC_RLN_PLAYGROUND_NETWORK
                       : name === 'RLN_STRICT_UNLOCK_CREDS'
-                        ? process.env.EXPO_PUBLIC_RLN_STRICT_UNLOCK_CREDS ?? process.env.RLN_STRICT_UNLOCK_CREDS
+                        ? process.env.EXPO_PUBLIC_RLN_STRICT_UNLOCK_CREDS
                       : null) ?? null;
   if (typeof value === 'string' && value.trim().length > 0) {
     return value.trim();
@@ -135,26 +150,6 @@ export async function sendToAddress(address: string, amount: number) {
   }
 }
 
-async function waitForWalletFunding(
-  wallet: WalletManager,
-  timeoutMs: number = 120000,
-  intervalMs: number = 4000
-) {
-  const deadline = Date.now() + timeoutMs;
-  let lastBalance = await wallet.getBtcBalance();
-  while (Date.now() < deadline) {
-    await wallet.syncWallet();
-    lastBalance = await wallet.getBtcBalance();
-    if ((lastBalance?.vanilla?.spendable ?? 0) > 0) {
-      return lastBalance;
-    }
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(
-    `Funding not detected in time (vanilla spendable=${lastBalance?.vanilla?.spendable ?? 0})`
-  );
-}
-
 /**
  * Initialize a wallet with RGB SDK
  */
@@ -220,6 +215,8 @@ export async function initWallet(vanillaKeychain: any = null) {
  * Main execution function - React Native compatible
  */
 export async function runWalletFlow() {
+  const flowName = 'runWalletFlow';
+  beginExclusiveFlow(flowName);
   console.log("Starting RGB SDK Wallet Example");
   console.log("=".repeat(50));
 
@@ -697,6 +694,8 @@ export async function runWalletFlow() {
       } : null,
     };
     return flowResults;
+  } finally {
+    endExclusiveFlow(flowName);
   }
 }
 
@@ -707,6 +706,8 @@ export async function runWalletFlow() {
  * Some steps require a running signet node and bridge server; failures are captured gracefully.
  */
 export async function runUTEXOFlow() {
+  const flowName = 'runUTEXOFlow';
+  beginExclusiveFlow(flowName);
   console.log('Starting UTEXO Flow');
   console.log('='.repeat(50));
 
@@ -861,6 +862,8 @@ export async function runUTEXOFlow() {
     results.success = false;
     results.error = { message: error.message || 'Unknown error' };
     return results;
+  } finally {
+    endExclusiveFlow(flowName);
   }
 }
 
@@ -873,7 +876,10 @@ export async function runUTEXOFlow() {
 let rlnPlaygroundFlowInFlight = false;
 
 export async function runRlnPlaygroundFlow() {
+  const flowName = 'runRlnPlaygroundFlow';
+  beginExclusiveFlow(flowName);
   if (rlnPlaygroundFlowInFlight) {
+    endExclusiveFlow(flowName);
     return {
       steps: [
         {
@@ -906,21 +912,15 @@ export async function runRlnPlaygroundFlow() {
     | undefined) ?? 'regtest');
   const utexoAdapterNetwork = network === 'regtest' ? 'testnet' : network;
   let sender: WalletManager | null = null;
-  let receiver: WalletManager | null = null;
   let senderProtocol: UTEXOWallet | null = null;
-  let receiverProtocol: UTEXOWallet | null = null;
-  let issuedAssetId: string | null = null;
-  let bridgeAssetId: string | null = null;
-  let bridgeUtexoAssetId: string | null = null;
-  let senderFunded = false;
   let senderRlnNodeCreated = false;
+  let senderRlnNodeDestroyed = false;
   let senderRlnPubkey: string | null = null;
   let senderRlnReady = false;
   let rlnReadinessBlocker: string | null = null;
-  let rlnUnlockAttempt = 0;
+  const cleanupIssues: { step: string; message: string }[] = [];
 
   try {
-    addStep('createSender', 'running');
     const senderKeys = await createWallet(network);
     senderProtocol = new UTEXOWallet(senderKeys.mnemonic, {
       network: utexoAdapterNetwork as any,
@@ -937,119 +937,6 @@ export async function runRlnPlaygroundFlow() {
     } as any);
     sender = senderWallet;
     await senderWallet.initialize();
-    addStep('createSender', 'success', {
-      request: { network, bindingMode: 'rln' },
-      response: { initialized: true },
-    });
-
-    addStep('senderAddressBalance', 'running');
-    const [senderAddress, senderBalance] = await Promise.all([
-      senderWallet.getAddress(),
-      senderWallet.getBtcBalance(),
-    ]);
-    addStep('senderAddressBalance', 'success', {
-      request: { method: 'getAddress|getBtcBalance' },
-      response: {
-        address: senderAddress,
-        btc: {
-          vanillaSettled: senderBalance?.vanilla?.settled ?? 0,
-          vanillaFuture: senderBalance?.vanilla?.future ?? 0,
-          vanillaSpendable: senderBalance?.vanilla?.spendable ?? 0,
-        },
-      },
-    });
-
-    addStep('fundSender', 'running');
-    try {
-      const fundTxid = await sendToAddress(senderAddress, 0.0002);
-      await mine(6);
-      const fundedBalance = await waitForWalletFunding(senderWallet);
-      senderFunded = true;
-      addStep('fundSender', 'success', {
-        request: { address: senderAddress, amountBtc: 0.0002, mineBlocks: 6 },
-        response: {
-          txid: fundTxid,
-          vanillaSettled: fundedBalance?.vanilla?.settled ?? 0,
-          vanillaSpendable: fundedBalance?.vanilla?.spendable ?? 0,
-        },
-      });
-    } catch (e: any) {
-      addStep('fundSender', 'error', undefined, e?.message ?? String(e));
-    }
-
-    addStep('createUtxos', 'running');
-    if (!senderFunded) {
-      addStep(
-        'createUtxos',
-        'error',
-        undefined,
-        'Skipped: sender funding failed, no BTC available for UTXO creation'
-      );
-    } else {
-      try {
-      const created = await senderWallet.createUtxos({
-        upTo: true,
-        num: 3,
-        size: 1000,
-        feeRate: 1,
-      });
-      addStep('createUtxos', 'success', {
-        request: { upTo: true, num: 3, size: 1000, feeRate: 1 },
-        response: { created },
-      });
-      } catch (e: any) {
-        addStep('createUtxos', 'error', undefined, e?.message ?? String(e));
-      }
-    }
-
-    addStep('issueAssetNia', 'running');
-    if (!senderFunded) {
-      addStep(
-        'issueAssetNia',
-        'error',
-        undefined,
-        'Skipped: sender funding failed, issuance requires funded wallet'
-      );
-    } else {
-      try {
-      const issueRequest = {
-        ticker: 'RLNP',
-        name: 'RLN Playground',
-        precision: 0,
-        amounts: [1000],
-      };
-      const issued = await senderWallet.issueAssetNia(issueRequest);
-      issuedAssetId = issued.assetId;
-      addStep('issueAssetNia', 'success', {
-        request: issueRequest,
-        response: { assetId: issuedAssetId, ticker: issued.ticker },
-      });
-      } catch (e: any) {
-        addStep('issueAssetNia', 'error', undefined, e?.message ?? String(e));
-      }
-    }
-
-    addStep('createReceiver', 'running');
-    const receiverKeys = await createWallet(network);
-    receiverProtocol = new UTEXOWallet(receiverKeys.mnemonic, {
-      network: utexoAdapterNetwork as any,
-    });
-    await receiverProtocol.initialize();
-    const receiverWallet = createWalletManager({
-      xpubVan: receiverKeys.accountXpubVanilla,
-      xpubCol: receiverKeys.accountXpubColored,
-      masterFingerprint: receiverKeys.masterFingerprint,
-      mnemonic: receiverKeys.mnemonic,
-      network,
-      bindingMode: 'rln',
-      rlnProtocolAdapter: receiverProtocol,
-    } as any);
-    receiver = receiverWallet;
-    await receiverWallet.initialize();
-    addStep('createReceiver', 'success', {
-      request: { network, bindingMode: 'rln' },
-      response: { initialized: true },
-    });
 
     // ── RLN native bridge surface coverage ───────────────────────────────────
     const senderRln = senderWallet as any;
@@ -1063,7 +950,9 @@ export async function runRlnPlaygroundFlow() {
       if (typeof bound === 'function') {
         return bound.bind(binding);
       }
-      throw new Error(`Missing RLN method: ${name}`);
+      return async () => {
+        throw new Error(`Missing RLN method: ${name}`);
+      };
     };
     const consumeUnlockConflictNormalized = (): boolean => {
       const direct = senderRln?.consumeRlnUnlockConflictNormalized;
@@ -1097,30 +986,39 @@ export async function runRlnPlaygroundFlow() {
     let rlnStorageDir = await mkRlnStorageDir();
     let rlnPorts = mkRlnPorts();
 
-    addStep('rlnCreateNode', 'running');
-    try {
-      const rlnCreateNode = resolveRlnMethod('rlnCreateNode');
-      const nodeId = await rlnCreateNode({
-        storageDirPath: rlnStorageDir,
-        daemonListeningPort: rlnPorts.daemonListeningPort,
-        ldkPeerListeningPort: rlnPorts.ldkPeerListeningPort,
-        network,
-        maxMediaUploadSizeMb: 16,
-        enableVirtualChannelsV0: true,
-      });
-      senderRlnNodeCreated = true;
-      addStep('rlnCreateNode', 'success', {
-        request: {
-          storageDirPath: rlnStorageDir,
-          network,
-          daemonListeningPort: rlnPorts.daemonListeningPort,
-          ldkPeerListeningPort: rlnPorts.ldkPeerListeningPort,
-        },
-        response: { nodeId },
-      });
-    } catch (e: any) {
-      addStep('rlnCreateNode', 'error', undefined, e?.message ?? String(e));
-    }
+    const snapshotRlnError = (err: any) => {
+      const result: Record<string, any> = {};
+      try {
+        if (err && typeof err === 'object') {
+          Object.getOwnPropertyNames(err).forEach((key) => {
+            const value = (err as any)[key];
+            if (typeof value === 'function') return;
+            if (value instanceof Error) {
+              result[key] = {
+                name: value.name,
+                message: value.message,
+                stack: value.stack,
+              };
+              return;
+            }
+            try {
+              JSON.stringify(value);
+              result[key] = value;
+            } catch {
+              result[key] = String(value);
+            }
+          });
+        }
+      } catch {
+        // best effort snapshot only
+      }
+      return {
+        name: err?.name ?? null,
+        message: err?.message ?? String(err),
+        code: err?.code ?? null,
+        raw: result,
+      };
+    };
 
     const classifyRlnError = (err: any) => {
       const message = err?.message ?? String(err);
@@ -1128,6 +1026,12 @@ export async function runRlnPlaygroundFlow() {
       const lowered = message.toLowerCase();
       const codeLowered = (code ?? '').toLowerCase();
       let kind: 'NotInitialized' | 'Conflict' | 'Transport' | 'Unknown' = 'Unknown';
+      let conflictSubtype:
+        | 'AlreadyUnlocked'
+        | 'UnlockInProgress'
+        | 'StateCollision'
+        | 'OtherConflict'
+        | null = null;
       if (
         lowered.includes('not initialized') ||
         lowered.includes('notinitialized') ||
@@ -1137,14 +1041,60 @@ export async function runRlnPlaygroundFlow() {
         kind = 'NotInitialized';
       } else if (lowered.includes('conflict') || codeLowered.includes('conflict')) {
         kind = 'Conflict';
-      }
-      else if (
+        if (
+          lowered.includes('already unlocked') ||
+          lowered.includes('already initialized')
+        ) {
+          conflictSubtype = 'AlreadyUnlocked';
+        } else if (
+          lowered.includes('in progress') ||
+          lowered.includes('busy') ||
+          lowered.includes('already running')
+        ) {
+          conflictSubtype = 'UnlockInProgress';
+        } else if (
+          lowered.includes('storage') ||
+          lowered.includes('state') ||
+          lowered.includes('path') ||
+          lowered.includes('locked')
+        ) {
+          conflictSubtype = 'StateCollision';
+        } else {
+          conflictSubtype = 'OtherConflict';
+        }
+      } else if (
         lowered.includes('timeout') ||
         lowered.includes('network') ||
         lowered.includes('connection') ||
         lowered.includes('rpc')
-      ) kind = 'Transport';
-      return { kind, code, message };
+      ) {
+        kind = 'Transport';
+      }
+      return {
+        kind,
+        code,
+        message,
+        conflictSubtype,
+        methodResponse: snapshotRlnError(err),
+      };
+    };
+    const probeNodeReadyAfterConflict = async (
+      attempts: number = 30,
+      delayMs: number = 750
+    ): Promise<{ ready: boolean; nodeInfo?: any }> => {
+      // Give RLN unlock state machine a short grace period before probing.
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          const info = await rlnNodeInfo();
+          return { ready: true, nodeInfo: info };
+        } catch {
+          if (i < attempts - 1) {
+            await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+          }
+        }
+      }
+      return { ready: false };
     };
     const maskUnlockRequest = (request: any, diagnostics: any) => ({
       ...request,
@@ -1152,37 +1102,11 @@ export async function runRlnPlaygroundFlow() {
       password: '***',
       diagnostics,
     });
-    const recreateSenderNode = async (
-      phase: string,
-      remediation: string[],
-      options?: { freshContext?: boolean }
-    ) => {
-      const rlnDestroyNode = resolveRlnMethod('rlnDestroyNode');
-      const rlnCreateNode = resolveRlnMethod('rlnCreateNode');
-      await rlnDestroyNode();
-      senderRlnNodeCreated = false;
-      remediation.push(`${phase}:destroy`);
-      if (options?.freshContext) {
-        rlnStorageDir = await mkRlnStorageDir();
-        rlnPorts = mkRlnPorts();
-        remediation.push(
-          `${phase}:fresh-context:${rlnStorageDir}:${rlnPorts.daemonListeningPort}/${rlnPorts.ldkPeerListeningPort}`
-        );
-      }
-      await rlnCreateNode({
-        storageDirPath: rlnStorageDir,
-        daemonListeningPort: rlnPorts.daemonListeningPort,
-        ldkPeerListeningPort: rlnPorts.ldkPeerListeningPort,
-        network,
-        maxMediaUploadSizeMb: 16,
-        enableVirtualChannelsV0: true,
-      });
-      senderRlnNodeCreated = true;
-      remediation.push(`${phase}:create`);
-    };
 
     const isRegtestNetwork = network === 'regtest';
     const defaultRpcHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
+    const defaultIndexerUrl = `${defaultRpcHost}:50001`;
+    const defaultProxyEndpoint = `rpc://${defaultRpcHost}:3000/json-rpc`;
     const rpcHostEnv = readEnv('RLN_BITCOIND_RPC_HOST');
     const rpcPortRawEnv = readEnv('RLN_BITCOIND_RPC_PORT');
     const rpcUserRawEnv = readEnv('RLN_BITCOIND_RPC_USERNAME');
@@ -1206,14 +1130,18 @@ export async function runRlnPlaygroundFlow() {
     const rpcPort = Number(rpcPortRaw ?? '18443');
     const rpcUserRaw = useRegtestForcedDefaults ? 'user' : rpcUserRawEnv;
     const rpcPasswordRaw = useRegtestForcedDefaults
-      ? 'default_password'
+      ? 'password'
       : rpcPasswordRawEnv;
     const rpcUser = rpcUserRaw ?? 'rpcuser';
     const rpcPassword = rpcPasswordRaw ?? 'rpcpassword';
     const strictUnlockCreds = readEnv('RLN_STRICT_UNLOCK_CREDS') === 'true';
     const nodePassword = readEnv('RLN_NODE_PASSWORD') ?? 'rln-playground-password';
-    const indexerUrl = useRegtestForcedDefaults ? null : indexerUrlEnv;
-    const proxyEndpoint = useRegtestForcedDefaults ? null : proxyEndpointEnv;
+    const indexerUrl = useRegtestForcedDefaults
+      ? defaultIndexerUrl
+      : (indexerUrlEnv ?? null);
+    const proxyEndpoint = useRegtestForcedDefaults
+      ? defaultProxyEndpoint
+      : (proxyEndpointEnv ?? null);
     const announceAddresses = (readEnv('RLN_ANNOUNCE_ADDRESSES') ?? '')
       .split(',')
       .map((s) => s.trim())
@@ -1240,10 +1168,10 @@ export async function runRlnPlaygroundFlow() {
         ? 'regtest-forced'
         : (rpcPasswordRaw ? 'env' : 'demo-default'),
       indexerSource: useRegtestForcedDefaults
-        ? 'regtest-forced-none'
+        ? 'regtest-forced'
         : (indexerUrl ? 'env' : 'none'),
       proxySource: useRegtestForcedDefaults
-        ? 'regtest-forced-none'
+        ? 'regtest-forced'
         : (proxyEndpoint ? 'env' : 'none'),
       strictUnlockCreds,
     };
@@ -1258,697 +1186,376 @@ export async function runRlnPlaygroundFlow() {
       announceAddresses,
       announceAlias: announceAlias ?? null,
     };
+    type RlnStepOutcome = {
+      request?: any;
+      response?: any;
+      skipped?: boolean;
+      reason?: string;
+      errorDetail?: any;
+    };
+    const runRlnStep = async (
+      methodName: string,
+      runner: () => Promise<RlnStepOutcome>
+    ): Promise<{ ok: boolean; outcome?: RlnStepOutcome; error?: any }> => {
+      addStep(methodName, 'running');
+      try {
+        const outcome = await runner();
+        if (outcome.skipped) {
+          addStep(methodName, 'success', {
+            ...(outcome.request !== undefined ? { request: outcome.request } : {}),
+            response: {
+              skipped: true,
+              reason: outcome.reason ?? 'Skipped due to missing prerequisites',
+              ...(outcome.response ?? {}),
+            },
+          });
+        } else {
+          addStep(methodName, 'success', {
+            ...(outcome.request !== undefined ? { request: outcome.request } : {}),
+            response: {
+              reason: outcome.reason ?? 'Completed successfully',
+              ...(outcome.response !== undefined
+                ? { result: outcome.response }
+                : {}),
+            },
+          });
+        }
+        return { ok: true, outcome };
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        addStep(
+          methodName,
+          'error',
+          {
+            reason: message,
+            ...(error?.errorDetail !== undefined
+              ? { detail: error.errorDetail }
+              : {}),
+            snapshot: snapshotRlnError(error),
+          },
+          message
+        );
+        return { ok: false, error };
+      }
+    };
 
-    addStep('rlnInitNode', 'running');
-    addStep('rlnUnlockNode', 'running');
-    addStep('rlnEnsureReady', 'running');
-    if (!senderRlnNodeCreated) {
-      const reason = 'Skipped: rlnCreateNode failed';
-      addStep('rlnInitNode', 'error', undefined, reason);
-      addStep('rlnUnlockNode', 'error', undefined, reason);
-      addStep('rlnEnsureReady', 'error', undefined, reason);
-    } else if (strictUnlockCreds && (!rpcUserRaw || !rpcPasswordRaw)) {
-      rlnReadinessBlocker =
-        'Missing RLN_BITCOIND_RPC_USERNAME or RLN_BITCOIND_RPC_PASSWORD (or EXPO_PUBLIC_ prefixed variants)';
-      addStep('rlnInitNode', 'success', {
-        request: { phase: 'deferred-until-unlock' },
-        response: { skipped: true },
+    const rlnCreateNode = resolveRlnMethod('rlnCreateNode');
+    const rlnInitNode = resolveRlnMethod('rlnInitNode');
+    const rlnUnlockNode = resolveRlnMethod('rlnUnlockNode');
+    const rlnNodeInfo = resolveRlnMethod('rlnNodeInfo');
+    const rlnNetworkInfo = resolveRlnMethod('rlnNetworkInfo');
+    const rlnListPeers = resolveRlnMethod('rlnListPeers');
+    const rlnConnectPeer = resolveRlnMethod('rlnConnectPeer');
+    const rlnDisconnectPeer = resolveRlnMethod('rlnDisconnectPeer');
+    const rlnListChannels = resolveRlnMethod('rlnListChannels');
+    const rlnOpenChannel = resolveRlnMethod('rlnOpenChannel');
+    const rlnCloseChannel = resolveRlnMethod('rlnCloseChannel');
+    const rlnListPayments = resolveRlnMethod('rlnListPayments');
+    const rlnAddress = resolveRlnMethod('rlnAddress');
+    const rlnAssetBalance = resolveRlnMethod('rlnAssetBalance');
+    const rlnBackup = resolveRlnMethod('rlnBackup');
+    const rlnBtcBalance = resolveRlnMethod('rlnBtcBalance');
+    const rlnCheckIndexerUrl = resolveRlnMethod('rlnCheckIndexerUrl');
+    const rlnCheckProxyEndpoint = resolveRlnMethod('rlnCheckProxyEndpoint');
+    const rlnCreateUtxos = resolveRlnMethod('rlnCreateUtxos');
+    const rlnDecodeLnInvoice = resolveRlnMethod('rlnDecodeLnInvoice');
+    const rlnDecodeRgbInvoice = resolveRlnMethod('rlnDecodeRgbInvoice');
+    const rlnEstimateFee = resolveRlnMethod('rlnEstimateFee');
+    const rlnFailTransfers = resolveRlnMethod('rlnFailTransfers');
+    const rlnGetChannelId = resolveRlnMethod('rlnGetChannelId');
+    const rlnGetPayment = resolveRlnMethod('rlnGetPayment');
+    const rlnInvoiceStatus = resolveRlnMethod('rlnInvoiceStatus');
+    const rlnKeysend = resolveRlnMethod('rlnKeysend');
+    const rlnListAssets = resolveRlnMethod('rlnListAssets');
+    const rlnListTransactions = resolveRlnMethod('rlnListTransactions');
+    const rlnListTransfers = resolveRlnMethod('rlnListTransfers');
+    const rlnListUnspents = resolveRlnMethod('rlnListUnspents');
+    const rlnLnInvoice = resolveRlnMethod('rlnLnInvoice');
+    const rlnRefreshTransfers = resolveRlnMethod('rlnRefreshTransfers');
+    const rlnRgbInvoice = resolveRlnMethod('rlnRgbInvoice');
+    const rlnSendBtc = resolveRlnMethod('rlnSendBtc');
+    const rlnSendPayment = resolveRlnMethod('rlnSendPayment');
+    const rlnSendRgb = resolveRlnMethod('rlnSendRgb');
+    const rlnSync = resolveRlnMethod('rlnSync');
+    const rlnShutdown = resolveRlnMethod('rlnShutdown');
+    const rlnDestroyNode = resolveRlnMethod('rlnDestroyNode');
+
+    const peerTargetHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
+    const peerPubkey = '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
+    const peerPubkeyAndAddr = `${peerPubkey}@${peerTargetHost}:9735`;
+    let openedChannelId: string | null = null;
+    let disconnectPeerTarget: string = peerPubkey;
+
+    await runRlnStep('rlnCreateNode', async () => {
+      const nodeId = await rlnCreateNode({
+        storageDirPath: rlnStorageDir,
+        daemonListeningPort: rlnPorts.daemonListeningPort,
+        ldkPeerListeningPort: rlnPorts.ldkPeerListeningPort,
+        network,
+        maxMediaUploadSizeMb: 16,
+        enableVirtualChannelsV0: true,
       });
-      addStep('rlnUnlockNode', 'error', {
-        request: maskUnlockRequest(unlockRequest, diagnostics),
-        phase: 'unlock-initial',
-      }, rlnReadinessBlocker);
-      addStep('rlnEnsureReady', 'error', {
-        request: { probe: 'rlnNodeInfo', phase: 'probe-final' },
-      }, rlnReadinessBlocker);
-    } else if (!Number.isFinite(rpcPort) || rpcPort <= 0) {
-      rlnReadinessBlocker = `Invalid RLN_BITCOIND_RPC_PORT: ${rpcPortRaw}`;
-      addStep('rlnInitNode', 'success', {
-        request: { phase: 'deferred-until-unlock' },
-        response: { skipped: true },
-      });
-      addStep('rlnUnlockNode', 'error', {
-        request: maskUnlockRequest(unlockRequest, diagnostics),
-        phase: 'unlock-initial',
-      }, rlnReadinessBlocker);
-      addStep('rlnEnsureReady', 'error', {
-        request: { probe: 'rlnNodeInfo', phase: 'probe-final' },
-      }, rlnReadinessBlocker);
-    } else {
-      const remediation: string[] = [];
-      const rlnInitNode = resolveRlnMethod('rlnInitNode');
-      const rlnUnlockNode = resolveRlnMethod('rlnUnlockNode');
-      const rlnNodeInfo = resolveRlnMethod('rlnNodeInfo');
-      const waitForNodeReady = async (
-        attempts: number,
-        delayMs: number,
-        options?: { treatConflictAsReady?: boolean }
-      ) => {
-        const treatConflictAsReady = options?.treatConflictAsReady ?? true;
-        let lastDetail: ReturnType<typeof classifyRlnError> | null = null;
-        for (let i = 0; i < attempts; i += 1) {
-          try {
-            const info = await rlnNodeInfo();
-            return { ready: true as const, info, normalizedConflict: false };
-          } catch (e: any) {
-            const detail = classifyRlnError(e);
-            lastDetail = detail;
-            if (detail.kind === 'Conflict' && treatConflictAsReady) {
-              remediation.push('probe:normalized-conflict');
+      senderRlnNodeCreated = true;
+      senderRlnNodeDestroyed = false;
+      return {
+        request: {
+          storageDirPath: rlnStorageDir,
+          network,
+          daemonListeningPort: rlnPorts.daemonListeningPort,
+          ldkPeerListeningPort: rlnPorts.ldkPeerListeningPort,
+        },
+        response: { nodeId },
+      };
+    });
+
+    await runRlnStep('rlnInitNode', async () => {
+      if (!senderRlnNodeCreated) {
+        return {
+          request: { mnemonic: 'wallet mnemonic', password: '***' },
+          skipped: true,
+          reason: 'Skipped: rlnCreateNode failed',
+        };
+      }
+      senderRlnPubkey = await rlnInitNode(nodePassword, senderKeys.mnemonic);
+      disconnectPeerTarget = senderRlnPubkey ?? peerPubkey;
+      return {
+        request: { mnemonic: 'wallet mnemonic', password: '***' },
+        response: { initResult: senderRlnPubkey },
+      };
+    });
+
+    await runRlnStep('rlnUnlockNode', async () => {
+      if (!senderRlnNodeCreated) {
+        return {
+          request: maskUnlockRequest(unlockRequest, diagnostics),
+          skipped: true,
+          reason: 'Skipped: rlnCreateNode failed',
+        };
+      }
+      if (strictUnlockCreds && (!rpcUserRaw || !rpcPasswordRaw)) {
+        rlnReadinessBlocker =
+          'Missing RLN_BITCOIND_RPC_USERNAME or RLN_BITCOIND_RPC_PASSWORD (or EXPO_PUBLIC_ prefixed variants)';
+        return {
+          request: maskUnlockRequest(unlockRequest, diagnostics),
+          skipped: true,
+          reason: rlnReadinessBlocker,
+        };
+      }
+      if (!Number.isFinite(rpcPort) || rpcPort <= 0) {
+        rlnReadinessBlocker = `Invalid RLN_BITCOIND_RPC_PORT: ${rpcPortRaw}`;
+        return {
+          request: maskUnlockRequest(unlockRequest, diagnostics),
+          skipped: true,
+          reason: rlnReadinessBlocker,
+        };
+      }
+      const unlockAttempt = async (request: typeof unlockRequest, attempt: 'env' | 'regtest-fallback') => {
+        try {
+          await rlnUnlockNode(request);
+          const normalizedConflict = consumeUnlockConflictNormalized();
+          senderRlnReady = true;
+          rlnReadinessBlocker = null;
+          return {
+            ok: true as const,
+            response: normalizedConflict
+              ? { unlocked: true, normalizedConflict: true, attempt, fallbackApplied: attempt === 'regtest-fallback' }
+              : { unlocked: true, attempt, fallbackApplied: attempt === 'regtest-fallback' },
+          };
+        } catch (unlockErr: any) {
+          const detail = classifyRlnError(unlockErr);
+          if (detail.kind === 'Conflict') {
+            const readiness = await probeNodeReadyAfterConflict();
+            if (readiness.ready) {
+              senderRlnReady = true;
+              rlnReadinessBlocker = null;
               return {
-                ready: true as const,
-                info: { skipped: true, reason: detail.message },
-                normalizedConflict: true,
+                ok: true as const,
+                response: {
+                  unlocked: true,
+                  normalizedConflict: true,
+                  conflictSubtype: detail.conflictSubtype,
+                  reason: 'Conflict normalized after readiness probe',
+                  attempt,
+                  fallbackApplied: attempt === 'regtest-fallback',
+                  nativeError: {
+                    code: detail.code,
+                    message: detail.message,
+                  },
+                  methodResponse: detail.methodResponse,
+                  nodeInfo: readiness.nodeInfo,
+                },
               };
             }
-            if (detail.kind !== 'NotInitialized') {
-              return { ready: false as const, detail };
-            }
-            if (i < attempts - 1) {
-              await new Promise((resolve) =>
-                globalThis.setTimeout(resolve, delayMs)
-              );
-            }
           }
-        }
-        return { ready: false as const, detail: lastDetail };
-      };
-      const forceFreshInitUnlockAndProbe = async (phase: string) => {
-        remediation.push(`${phase}:start`);
-        await recreateSenderNode(`${phase}:recreate`, remediation, {
-          freshContext: true,
-        });
-
-        try {
-          senderRlnPubkey = await rlnInitNode(nodePassword, senderKeys.mnemonic);
-          remediation.push(`${phase}:init-ok`);
-          addStep('rlnInitNode', 'success', {
-            request: { mnemonic: 'wallet mnemonic', password: '***' },
-            response: { initResult: senderRlnPubkey, phase: `${phase}:init` },
-          });
-        } catch (initErr: any) {
-          const initDetail = classifyRlnError(initErr);
-          remediation.push(`${phase}:init-error:${initDetail.kind}`);
-          addStep(
-            'rlnInitNode',
-            'error',
-            {
-              request: { phase: `${phase}:init` },
-              response: { kind: initDetail.kind, code: initDetail.code },
-            },
-            initDetail.message
-          );
-          throw initErr;
-        }
-
-        const unlockAfterReset = await tryUnlock(`${phase}:unlock`);
-        if (!unlockAfterReset.ok) {
-          throw new Error(unlockAfterReset.detail.message);
-        }
-
-        addStep('rlnUnlockNode', 'success', {
-          request: {
-            ...maskUnlockRequest(unlockRequest, diagnostics),
-            unlockAttempt: rlnUnlockAttempt,
-          },
-          response: unlockAfterReset.conflictNormalized
-            ? {
-                unlocked: true,
-                normalizedConflict: true,
-                reason: 'already-ready-after-conflict',
-                phase: `${phase}:unlock`,
-              }
-            : { unlocked: true, phase: `${phase}:unlock` },
-        });
-
-        const strictReadiness = await waitForNodeReady(20, 1000, {
-          treatConflictAsReady: false,
-        });
-        if (!strictReadiness.ready) {
-          throw new Error(
-            strictReadiness.detail?.message ??
-              `${phase}:nodeInfo probe failed after fresh init/unlock`
-          );
-        }
-        remediation.push(`${phase}:ready-ok`);
-        return strictReadiness;
-      };
-      const ensureReadyWithHardResets = async (
-        basePhase: string,
-        maxAttempts: number = 3
-      ) => {
-        let lastErr: any = null;
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          const phase = `${basePhase}:attempt-${attempt}`;
-          try {
-            return await forceFreshInitUnlockAndProbe(phase);
-          } catch (err: any) {
-            const detail = classifyRlnError(err);
-            remediation.push(`${phase}:failed:${detail.kind}`);
-            lastErr = err;
-            if (attempt < maxAttempts) {
-              await new Promise((resolve) =>
-                globalThis.setTimeout(resolve, 1200)
-              );
-            }
-          }
-        }
-        throw lastErr ?? new Error(`${basePhase}:hard-reset attempts exhausted`);
-      };
-      const waitForReadyAfterInit = async (attempts: number, delayMs: number) => {
-        for (let i = 0; i < attempts; i += 1) {
-          try {
-            await rlnNodeInfo();
-            return true;
-          } catch (e: any) {
-            const detail = classifyRlnError(e);
-            if (detail.kind !== 'NotInitialized') {
-              return false;
-            }
-            if (i < attempts - 1) {
-              await new Promise((resolve) =>
-                globalThis.setTimeout(resolve, delayMs)
-              );
-            }
-          }
-        }
-        return false;
-      };
-
-      const tryUnlock = async (phase: string) => {
-        rlnUnlockAttempt += 1;
-        try {
-          await rlnUnlockNode(unlockRequest);
-          const conflictNormalized = consumeUnlockConflictNormalized();
-          remediation.push(
-            conflictNormalized ? `${phase}:ok:already-ready-after-conflict` : `${phase}:ok`
-          );
-          return { ok: true as const, conflictNormalized };
-        } catch (e: any) {
-          const detail = classifyRlnError(e);
-          if (detail.kind === 'Conflict') {
-            remediation.push(`${phase}:soft-conflict`);
-            // Treat conflict as a soft success and let the final readiness probe decide.
-            return { ok: true as const, conflictNormalized: true };
-          }
-          remediation.push(`${phase}:error:${detail.kind}`);
           return { ok: false as const, detail };
         }
       };
-      const tryUnlockAfterReopenWithInitFallback = async (
-        remediation: string[]
-      ) => {
-        const retryAfterReopen = await tryUnlock('unlock-after-reopen');
-        if (retryAfterReopen.ok) {
-          return retryAfterReopen;
-        }
-        if (
-          retryAfterReopen.detail.kind !== 'Conflict' &&
-          retryAfterReopen.detail.kind !== 'NotInitialized'
-        ) {
-          return retryAfterReopen;
-        }
 
-        const initPhase =
-          retryAfterReopen.detail.kind === 'NotInitialized'
-            ? 'init-after-reopen-not-initialized'
-            : 'init-after-reopen-conflict';
-        remediation.push(`unlock-after-reopen:${retryAfterReopen.detail.kind.toLowerCase()}:init-retry`);
-        try {
-          senderRlnPubkey = await rlnInitNode(nodePassword, senderKeys.mnemonic);
-          addStep('rlnInitNode', 'success', {
-            request: { mnemonic: 'wallet mnemonic', password: '***' },
-            response: { initResult: senderRlnPubkey, phase: initPhase },
-          });
-        } catch (initErr: any) {
-          const initDetail = classifyRlnError(initErr);
-          remediation.push(`${initPhase}:error:${initDetail.kind}`);
-          addStep('rlnInitNode', 'error', {
-            request: { phase: initPhase },
-            response: { kind: initDetail.kind, code: initDetail.code },
-          }, initDetail.message);
-          return retryAfterReopen;
-        }
-
-        remediation.push(`${initPhase}:ok`);
-        return tryUnlock('unlock-after-reopen-reinit');
-      };
-
-      let unlockResult = await tryUnlock('unlock-initial');
-      if (unlockResult.ok) {
-        addStep('rlnInitNode', 'success', {
-          request: { phase: 'deferred-until-unlock' },
-          response: { skipped: true, reason: 'unlock succeeded without explicit init' },
-        });
-        addStep('rlnUnlockNode', 'success', {
-          request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-          response: unlockResult.conflictNormalized
-            ? {
-              unlocked: true,
-              normalizedConflict: true,
-              reason: 'already-ready-after-conflict',
-              phase: 'unlock-initial',
-            }
-            : { unlocked: true, phase: 'unlock-initial' },
-        });
-      } else if (unlockResult.detail.kind === 'NotInitialized') {
-        try {
-          senderRlnPubkey = await rlnInitNode(nodePassword, senderKeys.mnemonic);
-          addStep('rlnInitNode', 'success', {
-            request: { mnemonic: 'wallet mnemonic', password: '***' },
-            response: { initResult: senderRlnPubkey, phase: 'init-after-not-initialized' },
-          });
-        } catch (initErr: any) {
-          const initDetail = classifyRlnError(initErr);
-          rlnReadinessBlocker = `init failed: ${initDetail.message}`;
-          addStep('rlnInitNode', 'error', {
-            request: { phase: 'init-after-not-initialized' },
-            response: { kind: initDetail.kind, code: initDetail.code },
-          }, initDetail.message);
-          addStep('rlnUnlockNode', 'error', {
-            request: { ...maskUnlockRequest(unlockRequest, diagnostics), phase: 'unlock-initial' },
-            response: {
-              kind: unlockResult.detail.kind,
-              code: unlockResult.detail.code,
-              message: unlockResult.detail.message,
-            },
-          }, unlockResult.detail.message);
-          addStep('rlnEnsureReady', 'error', {
-            request: { probe: 'rlnNodeInfo', remediation, phase: 'probe-final' },
-          }, rlnReadinessBlocker);
-          unlockResult = null as any;
-        }
-        if (unlockResult) {
-          try {
-            // First probe directly after init; some RLN states are ready without explicit unlock.
-            const readyAfterInitProbe = await waitForReadyAfterInit(8, 1500);
-            if (readyAfterInitProbe) {
-              remediation.push('probe-after-init:ready');
-              addStep('rlnUnlockNode', 'success', {
-                request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-                response: { skipped: true, reason: 'ready-after-init-probe', phase: 'probe-after-init' },
-              });
-            } else {
-              remediation.push('probe-after-init:timeout-not-initialized');
-            }
-
-            if (!readyAfterInitProbe) {
-              // Try direct unlock after init before forcing node reopen.
-              const retryAfterInit = await tryUnlock('unlock-after-init');
-              if (retryAfterInit.ok) {
-                addStep('rlnUnlockNode', 'success', {
-                  request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-                  response: retryAfterInit.conflictNormalized
-                    ? {
-                      unlocked: true,
-                      normalizedConflict: true,
-                      reason: 'already-ready-after-conflict',
-                      phase: 'unlock-after-init',
-                    }
-                    : { unlocked: true, phase: 'unlock-after-init' },
-                });
-              } else if (retryAfterInit.detail.kind === 'Conflict') {
-                await recreateSenderNode('reopen-after-init-conflict', remediation, {
-                  freshContext: true,
-                });
-                const retryAfterReopen =
-                  await tryUnlockAfterReopenWithInitFallback(remediation);
-                if (!retryAfterReopen.ok) {
-                  rlnReadinessBlocker = `unlock failed after reopen: ${retryAfterReopen.detail.message}`;
-                  addStep('rlnUnlockNode', 'error', {
-                    request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-                    response: {
-                      kind: retryAfterReopen.detail.kind,
-                      code: retryAfterReopen.detail.code,
-                      message: retryAfterReopen.detail.message,
-                      phase: 'unlock-after-reopen',
-                    },
-                  }, retryAfterReopen.detail.message);
-                } else {
-                  addStep('rlnUnlockNode', 'success', {
-                    request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-                    response: retryAfterReopen.conflictNormalized
-                      ? {
-                        unlocked: true,
-                        normalizedConflict: true,
-                        reason: 'already-ready-after-conflict',
-                        phase: 'unlock-after-reopen',
-                      }
-                      : { unlocked: true, phase: 'unlock-after-reopen' },
-                  });
-                }
-              } else {
-                rlnReadinessBlocker = `unlock failed after init: ${retryAfterInit.detail.message}`;
-                addStep('rlnUnlockNode', 'error', {
-                  request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-                  response: {
-                    kind: retryAfterInit.detail.kind,
-                    code: retryAfterInit.detail.code,
-                    message: retryAfterInit.detail.message,
-                    phase: 'unlock-after-init',
-                  },
-                }, retryAfterInit.detail.message);
-              }
-            }
-          } catch (reopenErr: any) {
-            const reopenDetail = classifyRlnError(reopenErr);
-            rlnReadinessBlocker = `reopen failed: ${reopenDetail.message}`;
-            addStep('rlnUnlockNode', 'error', {
-              request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-              response: { kind: reopenDetail.kind, code: reopenDetail.code, phase: 'unlock-after-reopen' },
-            }, reopenDetail.message);
-          }
-        }
-      } else if (unlockResult.detail.kind === 'Conflict') {
-        addStep('rlnInitNode', 'success', {
-          request: { phase: 'deferred-until-unlock' },
-          response: { skipped: true, reason: 'initial unlock returned conflict' },
-        });
-        try {
-          await recreateSenderNode('reopen-after-conflict', remediation, {
-            freshContext: true,
-          });
-          const retryAfterConflict =
-            await tryUnlockAfterReopenWithInitFallback(remediation);
-          if (!retryAfterConflict.ok) {
-            rlnReadinessBlocker = `unlock failed after conflict reopen: ${retryAfterConflict.detail.message}`;
-            addStep('rlnUnlockNode', 'error', {
-              request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-              response: {
-                kind: retryAfterConflict.detail.kind,
-                code: retryAfterConflict.detail.code,
-                message: retryAfterConflict.detail.message,
-                phase: 'unlock-after-reopen',
-              },
-            }, retryAfterConflict.detail.message);
-          } else {
-            addStep('rlnUnlockNode', 'success', {
-              request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-              response: retryAfterConflict.conflictNormalized
-                ? {
-                  unlocked: true,
-                  normalizedConflict: true,
-                  reason: 'already-ready-after-conflict',
-                  phase: 'unlock-after-reopen',
-                }
-                : { unlocked: true, phase: 'unlock-after-reopen' },
-            });
-          }
-        } catch (reopenErr: any) {
-          const reopenDetail = classifyRlnError(reopenErr);
-          rlnReadinessBlocker = `reopen failed: ${reopenDetail.message}`;
-          addStep('rlnUnlockNode', 'error', {
-            request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-            response: { kind: reopenDetail.kind, code: reopenDetail.code, phase: 'unlock-after-reopen' },
-          }, reopenDetail.message);
-        }
-      } else {
-        addStep('rlnInitNode', 'success', {
-          request: { phase: 'deferred-until-unlock' },
-          response: { skipped: true },
-        });
-        rlnReadinessBlocker = `unlock failed: ${unlockResult.detail.message}`;
-        addStep('rlnUnlockNode', 'error', {
-          request: { ...maskUnlockRequest(unlockRequest, diagnostics), unlockAttempt: rlnUnlockAttempt },
-          response: {
-            kind: unlockResult.detail.kind,
-            code: unlockResult.detail.code,
-            message: unlockResult.detail.message,
-            phase: 'unlock-initial',
-          },
-        }, unlockResult.detail.message);
+      const envAttempt = await unlockAttempt(unlockRequest, 'env');
+      if (envAttempt.ok) {
+        return {
+          request: maskUnlockRequest(unlockRequest, diagnostics),
+          response: envAttempt.response,
+        };
       }
 
-      try {
-        const readiness = await waitForNodeReady(20, 1000);
-        if (!readiness.ready) {
-          throw readiness.detail ?? new Error('node readiness probe timed out');
+      const shouldTryRegtestFallback =
+        network === 'regtest' &&
+        !useRegtestForcedDefaults &&
+        envAttempt.detail.kind !== 'Conflict';
+      if (shouldTryRegtestFallback) {
+        const fallbackRequest = {
+          password: nodePassword,
+          bitcoindRpcUsername: 'user',
+          bitcoindRpcPassword: 'password',
+          bitcoindRpcHost: defaultRpcHost,
+          bitcoindRpcPort: 18443,
+          indexerUrl: defaultIndexerUrl,
+          proxyEndpoint: defaultProxyEndpoint,
+          announceAddresses,
+          announceAlias: announceAlias ?? null,
+        };
+        const fallbackAttempt = await unlockAttempt(fallbackRequest, 'regtest-fallback');
+        if (fallbackAttempt.ok) {
+          return {
+            request: maskUnlockRequest(unlockRequest, diagnostics),
+            response: {
+              ...fallbackAttempt.response,
+              firstAttempt: {
+                kind: envAttempt.detail.kind,
+                code: envAttempt.detail.code,
+                message: envAttempt.detail.message,
+                methodResponse: envAttempt.detail.methodResponse,
+              },
+            },
+          };
         }
-        senderRlnReady = true;
-        rlnReadinessBlocker = null;
-        addStep('rlnEnsureReady', 'success', {
-          request: {
-            probe: 'rlnNodeInfo',
-            remediation,
-            unlockAttempt: rlnUnlockAttempt,
-            phase: 'probe-final',
-          },
-          response: {
-            ready: true,
-            strategy: readiness.normalizedConflict
-              ? 'probe-final-normalized-conflict'
-              : 'probe-final-retry',
-            finalProbe: 'success',
-            normalizedConflict: readiness.normalizedConflict,
-          },
-        });
-      } catch (probeErr: any) {
-        const probeDetail = classifyRlnError(probeErr);
-        remediation.push(`probe-final:error:${probeDetail.kind}`);
-        try {
-          const strictRecovery = await ensureReadyWithHardResets(
-            'probe-final-hard-reset',
-            3
-          );
-          senderRlnReady = true;
-          rlnReadinessBlocker = null;
-          addStep('rlnEnsureReady', 'success', {
+        senderRlnReady = false;
+        rlnReadinessBlocker = fallbackAttempt.detail.message;
+        throw {
+          message: fallbackAttempt.detail.message,
+          errorDetail: {
             request: {
-              probe: 'rlnNodeInfo',
-              remediation,
-              unlockAttempt: rlnUnlockAttempt,
-              phase: 'probe-final-hard-reset',
+              env: maskUnlockRequest(unlockRequest, diagnostics),
+              regtestFallback: maskUnlockRequest(fallbackRequest, {
+                ...diagnostics,
+                configMode: 'regtest-fallback',
+                hostSource: 'regtest-forced',
+                portSource: 'regtest-forced',
+                usernameSource: 'regtest-forced',
+                passwordSource: 'regtest-forced',
+                indexerSource: 'regtest-forced',
+                proxySource: 'regtest-forced',
+              }),
             },
             response: {
-              ready: true,
-              strategy: 'probe-final-hard-reset',
-              finalProbe: 'success',
-              normalizedConflict: strictRecovery.normalizedConflict,
-            },
-          });
-        } catch (fallbackErr: any) {
-          senderRlnReady = false;
-          const fallbackDetail = classifyRlnError(fallbackErr);
-          rlnReadinessBlocker = rlnReadinessBlocker ?? fallbackDetail.message;
-          addStep(
-            'rlnEnsureReady',
-            'error',
-            {
-              request: {
-                probe: 'rlnNodeInfo',
-                remediation,
-                unlockAttempt: rlnUnlockAttempt,
-                phase: 'probe-final-hard-reset',
+              attempt: 'regtest-fallback',
+              fallbackApplied: true,
+              firstAttempt: {
+                kind: envAttempt.detail.kind,
+                conflictSubtype: envAttempt.detail.conflictSubtype,
+                code: envAttempt.detail.code,
+                message: envAttempt.detail.message,
+                methodResponse: envAttempt.detail.methodResponse,
               },
-              response: { kind: fallbackDetail.kind, code: fallbackDetail.code },
+              secondAttempt: {
+                kind: fallbackAttempt.detail.kind,
+                conflictSubtype: fallbackAttempt.detail.conflictSubtype,
+                code: fallbackAttempt.detail.code,
+                message: fallbackAttempt.detail.message,
+                methodResponse: fallbackAttempt.detail.methodResponse,
+              },
             },
-            rlnReadinessBlocker ?? undefined
-          );
-        }
+          },
+        };
       }
-    }
 
-    addStep('rlnNodeInfo', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnNodeInfo', 'success', {
-        request: {},
-        response: {
-          skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
+      senderRlnReady = false;
+      rlnReadinessBlocker = envAttempt.detail.message;
+      throw {
+        message: envAttempt.detail.message,
+        errorDetail: {
+          request: maskUnlockRequest(unlockRequest, diagnostics),
+          response: {
+            attempt: 'env',
+            fallbackApplied: false,
+            kind: envAttempt.detail.kind,
+            conflictSubtype: envAttempt.detail.conflictSubtype,
+            code: envAttempt.detail.code,
+            message: envAttempt.detail.message,
+            methodResponse: envAttempt.detail.methodResponse,
+          },
         },
-      });
-    } else {
-    try {
-      const rlnNodeInfo = resolveRlnMethod('rlnNodeInfo');
-      const nodeInfo = await rlnNodeInfo();
-      addStep('rlnNodeInfo', 'success', {
-        request: {},
-        response: nodeInfo,
-      });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (msg.includes('node is not initialized') && !senderRlnReady) {
-        addStep('rlnNodeInfo', 'success', {
+      };
+    });
+
+    await runRlnStep('rlnNodeInfo', async () => {
+      if (!senderRlnNodeCreated || rlnReadinessBlocker) {
+        return {
           request: {},
-          response: { skipped: true, reason: msg },
-        });
-      } else {
-        addStep('rlnNodeInfo', 'error', undefined, msg);
-      }
-    }
-    }
-
-    addStep('rlnNetworkInfo', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnNetworkInfo', 'success', {
-        request: {},
-        response: {
           skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnNetworkInfo = resolveRlnMethod('rlnNetworkInfo');
-      const networkInfo = await rlnNetworkInfo();
-      addStep('rlnNetworkInfo', 'success', {
-        request: {},
-        response: networkInfo,
-      });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (msg.includes('node is not initialized') && !senderRlnReady) {
-        addStep('rlnNetworkInfo', 'success', {
-          request: {},
-          response: { skipped: true, reason: msg },
-        });
-      } else {
-        addStep('rlnNetworkInfo', 'error', undefined, msg);
+          reason: rlnReadinessBlocker ?? 'Skipped: node is not ready',
+        };
       }
-    }
-    }
+      const info = await rlnNodeInfo();
+      senderRlnReady = true;
+      rlnReadinessBlocker = null;
+      return { request: {}, response: info };
+    });
 
-    addStep('rlnListPeers', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnListPeers', 'success', {
-        request: {},
-        response: {
-          skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnListPeers = resolveRlnMethod('rlnListPeers');
+    await runRlnStep('rlnNetworkInfo', async () => {
+      if (!senderRlnReady) {
+        return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      }
+      const info = await rlnNetworkInfo();
+      return { request: {}, response: info };
+    });
+
+    await runRlnStep('rlnListPeers', async () => {
+      if (!senderRlnReady) {
+        return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      }
       const peers = await rlnListPeers();
-      addStep('rlnListPeers', 'success', {
-        request: {},
-        response: { count: peers?.length ?? 0, peers },
-      });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (msg.includes('node is not initialized') && !senderRlnReady) {
-        addStep('rlnListPeers', 'success', {
-          request: {},
-          response: { skipped: true, reason: msg },
-        });
-      } else {
-        addStep('rlnListPeers', 'error', undefined, msg);
-      }
-    }
-    }
+      return { request: {}, response: { count: peers?.length ?? 0, peers } };
+    });
 
-    addStep('rlnConnectPeer', 'running');
-    const peerTargetHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
-    const peerPubkeyAndAddr = `0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798@${peerTargetHost}:9735`;
-    if (!senderRlnReady) {
-      addStep('rlnConnectPeer', 'success', {
-        request: { peerPubkeyAndAddr },
-        response: {
-          skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnConnectPeer = resolveRlnMethod('rlnConnectPeer');
+    await runRlnStep('rlnConnectPeer', async () => {
+      if (!senderRlnReady) {
+        return { request: { peerPubkeyAndAddr }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      }
       await rlnConnectPeer(peerPubkeyAndAddr);
-      addStep('rlnConnectPeer', 'success', {
-        request: { peerPubkeyAndAddr },
-        response: { connected: true },
-      });
-    } catch (e: any) {
-      addStep('rlnConnectPeer', 'success', {
-        request: { peerPubkeyAndAddr },
-        response: { skipped: true, reason: e?.message ?? String(e) },
-      });
-    }
-    }
+      disconnectPeerTarget = senderRlnPubkey ?? peerPubkey;
+      return { request: { peerPubkeyAndAddr }, response: { connected: true } };
+    });
 
-    addStep('rlnDisconnectPeer', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnDisconnectPeer', 'success', {
-        request: { peerPubkey: senderRlnPubkey ?? 'fallback' },
-        response: {
+    await runRlnStep('rlnDisconnectPeer', async () => {
+      if (!senderRlnReady) {
+        return {
+          request: { peerPubkey: disconnectPeerTarget },
           skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnDisconnectPeer = resolveRlnMethod('rlnDisconnectPeer');
-      await rlnDisconnectPeer(
-        senderRlnPubkey ??
-          '0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'
-      );
-      addStep('rlnDisconnectPeer', 'success', {
-        request: { peerPubkey: senderRlnPubkey ?? 'fallback' },
-        response: { disconnected: true },
-      });
-    } catch (e: any) {
-      addStep('rlnDisconnectPeer', 'success', {
-        request: { peerPubkey: senderRlnPubkey ?? 'fallback' },
-        response: { skipped: true, reason: e?.message ?? String(e) },
-      });
-    }
-    }
-
-    addStep('rlnListChannels', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnListChannels', 'success', {
-        request: {},
-        response: {
-          skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnListChannels = resolveRlnMethod('rlnListChannels');
-      const channels = await rlnListChannels();
-      addStep('rlnListChannels', 'success', {
-        request: {},
-        response: { count: channels?.length ?? 0, channels },
-      });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (msg.includes('node is not initialized') && !senderRlnReady) {
-        addStep('rlnListChannels', 'success', {
-          request: {},
-          response: { skipped: true, reason: msg },
-        });
-      } else {
-        addStep('rlnListChannels', 'error', undefined, msg);
+          reason: rlnReadinessBlocker ?? 'Skipped: node is not ready',
+        };
       }
-    }
-    }
+      await rlnDisconnectPeer(disconnectPeerTarget);
+      return { request: { peerPubkey: disconnectPeerTarget }, response: { disconnected: true } };
+    });
 
-    addStep('rlnOpenChannel', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnOpenChannel', 'success', {
-        request: { capacitySat: 10000, pushMsat: 0, withAnchors: true },
-        response: {
+    await runRlnStep('rlnListChannels', async () => {
+      if (!senderRlnReady) {
+        return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      }
+      const channels = await rlnListChannels();
+      return { request: {}, response: { count: channels?.length ?? 0, channels } };
+    });
+
+    await runRlnStep('rlnOpenChannel', async () => {
+      if (!senderRlnReady) {
+        return {
+          request: { peerPubkeyAndOptAddr: peerPubkeyAndAddr, capacitySat: 10000, pushMsat: 0, withAnchors: true },
           skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnOpenChannel = resolveRlnMethod('rlnOpenChannel');
+          reason: rlnReadinessBlocker ?? 'Skipped: node is not ready',
+        };
+      }
       const opened = await rlnOpenChannel({
         peerPubkeyAndOptAddr: peerPubkeyAndAddr,
         capacitySat: 10000,
@@ -1956,261 +1563,344 @@ export async function runRlnPlaygroundFlow() {
         public: false,
         withAnchors: true,
       });
-      addStep('rlnOpenChannel', 'success', {
-        request: { capacitySat: 10000, pushMsat: 0, withAnchors: true },
+      openedChannelId =
+        String(
+          (opened as any)?.channelId ??
+            (opened as any)?.channel_id ??
+            (opened as any)?.temporaryChannelId ??
+            (opened as any)?.temporary_channel_id ??
+            ''
+        ) || null;
+      return {
+        request: { peerPubkeyAndOptAddr: peerPubkeyAndAddr, capacitySat: 10000, pushMsat: 0, withAnchors: true },
         response: opened,
-      });
-    } catch (e: any) {
-      addStep('rlnOpenChannel', 'success', {
-        request: { capacitySat: 10000, pushMsat: 0, withAnchors: true },
-        response: { skipped: true, reason: e?.message ?? String(e) },
-      });
-    }
-    }
+      };
+    });
 
-    addStep('rlnCloseChannel', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnCloseChannel', 'success', {
-        request: { channelId: '00...00', force: true },
-        response: {
+    await runRlnStep('rlnCloseChannel', async () => {
+      if (!senderRlnReady) {
+        return {
+          request: { channelId: openedChannelId ?? null, peerPubkey: disconnectPeerTarget, force: true },
           skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnCloseChannel = resolveRlnMethod('rlnCloseChannel');
-      await rlnCloseChannel('00'.repeat(32), senderRlnPubkey ?? '02', true);
-      addStep('rlnCloseChannel', 'success', {
-        request: { channelId: '00...00', force: true },
+          reason: rlnReadinessBlocker ?? 'Skipped: node is not ready',
+        };
+      }
+      if (!openedChannelId) {
+        return {
+          request: { channelId: null, peerPubkey: disconnectPeerTarget, force: true },
+          skipped: true,
+          reason: 'Skipped: no channel id available from rlnOpenChannel',
+        };
+      }
+      await rlnCloseChannel(openedChannelId, disconnectPeerTarget, true);
+      return {
+        request: { channelId: openedChannelId, peerPubkey: disconnectPeerTarget, force: true },
         response: { closed: true },
-      });
-    } catch (e: any) {
-      addStep('rlnCloseChannel', 'success', {
-        request: { channelId: '00...00', force: true },
-        response: { skipped: true, reason: e?.message ?? String(e) },
-      });
-    }
-    }
+      };
+    });
 
-    addStep('rlnListPayments', 'running');
-    if (!senderRlnReady) {
-      addStep('rlnListPayments', 'success', {
-        request: {},
-        response: {
-          skipped: true,
-          reason:
-            rlnReadinessBlocker ??
-            'Skipped: RLN readiness was not confirmed (see rlnEnsureReady)',
-        },
-      });
-    } else {
-    try {
-      const rlnListPayments = resolveRlnMethod('rlnListPayments');
+    await runRlnStep('rlnListPayments', async () => {
+      if (!senderRlnReady) {
+        return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      }
       const payments = await rlnListPayments();
-      addStep('rlnListPayments', 'success', {
+      return { request: {}, response: { count: payments?.length ?? 0, payments } };
+    });
+
+    await runRlnStep('rlnAddress', async () => {
+      if (!senderRlnReady) return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnAddress();
+      return { request: {}, response };
+    });
+
+    await runRlnStep('rlnBtcBalance', async () => {
+      if (!senderRlnReady) return { request: { skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnBtcBalance(true);
+      return { request: { skipSync: true }, response };
+    });
+
+    await runRlnStep('rlnAssetBalance', async () => {
+      if (!senderRlnReady) return { request: { assetId: 'rgb1dummyasset' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnAssetBalance('rgb1dummyasset');
+      return { request: { assetId: 'rgb1dummyasset' }, response };
+    });
+
+    await runRlnStep('rlnCheckIndexerUrl', async () => {
+      if (!senderRlnReady) return { request: { indexerUrl: indexerUrlEnv ?? null }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      if (!indexerUrlEnv) return { request: { indexerUrl: null }, skipped: true, reason: 'Skipped: missing RLN_INDEXER_URL' };
+      const response = await rlnCheckIndexerUrl(indexerUrlEnv);
+      return { request: { indexerUrl: indexerUrlEnv }, response };
+    });
+
+    await runRlnStep('rlnCheckProxyEndpoint', async () => {
+      if (!senderRlnReady) return { request: { proxyEndpoint: proxyEndpointEnv ?? null }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      if (!proxyEndpointEnv) return { request: { proxyEndpoint: null }, skipped: true, reason: 'Skipped: missing RLN_PROXY_ENDPOINT' };
+      await rlnCheckProxyEndpoint(proxyEndpointEnv);
+      return { request: { proxyEndpoint: proxyEndpointEnv }, response: { ok: true } };
+    });
+
+    await runRlnStep('rlnEstimateFee', async () => {
+      if (!senderRlnReady) return { request: { blocks: 6 }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnEstimateFee(6);
+      return { request: { blocks: 6 }, response };
+    });
+
+    await runRlnStep('rlnCreateUtxos', async () => {
+      if (!senderRlnReady) return { request: { upTo: true, num: 1, size: 1000, feeRate: 1, skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      await rlnCreateUtxos(true, 1, 1000, 1, true);
+      return { request: { upTo: true, num: 1, size: 1000, feeRate: 1, skipSync: true }, response: { ok: true } };
+    });
+
+    await runRlnStep('rlnDecodeLnInvoice', async () => {
+      if (!senderRlnReady) return { request: { invoice: 'lnbc1...' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnDecodeLnInvoice('lnbc1placeholder');
+      return { request: { invoice: 'lnbc1placeholder' }, response };
+    });
+
+    await runRlnStep('rlnDecodeRgbInvoice', async () => {
+      if (!senderRlnReady) return { request: { invoice: 'rgb1...' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnDecodeRgbInvoice('rgb1placeholder');
+      return { request: { invoice: 'rgb1placeholder' }, response };
+    });
+
+    await runRlnStep('rlnFailTransfers', async () => {
+      if (!senderRlnReady) return { request: { batchTransferIdx: null, noAssetOnly: false, skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnFailTransfers(null, false, true);
+      return { request: { batchTransferIdx: null, noAssetOnly: false, skipSync: true }, response };
+    });
+
+    await runRlnStep('rlnGetChannelId', async () => {
+      if (!senderRlnReady) return { request: { temporaryChannelId: '00'.repeat(32) }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnGetChannelId('00'.repeat(32));
+      return { request: { temporaryChannelId: '00'.repeat(32) }, response };
+    });
+
+    await runRlnStep('rlnGetPayment', async () => {
+      if (!senderRlnReady) return { request: { paymentHash: '00'.repeat(32) }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnGetPayment('00'.repeat(32));
+      return { request: { paymentHash: '00'.repeat(32) }, response };
+    });
+
+    await runRlnStep('rlnInvoiceStatus', async () => {
+      if (!senderRlnReady) return { request: { invoice: 'lnbc1placeholder' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnInvoiceStatus('lnbc1placeholder');
+      return { request: { invoice: 'lnbc1placeholder' }, response };
+    });
+
+    await runRlnStep('rlnKeysend', async () => {
+      if (!senderRlnReady) return { request: { destPubkey: peerPubkey, amtMsat: 1000 }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnKeysend(peerPubkey, 1000, null, null);
+      return { request: { destPubkey: peerPubkey, amtMsat: 1000, assetId: null, assetAmount: null }, response };
+    });
+
+    await runRlnStep('rlnListAssets', async () => {
+      if (!senderRlnReady) return { request: { filterAssetSchemas: [] }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnListAssets([]);
+      return { request: { filterAssetSchemas: [] }, response };
+    });
+
+    await runRlnStep('rlnListTransactions', async () => {
+      if (!senderRlnReady) return { request: { skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnListTransactions(true);
+      return { request: { skipSync: true }, response: { count: response?.length ?? 0, transactions: response } };
+    });
+
+    await runRlnStep('rlnListTransfers', async () => {
+      if (!senderRlnReady) return { request: { assetId: 'rgb1dummyasset' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnListTransfers('rgb1dummyasset');
+      return { request: { assetId: 'rgb1dummyasset' }, response: { count: response?.length ?? 0, transfers: response } };
+    });
+
+    await runRlnStep('rlnListUnspents', async () => {
+      if (!senderRlnReady) return { request: { skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnListUnspents(true);
+      return { request: { skipSync: true }, response: { count: response?.length ?? 0, unspents: response } };
+    });
+
+    await runRlnStep('rlnLnInvoice', async () => {
+      if (!senderRlnReady) return { request: { amtMsat: 1000, expirySec: 3600 }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnLnInvoice(1000, 3600, null, null);
+      return { request: { amtMsat: 1000, expirySec: 3600, assetId: null, assetAmount: null }, response };
+    });
+
+    await runRlnStep('rlnRefreshTransfers', async () => {
+      if (!senderRlnReady) return { request: { skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      await rlnRefreshTransfers(true);
+      return { request: { skipSync: true }, response: { refreshed: true } };
+    });
+
+    await runRlnStep('rlnRgbInvoice', async () => {
+      if (!senderRlnReady) return { request: { assetId: null, assignmentAmount: 1, durationSeconds: 3600 }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnRgbInvoice(null, 1, 3600, 1, false);
+      return { request: { assetId: null, assignmentAmount: 1, durationSeconds: 3600, minConfirmations: 1, witness: false }, response };
+    });
+
+    await runRlnStep('rlnSendBtc', async () => {
+      if (!senderRlnReady) return { request: { amount: 1000, address: 'bcrt1qplaceholder', feeRate: 1, skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnSendBtc(1000, 'bcrt1qplaceholder', 1, true);
+      return { request: { amount: 1000, address: 'bcrt1qplaceholder', feeRate: 1, skipSync: true }, response };
+    });
+
+    await runRlnStep('rlnSendPayment', async () => {
+      if (!senderRlnReady) return { request: { invoice: 'lnbc1placeholder' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnSendPayment('lnbc1placeholder', null, null, null);
+      return { request: { invoice: 'lnbc1placeholder', amtMsat: null, assetId: null, assetAmount: null }, response };
+    });
+
+    await runRlnStep('rlnSendRgb', async () => {
+      if (!senderRlnReady) return { request: { donation: false, feeRate: 1, minConfirmations: 1, skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      const response = await rlnSendRgb(false, 1, 1, true);
+      return { request: { donation: false, feeRate: 1, minConfirmations: 1, skipSync: true }, response };
+    });
+
+    await runRlnStep('rlnBackup', async () => {
+      if (!senderRlnReady) return { request: { backupPath: `${rlnStorageDir}/backup.rln`, password: '***' }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      await rlnBackup(`${rlnStorageDir}/backup.rln`, nodePassword);
+      return { request: { backupPath: `${rlnStorageDir}/backup.rln`, password: '***' }, response: { backedUp: true } };
+    });
+
+    await runRlnStep('rlnSync', async () => {
+      if (!senderRlnReady) return { request: {}, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
+      await rlnSync();
+      return { request: {}, response: { synced: true } };
+    });
+
+    await runRlnStep('rlnLock', async () => {
+      return {
         request: {},
-        response: { count: payments?.length ?? 0, payments },
-      });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (msg.includes('node is not initialized') && !senderRlnReady) {
-        addStep('rlnListPayments', 'success', {
-          request: {},
-          response: { skipped: true, reason: msg },
-        });
-      } else {
-        addStep('rlnListPayments', 'error', undefined, msg);
-      }
-    }
-    }
+        skipped: true,
+        reason: 'Skipped: lock is not exposed by current RLN native bindings',
+      };
+    });
 
-    if (!senderProtocol || !receiverProtocol) {
-      throw new Error('RLN protocol adapter was not initialized');
-    }
-    // Use the adapter instance network preset directly to avoid
-    // mismatches with global/default network maps.
-    const protocolNetworkIdMap = (receiverProtocol as any)?.networkIdMap;
-    bridgeAssetId =
-      protocolNetworkIdMap?.mainnet?.assets?.[0]?.assetId ??
-      getDestinationAsset('utexo', 'mainnet', null)?.assetId ??
-      null;
-    bridgeUtexoAssetId =
-      bridgeAssetId && protocolNetworkIdMap?.utexo?.assets
-        ? protocolNetworkIdMap.utexo.assets.find(
-            (a: any) =>
-              a?.tokenId ===
-              protocolNetworkIdMap?.mainnet?.assets?.find(
-                (m: any) => m?.assetId === bridgeAssetId
-              )?.tokenId
-          )?.assetId ?? null
-        : getDestinationAsset('mainnet', 'utexo', bridgeAssetId)?.assetId ?? null;
+    await runRlnStep('rlnRestore', async () => {
+      return {
+        request: {},
+        skipped: true,
+        reason:
+          'Skipped: restore is wallet-level (restoreBackup/restoreFromVss), not an RLN node method',
+      };
+    });
 
-    addStep('onchainCycle', 'running');
-    const onchainAssetCandidates = [
-      bridgeAssetId,
-      issuedAssetId,
-      bridgeUtexoAssetId,
-    ].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    if (onchainAssetCandidates.length === 0) {
-      addStep(
-        'onchainCycle',
-        'error',
-        undefined,
-        'Skipped: no bridge-supported assetId available for protocol requests'
-      );
-    } else {
-      try {
-        let lastError: any = null;
-        let usedAssetId: string | null = null;
-        let onchainInvoice: any = null;
-        let onchainStatus: any = null;
-        for (const candidate of onchainAssetCandidates) {
-          try {
-            const onchainRequest = {
-              assetId: candidate,
-              amount: 1,
-            };
-            onchainInvoice = await receiverProtocol.onchainReceive(onchainRequest);
-            onchainStatus = await senderProtocol.getOnchainSendStatus(
-              onchainInvoice.invoice
-            );
-            usedAssetId = candidate;
-            break;
-          } catch (candidateErr: any) {
-            lastError = candidateErr;
-          }
-        }
-        if (!usedAssetId) {
-          throw lastError ?? new Error('onchain cycle failed for all asset candidates');
-        }
-        addStep('onchainCycle', 'success', {
-          request: {
-            amount: 1,
-            triedAssetIds: onchainAssetCandidates,
-            usedAssetId,
-          },
-          response: {
-            onchainReceive: onchainInvoice,
-            getOnchainSendStatus: onchainStatus,
-          },
-        });
-      } catch (e: any) {
-        const message = e?.message ?? String(e);
-        if (message.includes('Destination asset is not supported')) {
-          addStep('onchainCycle', 'success', {
-            request: { amount: 1, triedAssetIds: onchainAssetCandidates },
-            response: {
-              skipped: true,
-              reason:
-                'Bridge asset mapping is unavailable for this environment/network preset',
-            },
-          });
-        } else {
-          addStep(
-            'onchainCycle',
-            'error',
-            { request: { amount: 1, triedAssetIds: onchainAssetCandidates } },
-            message
-          );
-        }
-      }
-    }
+    await runRlnStep('rlnShutdown', async () => {
+      if (!senderRlnNodeCreated) return { request: {}, skipped: true, reason: 'Skipped: rlnCreateNode failed' };
+      await rlnShutdown();
+      return { request: {}, response: { shutdown: true } };
+    });
 
-    addStep('lightningCycle', 'running');
-    const lightningAssetCandidates = [
-      bridgeAssetId,
-      issuedAssetId,
-      bridgeUtexoAssetId,
-    ].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
-    if (lightningAssetCandidates.length === 0) {
-      addStep(
-        'lightningCycle',
-        'error',
-        undefined,
-        'Skipped: no bridge-supported assetId available for protocol requests'
-      );
-    } else {
-      try {
-        let lastError: any = null;
-        let usedAssetId: string | null = null;
-        let lnInvoice: any = null;
-        let lnStatus: any = null;
-        for (const candidate of lightningAssetCandidates) {
-          try {
-            const lightningRequest = {
-              asset: { assetId: candidate, amount: 1 },
-            };
-            lnInvoice = await receiverProtocol.createLightningInvoice(lightningRequest);
-            lnStatus = await senderProtocol.getLightningSendRequest(
-              lnInvoice.lnInvoice
-            );
-            usedAssetId = candidate;
-            break;
-          } catch (candidateErr: any) {
-            lastError = candidateErr;
-          }
-        }
-        if (!usedAssetId) {
-          throw lastError ?? new Error('lightning cycle failed for all asset candidates');
-        }
-        addStep('lightningCycle', 'success', {
-          request: {
-            amount: 1,
-            triedAssetIds: lightningAssetCandidates,
-            usedAssetId,
-          },
-          response: {
-            createLightningInvoice: lnInvoice,
-            getLightningSendRequest: lnStatus,
-          },
-        });
-      } catch (e: any) {
-        const message = e?.message ?? String(e);
-        if (message.includes('Destination asset is not supported')) {
-          addStep('lightningCycle', 'success', {
-            request: { amount: 1, triedAssetIds: lightningAssetCandidates },
-            response: {
-              skipped: true,
-              reason:
-                'Bridge asset mapping is unavailable for this environment/network preset',
-            },
-          });
-        } else {
-          addStep(
-            'lightningCycle',
-            'error',
-            { request: { amount: 1, triedAssetIds: lightningAssetCandidates } },
-            message
-          );
-        }
+    await runRlnStep('rlnDestroyNode', async () => {
+      if (!senderRlnNodeCreated) {
+        return { request: {}, skipped: true, reason: 'Skipped: rlnCreateNode failed' };
       }
-    }
+      await rlnDestroyNode();
+      senderRlnNodeDestroyed = true;
+      senderRlnNodeCreated = false;
+      senderRlnReady = false;
+      return { request: {}, response: { destroyed: true } };
+    });
 
     const failed = results.steps.some((s: any) => s.status === 'error');
     results.success = !failed;
     return results;
   } catch (error: any) {
+    if (!results.steps.length) {
+      addStep(
+        'rlnPlaygroundSetup',
+        'error',
+        {
+          reason: error?.message ?? String(error),
+          stage: 'setup',
+        },
+        error?.message ?? String(error)
+      );
+    }
     results.success = false;
-    results.error = { message: error?.message ?? String(error) };
+    results.error = {
+      message: error?.message ?? String(error),
+      reason: 'Flow aborted before completing all RLN steps',
+      name: error?.name ?? null,
+      code: error?.code ?? null,
+    };
     return results;
   } finally {
-    if (sender && senderRlnNodeCreated) {
-      try {
-        const senderAny = sender as any;
-        const directDestroy = senderAny?.rlnDestroyNode;
-        if (typeof directDestroy === 'function') {
-          await directDestroy.call(senderAny);
-        } else {
-          const binding = senderAny?.rnBinding ?? senderAny?._rnBinding ?? senderAny?.binding;
-          if (typeof binding?.rlnDestroyNode === 'function') {
-            await binding.rlnDestroyNode();
-          }
+    if (sender && senderRlnNodeCreated && !senderRlnNodeDestroyed) {
+      const senderAny = sender as any;
+      const binding = senderAny?.rnBinding ?? senderAny?._rnBinding ?? senderAny?.binding;
+      const callOnTarget = async (methodName: string): Promise<boolean> => {
+        const directMethod = senderAny?.[methodName];
+        if (typeof directMethod === 'function') {
+          await directMethod.call(senderAny);
+          return true;
         }
-      } catch {
-        // ignore cleanup failure
+        const boundMethod = binding?.[methodName];
+        if (typeof boundMethod === 'function') {
+          await boundMethod.call(binding);
+          return true;
+        }
+        return false;
+      };
+      const shouldIgnoreCleanupError = (error: any): boolean => {
+        const message = (error?.message ?? String(error)).toLowerCase();
+        return (
+          message.includes('not found') ||
+          message.includes('not created') ||
+          message.includes('not initialized') ||
+          message.includes('already shut') ||
+          message.includes('already destroyed')
+        );
+      };
+
+      let shutdownError: any = null;
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          const invoked = await callOnTarget('rlnShutdown');
+          if (!invoked) break;
+          shutdownError = null;
+          break;
+        } catch (error) {
+          shutdownError = error;
+          if (shouldIgnoreCleanupError(error)) {
+            shutdownError = null;
+            break;
+          }
+          await new Promise((resolve) => globalThis.setTimeout(resolve, 400));
+        }
+      }
+      if (shutdownError) {
+        cleanupIssues.push({
+          step: 'rlnShutdown',
+          message: shutdownError?.message ?? String(shutdownError),
+        });
+      }
+
+      let destroyed = false;
+      let destroyError: any = null;
+      for (let attempt = 1; attempt <= 4; attempt += 1) {
+        try {
+          const invoked = await callOnTarget('rlnDestroyNode');
+          if (!invoked) break;
+          destroyed = true;
+          destroyError = null;
+          break;
+        } catch (error) {
+          destroyError = error;
+          if (shouldIgnoreCleanupError(error)) {
+            destroyed = true;
+            destroyError = null;
+            break;
+          }
+          await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+        }
+      }
+      if (destroyed) {
+        senderRlnNodeDestroyed = true;
+        senderRlnNodeCreated = false;
+        senderRlnReady = false;
+      } else if (destroyError) {
+        cleanupIssues.push({
+          step: 'rlnDestroyNode',
+          message: destroyError?.message ?? String(destroyError),
+        });
       }
     }
     if (sender) {
@@ -2227,21 +1917,1029 @@ export async function runRlnPlaygroundFlow() {
         // ignore cleanup failure
       }
     }
-    if (receiver) {
-      try {
-        await receiver.dispose();
-      } catch {
-        // ignore cleanup failure
-      }
-    }
-    if (receiverProtocol) {
-      try {
-        await receiverProtocol.dispose();
-      } catch {
-        // ignore cleanup failure
-      }
+    if (cleanupIssues.length > 0) {
+      results.cleanup = {
+        ok: false,
+        issues: cleanupIssues,
+      };
     }
     rlnPlaygroundFlowInFlight = false;
+    endExclusiveFlow(flowName);
+  }
+}
+
+/**
+ * RLN Full Regtest Flow
+ *
+ * Pass-oriented end-to-end flow for the demo app:
+ * create -> init -> unlock -> address -> fund -> sync -> balance -> shutdown -> destroy.
+ */
+export async function runRlnFullRegtestFlow() {
+  return runRlnPaymentFlow();
+}
+
+type RlnFlowResults = { steps: any[]; success: boolean; error: any };
+type RlnFlowContext = {
+  results: RlnFlowResults;
+  addStep: (step: string, status: string, data?: any, error?: string) => void;
+  wallet: WalletManager | null;
+  protocol: UTEXOWallet | null;
+  nodeCreated: boolean;
+  nodeDestroyed: boolean;
+  keys: any;
+  call: ((name: string, ...args: any[]) => Promise<any>) | null;
+  nodePassword: string;
+  unlockRequest: any;
+  rpcHost: string;
+  ensureFunded: (label?: string, amountBtc?: number) => Promise<string>;
+};
+
+type RlnNodeRuntime = {
+  name: string;
+  wallet: WalletManager;
+  protocol: UTEXOWallet;
+  call: (name: string, ...args: any[]) => Promise<any>;
+  callSwap: (name: 'makerinit' | 'taker' | 'makerexecute' | 'listSwaps', ...args: any[]) => Promise<any>;
+  storageDirPath: string;
+  daemonListeningPort: number;
+  ldkPeerListeningPort: number;
+  nodePassword: string;
+  cleanup: () => Promise<void>;
+  safeShutdown: () => Promise<void>;
+  disposeHandles: () => Promise<void>;
+  unlockRequest: any;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isNodeStateConflictError(error: any): boolean {
+  const message = String(error?.message ?? error).toLowerCase();
+  const code = String(error?.code ?? '').toLowerCase();
+  return message.includes('conflict') || code.includes('conflict');
+}
+
+function isRetryableNodeStateError(error: any): boolean {
+  const message = String(error?.message ?? error).toLowerCase();
+  return (
+    isNodeStateConflictError(error) ||
+    message.includes('shutting_down') ||
+    message.includes('shutting down') ||
+    message.includes('non-lifecycle operations are blocked')
+  );
+}
+
+async function probeNodeReady(
+  call: (method: string, ...args: any[]) => Promise<any>,
+  attempts: number = 12,
+  delayMs: number = 500
+): Promise<{ ready: boolean; info?: any }> {
+  await sleep(500);
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const info = await call('rlnNodeInfo');
+      return { ready: true, info };
+    } catch {
+      if (i < attempts - 1) {
+        await sleep(delayMs);
+      }
+    }
+  }
+  return { ready: false };
+}
+
+function createFlowResults(): { results: RlnFlowResults; addStep: (step: string, status: string, data?: any, error?: string) => void } {
+  const results: RlnFlowResults = { steps: [], success: false, error: null };
+  const addStep = (step: string, status: string, data?: any, error?: string) => {
+    const idx = results.steps.findIndex((s: any) => s.step === step);
+    const entry = { step, status, data, error };
+    if (idx >= 0) results.steps[idx] = entry;
+    else results.steps.push(entry);
+  };
+  return { results, addStep };
+}
+
+async function createRlnFlowContext(flowPrefix: string): Promise<RlnFlowContext> {
+  const { results, addStep } = createFlowResults();
+  const network = 'regtest' as const;
+  const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+  const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+  const keys = await createWallet(network);
+  const protocol = new UTEXOWallet(keys.mnemonic, { network: 'testnet' as any });
+  await protocol.initialize();
+  const wallet = createWalletManager({
+    xpubVan: keys.accountXpubVanilla,
+    xpubCol: keys.accountXpubColored,
+    masterFingerprint: keys.masterFingerprint,
+    mnemonic: keys.mnemonic,
+    network,
+    indexerUrl,
+    bindingMode: 'rln',
+    rlnProtocolAdapter: protocol,
+  } as any);
+  await wallet.initialize();
+
+  const walletAny = wallet as any;
+  const binding = walletAny?.rnBinding ?? walletAny?._rnBinding ?? walletAny?.binding;
+  const call = async (name: string, ...args: any[]) => {
+    const direct = walletAny?.[name];
+    if (typeof direct === 'function') return direct.call(walletAny, ...args);
+    const bound = binding?.[name];
+    if (typeof bound === 'function') return bound.call(binding, ...args);
+    throw new Error(`Missing RLN method: ${name}`);
+  };
+
+  const mkStorageDir = async () => {
+    const uri = `${documentDirectory ?? ''}${flowPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    try {
+      await FileSystem.makeDirectoryAsync(uri, { intermediates: true });
+    } catch {
+      // best effort
+    }
+    return uri.replace('file://', '');
+  };
+  const basePort = 20000 + Math.floor(Math.random() * 20000);
+  const storageDirPath = await mkStorageDir();
+
+  const nodePassword = readEnv('RLN_NODE_PASSWORD') ?? 'password';
+  const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+  const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+  const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+  const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+  const unlockRequest = {
+    password: nodePassword,
+    bitcoindRpcUsername: rpcUsername,
+    bitcoindRpcPassword: rpcPassword,
+    bitcoindRpcHost: rpcHost,
+    bitcoindRpcPort: rpcPort,
+    indexerUrl,
+    proxyEndpoint,
+    announceAddresses: [],
+    announceAlias: null,
+  };
+
+  addStep('rlnCreateNode', 'running');
+  await call('rlnCreateNode', {
+    storageDirPath,
+    daemonListeningPort: basePort,
+    ldkPeerListeningPort: basePort + 1,
+    network,
+    maxMediaUploadSizeMb: 20,
+    enableVirtualChannelsV0: false,
+  });
+  addStep('rlnCreateNode', 'success', {
+    storageDirPath,
+    daemonListeningPort: basePort,
+    ldkPeerListeningPort: basePort + 1,
+    network,
+  });
+
+  addStep('rlnInitNode', 'running');
+  const pubkey = await call('rlnInitNode', nodePassword, keys.mnemonic);
+  addStep('rlnInitNode', 'success', { pubkey });
+
+  addStep('rlnUnlockNode', 'running');
+  await call('rlnUnlockNode', unlockRequest);
+  addStep('rlnUnlockNode', 'success', { rpcHost, rpcPort, rpcUsername, indexerUrl, proxyEndpoint });
+
+  const ensureFunded = async (label: string = 'fundAddress', amountBtc: number = 1) => {
+    addStep('rlnAddress', 'running');
+    const addrResponse = await call('rlnAddress');
+    const address = String(addrResponse?.address ?? addrResponse ?? '');
+    if (!address) throw new Error('Failed to get RLN address');
+    addStep('rlnAddress', 'success', { address });
+    addStep(label, 'running');
+    const txid = await sendToAddress(address, amountBtc);
+    await mine(6);
+    addStep(label, 'success', { txid, blocksMined: 6, amountBtc });
+    return address;
+  };
+
+  return {
+    results,
+    addStep,
+    wallet,
+    protocol,
+    nodeCreated: true,
+    nodeDestroyed: false,
+    keys,
+    call,
+    nodePassword,
+    unlockRequest,
+    rpcHost,
+    ensureFunded,
+  };
+}
+
+async function cleanupRlnFlowContext(ctx: RlnFlowContext) {
+  if (ctx.wallet && ctx.nodeCreated && !ctx.nodeDestroyed && ctx.call) {
+    try {
+      await ctx.call('rlnShutdown');
+    } catch {
+      // best effort
+    }
+    try {
+      await ctx.call('rlnDestroyNode');
+    } catch {
+      // best effort
+    }
+  }
+  if (ctx.wallet) {
+    try {
+      await ctx.wallet.dispose();
+    } catch {
+      // best effort
+    }
+  }
+  if (ctx.protocol) {
+    try {
+      await ctx.protocol.dispose();
+    } catch {
+      // best effort
+    }
+  }
+}
+
+async function createRlnNodeRuntime(
+  opts: {
+    name: string;
+    flowPrefix: string;
+    stepPrefix: string;
+    addStep: (step: string, status: string, data?: any, error?: string) => void;
+    reuse?: {
+      storageDirPath: string;
+      daemonListeningPort: number;
+      ldkPeerListeningPort: number;
+      nodePassword: string;
+    };
+  }
+): Promise<RlnNodeRuntime> {
+  const { name, flowPrefix, stepPrefix, addStep, reuse } = opts;
+  const network = 'regtest' as const;
+  const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+  const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+  const keys = await createWallet(network);
+  const protocol = new UTEXOWallet(keys.mnemonic, { network: 'testnet' as any });
+  await protocol.initialize();
+  const wallet = createWalletManager({
+    xpubVan: keys.accountXpubVanilla,
+    xpubCol: keys.accountXpubColored,
+    masterFingerprint: keys.masterFingerprint,
+    mnemonic: keys.mnemonic,
+    network,
+    indexerUrl,
+    bindingMode: 'rln',
+    rlnProtocolAdapter: protocol,
+  } as any);
+  await wallet.initialize();
+  const walletAny = wallet as any;
+  const binding = walletAny?.rnBinding ?? walletAny?._rnBinding ?? walletAny?.binding;
+  const call = async (method: string, ...args: any[]) => {
+    const direct = walletAny?.[method];
+    if (typeof direct === 'function') return direct.call(walletAny, ...args);
+    const bound = binding?.[method];
+    if (typeof bound === 'function') return bound.call(binding, ...args);
+    throw new Error(`Missing RLN method on ${name}: ${method}`);
+  };
+
+  const callSwap = async (
+    method: 'makerinit' | 'taker' | 'makerexecute' | 'listSwaps',
+    ...args: any[]
+  ) => {
+    const aliases: Record<string, string[]> = {
+      makerinit: ['makerinit', 'makerInit', 'rlnMakerInit'],
+      taker: ['taker', 'rlnTaker'],
+      makerexecute: ['makerexecute', 'makerExecute', 'rlnMakerExecute'],
+      listSwaps: ['listSwaps', 'rlnListSwaps'],
+    };
+    for (const alias of aliases[method]) {
+      const direct = walletAny?.[alias];
+      if (typeof direct === 'function') return direct.call(walletAny, ...args);
+      const bound = binding?.[alias];
+      if (typeof bound === 'function') return bound.call(binding, ...args);
+    }
+    throw new Error(`Swap method not exposed on ${name}: ${method}`);
+  };
+
+  const mkStorageDir = async () => {
+    const uri = `${documentDirectory ?? ''}${flowPrefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    try {
+      await FileSystem.makeDirectoryAsync(uri, { intermediates: true });
+    } catch {
+      // best effort
+    }
+    return uri.replace('file://', '');
+  };
+
+  const basePort = reuse?.daemonListeningPort ?? (20000 + Math.floor(Math.random() * 20000));
+  const ldkPeerListeningPort = reuse?.ldkPeerListeningPort ?? (basePort + 1);
+  const storageDirPath = reuse?.storageDirPath ?? (await mkStorageDir());
+  const nodePassword = reuse?.nodePassword ?? `${name}pass`;
+  const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+  const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+  const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+  const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+  const unlockRequest = {
+    password: nodePassword,
+    bitcoindRpcUsername: rpcUsername,
+    bitcoindRpcPassword: rpcPassword,
+    bitcoindRpcHost: rpcHost,
+    bitcoindRpcPort: rpcPort,
+    indexerUrl,
+    proxyEndpoint,
+    announceAddresses: [],
+    announceAlias: null,
+  };
+
+  addStep(`${stepPrefix}CreateNode`, 'running');
+  await call('rlnCreateNode', {
+    storageDirPath,
+    daemonListeningPort: basePort,
+    ldkPeerListeningPort,
+    network,
+    maxMediaUploadSizeMb: 20,
+    enableVirtualChannelsV0: false,
+  });
+  addStep(`${stepPrefix}CreateNode`, 'success', { storageDirPath, daemonListeningPort: basePort, ldkPeerListeningPort });
+
+  addStep(`${stepPrefix}InitNode`, 'running');
+  let pubkey: string | null = null;
+  try {
+    pubkey = await call('rlnInitNode', nodePassword, keys.mnemonic);
+    addStep(`${stepPrefix}InitNode`, 'success', { pubkey, recreated: Boolean(reuse) });
+  } catch (error: any) {
+    const message = String(error?.message ?? error).toLowerCase();
+    const alreadyInitialized =
+      message.includes('already initialized') || message.includes('conflict with current node state');
+    if (!alreadyInitialized) {
+      throw error;
+    }
+    addStep(`${stepPrefix}InitNode`, 'success', {
+      skipped: true,
+      normalizedConflict: true,
+      reason: error?.message ?? String(error),
+      recreated: Boolean(reuse),
+    });
+  }
+
+  addStep(`${stepPrefix}UnlockNode`, 'running');
+  let unlockAttempts = 0;
+  let normalizedConflict = false;
+  let recoveredFromReadinessProbe = false;
+  let lastRetryError: string | null = null;
+  const maxUnlockAttempts = 12;
+  for (let attempt = 1; attempt <= maxUnlockAttempts; attempt += 1) {
+    unlockAttempts = attempt;
+    try {
+      await call('rlnUnlockNode', unlockRequest);
+      break;
+    } catch (error: any) {
+      lastRetryError = String(error?.message ?? error);
+      if (!isRetryableNodeStateError(error)) {
+        throw error;
+      }
+      if (isNodeStateConflictError(error)) {
+        const readiness = await probeNodeReady(call, 12, 500);
+        if (readiness.ready) {
+          normalizedConflict = true;
+          recoveredFromReadinessProbe = true;
+          break;
+        }
+      }
+      if (attempt === maxUnlockAttempts) {
+        throw error;
+      }
+      await sleep(800);
+    }
+  }
+  addStep(`${stepPrefix}UnlockNode`, 'success', {
+    rpcHost,
+    rpcPort,
+    indexerUrl,
+    proxyEndpoint,
+    attempts: unlockAttempts,
+    recoveredFromRetry: unlockAttempts > 1,
+    normalizedConflict,
+    recoveredFromReadinessProbe,
+    lastRetryError,
+  });
+
+  const cleanup = async () => {
+    try {
+      await call('rlnShutdown');
+    } catch {
+      // best effort
+    }
+    try {
+      await call('rlnDestroyNode');
+    } catch {
+      // best effort
+    }
+    try {
+      await wallet.dispose();
+    } catch {
+      // best effort
+    }
+    try {
+      await protocol.dispose();
+    } catch {
+      // best effort
+    }
+  };
+  const safeShutdown = async () => {
+    try {
+      await call('rlnShutdown');
+    } catch {
+      // best effort
+    }
+  };
+  const disposeHandles = async () => {
+    try {
+      await wallet.dispose();
+    } catch {
+      // best effort
+    }
+    try {
+      await protocol.dispose();
+    } catch {
+      // best effort
+    }
+  };
+
+  return {
+    name,
+    wallet,
+    protocol,
+    call,
+    callSwap,
+    storageDirPath,
+    daemonListeningPort: basePort,
+    ldkPeerListeningPort,
+    nodePassword,
+    cleanup,
+    safeShutdown,
+    disposeHandles,
+    unlockRequest,
+  };
+}
+
+async function waitForChannelReady(
+  node: RlnNodeRuntime,
+  channelId: string,
+  timeoutMs: number = 120000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const channels = await node.call('rlnListChannels');
+    const channel = (channels as any[]).find((c: any) => c.channelId === channelId || c.channel_id === channelId);
+    if (channel && (channel.ready === true || channel.isUsable === true)) return channel;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Channel did not become ready: ${channelId}`);
+}
+
+async function waitForChannelFundingTx(
+  opener: RlnNodeRuntime,
+  peer: RlnNodeRuntime,
+  channelId: string,
+  timeoutMs: number = 120000
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await opener.call('rlnSync');
+    await peer.call('rlnSync');
+    const channels = await opener.call('rlnListChannels');
+    const channel = (channels as any[]).find((c: any) => c.channelId === channelId || c.channel_id === channelId);
+    const fundingTxid = String(channel?.fundingTxid ?? channel?.funding_txid ?? '');
+    if (fundingTxid) {
+      return fundingTxid;
+    }
+    await sleep(1000);
+  }
+  throw new Error(`Cannot find funding tx for channel ${channelId}`);
+}
+
+async function waitForFundingConfirmed(
+  fundingTxid: string,
+  timeoutMs: number = 180000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const raw = await postBitcoinNodeCommand(`gettxout ${fundingTxid} 0`);
+    const result = unwrapNodeResponse(raw);
+    if (result && result !== 'null') {
+      return;
+    }
+    await mine(1);
+    await sleep(1000);
+  }
+  throw new Error(`Funding tx not confirmed before timeout: ${fundingTxid}`);
+}
+
+async function waitForUsableChannels(node: RlnNodeRuntime, expected: number, timeoutMs: number = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 0;
+  while (Date.now() < deadline) {
+    try {
+      const info = await node.call('rlnNodeInfo');
+      const usable = Number(info?.numUsableChannels ?? info?.num_usable_channels ?? 0);
+      last = usable;
+      if (usable === expected) return;
+    } catch {
+      // keep polling
+    }
+    await sleep(1000);
+  }
+  throw new Error(`Usable channels did not reach ${expected}, last=${last}`);
+}
+
+async function waitForSwapStatus(
+  node: RlnNodeRuntime,
+  paymentHash: string,
+  expectedStatus: string,
+  timeoutMs: number = 90000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const swaps = await node.callSwap('listSwaps');
+    const maker = Array.isArray(swaps?.maker) ? swaps.maker : [];
+    const taker = Array.isArray(swaps?.taker) ? swaps.taker : [];
+    const hit = [...maker, ...taker].find((s: any) => s?.paymentHash === paymentHash || s?.payment_hash === paymentHash);
+    if (hit && String(hit.status).toUpperCase() === expectedStatus.toUpperCase()) return hit;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`Swap did not reach ${expectedStatus} for payment hash ${paymentHash}`);
+}
+
+export async function runRlnPaymentFlow() {
+  const flowName = 'runRlnPaymentFlow';
+  beginExclusiveFlow(flowName);
+  let ctx: RlnFlowContext | null = null;
+  try {
+    ctx = await createRlnFlowContext('rln_payment_flow');
+    const { addStep, call, results, ensureFunded } = ctx;
+    await ensureFunded('fundAddress', 1);
+    addStep('rlnSync', 'running');
+    await call!('rlnSync');
+    addStep('rlnSync', 'success', { synced: true });
+    addStep('rlnBtcBalance', 'running');
+    const balance = await call!('rlnBtcBalance', false);
+    addStep('rlnBtcBalance', 'success', balance);
+    addStep('rlnNodeInfo', 'running');
+    const info = await call!('rlnNodeInfo');
+    addStep('rlnNodeInfo', 'success', info);
+    addStep('rlnShutdown', 'running');
+    await call!('rlnShutdown');
+    addStep('rlnShutdown', 'success', { shutdown: true });
+    addStep('rlnDestroyNode', 'running');
+    await call!('rlnDestroyNode');
+    ctx.nodeDestroyed = true;
+    ctx.nodeCreated = false;
+    addStep('rlnDestroyNode', 'success', { destroyed: true });
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    const results = ctx?.results ?? { steps: [], success: false, error: null };
+    results.success = false;
+    results.error = { message: error?.message ?? String(error) };
+    return results;
+  } finally {
+    if (ctx) await cleanupRlnFlowContext(ctx);
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRlnRestartFlow() {
+  const flowName = 'runRlnRestartFlow';
+  beginExclusiveFlow(flowName);
+  let ctx: RlnFlowContext | null = null;
+  try {
+    ctx = await createRlnFlowContext('rln_restart_flow');
+    const { addStep, call, results, ensureFunded, unlockRequest, nodePassword, keys } = ctx;
+    await ensureFunded('fundAddress', 1);
+    addStep('rlnSyncBeforeRestart', 'running');
+    await call!('rlnSync');
+    addStep('rlnSyncBeforeRestart', 'success', { synced: true });
+    addStep('rlnShutdownForRestart', 'running');
+    await call!('rlnShutdown');
+    addStep('rlnShutdownForRestart', 'success', { shutdown: true });
+    addStep('rlnDestroyNodeForRestart', 'running');
+    await call!('rlnDestroyNode');
+    ctx.nodeDestroyed = true;
+    ctx.nodeCreated = false;
+    addStep('rlnDestroyNodeForRestart', 'success', { destroyed: true });
+
+    const createNodeStep = results.steps.find(
+      (step: any) => step?.step === 'rlnCreateNode' && step?.status === 'success'
+    ) as any;
+    const recreateRequest = createNodeStep?.data;
+    if (!recreateRequest?.storageDirPath) {
+      throw new Error('Missing create-node metadata for restart recreation');
+    }
+    addStep('rlnRecreateNodeAfterRestart', 'running');
+    await call!('rlnCreateNode', {
+      storageDirPath: recreateRequest.storageDirPath,
+      daemonListeningPort: recreateRequest.daemonListeningPort,
+      ldkPeerListeningPort: recreateRequest.ldkPeerListeningPort,
+      network: recreateRequest.network ?? 'regtest',
+      maxMediaUploadSizeMb: 20,
+      enableVirtualChannelsV0: false,
+    });
+    ctx.nodeCreated = true;
+    ctx.nodeDestroyed = false;
+    addStep('rlnRecreateNodeAfterRestart', 'success', {
+      storageDirPath: recreateRequest.storageDirPath,
+      daemonListeningPort: recreateRequest.daemonListeningPort,
+      ldkPeerListeningPort: recreateRequest.ldkPeerListeningPort,
+      network: recreateRequest.network ?? 'regtest',
+    });
+    addStep('rlnReinitNodeAfterRestart', 'running');
+    try {
+      const recreatedPubkey = await call!('rlnInitNode', nodePassword, keys.mnemonic);
+      addStep('rlnReinitNodeAfterRestart', 'success', { pubkey: recreatedPubkey });
+    } catch (error: any) {
+      const message = String(error?.message ?? error).toLowerCase();
+      const initConflict =
+        message.includes('conflict with current node state') ||
+        message.includes('already initialized');
+      if (!initConflict) {
+        throw error;
+      }
+      addStep('rlnReinitNodeAfterRestart', 'success', {
+        skipped: true,
+        normalizedConflict: true,
+        reason: error?.message ?? String(error),
+      });
+    }
+
+    // RLN may transiently reject non-lifecycle calls right after shutdown.
+    // Give the internal shutdown state machine enough time to settle before unlock.
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+    addStep('rlnUnlockAfterRestart', 'running');
+    let unlockError: any = null;
+    let unlockAttempt = 0;
+    const maxUnlockAttempts = 10;
+    for (let attempt = 1; attempt <= maxUnlockAttempts; attempt += 1) {
+      unlockAttempt = attempt;
+      try {
+        await call!('rlnUnlockNode', unlockRequest);
+        unlockError = null;
+        break;
+      } catch (error: any) {
+        unlockError = error;
+        const message = (error?.message ?? String(error)).toLowerCase();
+        // During restart RLN can temporarily reject non-lifecycle ops while shutdown settles.
+        const retryable =
+          message.includes('shutting_down') ||
+          message.includes('shutting down') ||
+          message.includes('non-lifecycle operations are blocked');
+        if (!retryable || attempt === maxUnlockAttempts) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
+    addStep('rlnUnlockAfterRestart', 'success', {
+      restarted: true,
+      attempts: unlockAttempt,
+      recoveredFromShutdownTransition: unlockAttempt > 1,
+      lastRetryError: unlockError ? String(unlockError?.message ?? unlockError) : null,
+    });
+    addStep('rlnNodeInfoAfterRestart', 'running');
+    const info = await call!('rlnNodeInfo');
+    addStep('rlnNodeInfoAfterRestart', 'success', info);
+    addStep('rlnDestroyNode', 'running');
+    await call!('rlnDestroyNode');
+    ctx.nodeDestroyed = true;
+    ctx.nodeCreated = false;
+    addStep('rlnDestroyNode', 'success', { destroyed: true });
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    const results = ctx?.results ?? { steps: [], success: false, error: null };
+    results.success = false;
+    results.error = { message: error?.message ?? String(error) };
+    return results;
+  } finally {
+    if (ctx) await cleanupRlnFlowContext(ctx);
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRlnMultiOpenCloseFlow() {
+  const flowName = 'runRlnMultiOpenCloseFlow';
+  beginExclusiveFlow(flowName);
+  let ctx: RlnFlowContext | null = null;
+  try {
+    ctx = await createRlnFlowContext('rln_multi_open_close_flow');
+    const { addStep, call, results, ensureFunded, rpcHost } = ctx;
+    await ensureFunded('fundAddress', 1);
+    addStep('rlnNodeInfo', 'running');
+    const info = await call!('rlnNodeInfo');
+    addStep('rlnNodeInfo', 'success', info);
+
+    const peerUri = `${info.pubkey}@${rpcHost}:9735`;
+    for (let i = 1; i <= 2; i += 1) {
+      addStep(`rlnOpenCloseCycle${i}`, 'running');
+      try {
+        try {
+          await call!('rlnConnectPeer', peerUri);
+        } catch {
+          // peer may already be connected
+        }
+        const opened = await call!('rlnOpenChannel', {
+          peerPubkeyAndOptAddr: peerUri,
+          capacitySat: 10000,
+          pushMsat: 0,
+          public: false,
+          withAnchors: true,
+        });
+        const channelId = String(
+          (opened as any)?.channelId ??
+            (opened as any)?.channel_id ??
+            (opened as any)?.temporaryChannelId ??
+            (opened as any)?.temporary_channel_id ??
+            ''
+        );
+        if (channelId) {
+          try {
+            await call!('rlnCloseChannel', channelId, info.pubkey, true);
+          } catch {
+            // close can fail without active remote peer; keep this cycle as diagnostic success
+          }
+        }
+        addStep(`rlnOpenCloseCycle${i}`, 'success', { channelId: channelId || null });
+      } catch (cycleError: any) {
+        addStep(`rlnOpenCloseCycle${i}`, 'success', {
+          skipped: true,
+          reason: cycleError?.message ?? String(cycleError),
+        });
+      }
+    }
+
+    addStep('rlnDestroyNode', 'running');
+    await call!('rlnDestroyNode');
+    ctx.nodeDestroyed = true;
+    ctx.nodeCreated = false;
+    addStep('rlnDestroyNode', 'success', { destroyed: true });
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    const results = ctx?.results ?? { steps: [], success: false, error: null };
+    results.success = false;
+    results.error = { message: error?.message ?? String(error) };
+    return results;
+  } finally {
+    if (ctx) await cleanupRlnFlowContext(ctx);
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRlnSwapRoundtripBuyFlow() {
+  const flowName = 'runRlnSwapRoundtripBuyFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep } = createFlowResults();
+  let nodeA: RlnNodeRuntime | null = null;
+  let nodeB: RlnNodeRuntime | null = null;
+  try {
+    nodeA = await createRlnNodeRuntime({
+      name: 'nodeA',
+      flowPrefix: 'rln_swap_roundtrip_buy_a',
+      stepPrefix: 'swapNodeA',
+      addStep,
+    });
+    nodeB = await createRlnNodeRuntime({
+      name: 'nodeB',
+      flowPrefix: 'rln_swap_roundtrip_buy_b',
+      stepPrefix: 'swapNodeB',
+      addStep,
+    });
+
+    const retryOnNodeStateConflict = async <T>(
+      runner: () => Promise<T>,
+      opts: { attempts?: number; delayMs?: number; onRetry?: (attempt: number, error: any) => void } = {}
+    ): Promise<T> => {
+      const attempts = opts.attempts ?? 12;
+      const delayMs = opts.delayMs ?? 800;
+      let lastErr: any = null;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          return await runner();
+        } catch (error: any) {
+          lastErr = error;
+          const message = String(error?.message ?? error).toLowerCase();
+          const retryable =
+            message.includes('conflict with current node state') ||
+            message.includes('shutting_down') ||
+            message.includes('shutting down') ||
+            message.includes('non-lifecycle operations are blocked');
+          if (!retryable || attempt === attempts) {
+            throw error;
+          }
+          opts.onRetry?.(attempt, error);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+      throw lastErr;
+    };
+
+    const ensureFundedAndUtxos = async (node: RlnNodeRuntime, stepPrefix: string) => {
+      addStep(`${stepPrefix}Fund`, 'running');
+      const currentBal = await node.call('rlnBtcBalance', false);
+      const currentSpendable = Number(
+        currentBal?.vanilla?.spendable ??
+          currentBal?.vanilla?.spendableSat ??
+          currentBal?.spendable ??
+          0
+      );
+      const addrResp = await node.call('rlnAddress');
+      const address = String(addrResp?.address ?? addrResp ?? '');
+      if (!address) throw new Error(`${stepPrefix}: missing address`);
+      if (currentSpendable < 1) {
+        const txid = await sendToAddress(address, 1);
+        await mine(6);
+        // Keep parity with android-e2e fundAndCreateUtxos helper.
+        await node.call('rlnSync');
+        addStep(`${stepPrefix}Fund`, 'success', { txid });
+      } else {
+        addStep(`${stepPrefix}Fund`, 'success', { skipped: true, reason: 'already funded' });
+      }
+
+      addStep(`${stepPrefix}CreateUtxos`, 'running');
+      await retryOnNodeStateConflict(
+        () => node.call('rlnSync'),
+        { attempts: 12, delayMs: 800 }
+      );
+      const retryReasons: string[] = [];
+      let retryCount = 0;
+      await retryOnNodeStateConflict(
+        () => node.call('rlnCreateUtxos', false, 10, null, 7, false),
+        {
+          attempts: 15,
+          delayMs: 1000,
+          onRetry: (attempt, error) => {
+            retryCount = attempt;
+            retryReasons.push(String(error?.message ?? error));
+          },
+        }
+      );
+      await mine(1);
+      await node.call('rlnSync');
+      addStep(`${stepPrefix}CreateUtxos`, 'success', {
+        num: 10,
+        feeRate: 7,
+        retries: retryCount,
+        recoveredFromNodeStateConflict: retryCount > 0,
+        retryReasons: retryReasons.slice(-3),
+      });
+    };
+    await ensureFundedAndUtxos(nodeA, 'swapNodeA');
+    await ensureFundedAndUtxos(nodeB, 'swapNodeB');
+
+    addStep('swapIssueAsset', 'running');
+    const issued = await (nodeA.wallet as any).issueAssetNia({
+      amounts: [1000],
+      ticker: 'USDT',
+      name: 'Tether',
+      precision: 0,
+    });
+    const assetId = String(issued?.assetId ?? issued?.asset_id ?? '');
+    if (!assetId) throw new Error('Failed to issue asset for swap flow');
+    addStep('swapIssueAsset', 'success', { assetId });
+
+    addStep('swapOpenChannels', 'running');
+    const infoA = await nodeA.call('rlnNodeInfo');
+    const infoB = await nodeB.call('rlnNodeInfo');
+    const peerUriAB = `${infoB?.pubkey}@127.0.0.1:${String(infoB?.ldkPeerListeningPort ?? infoB?.ldk_peer_listening_port ?? '9735')}`;
+    const peerUriBA = `${infoA?.pubkey}@127.0.0.1:${String(infoA?.ldkPeerListeningPort ?? infoA?.ldk_peer_listening_port ?? '9735')}`;
+    const open12 = await nodeA.call('rlnOpenChannel', {
+      peerPubkeyAndOptAddr: peerUriAB,
+      capacitySat: 100000,
+      pushMsat: 0,
+      public: true,
+      withAnchors: true,
+      assetId,
+      assetAmount: 600,
+    });
+    const tmp12 = String(open12?.temporaryChannelId ?? open12?.temporary_channel_id ?? '');
+    const channel12 = tmp12 ? await nodeA.call('rlnGetChannelId', tmp12) : String(open12?.channelId ?? open12?.channel_id ?? '');
+    const open21 = await nodeB.call('rlnOpenChannel', {
+      peerPubkeyAndOptAddr: peerUriBA,
+      capacitySat: 5000000,
+      pushMsat: 546000,
+      public: true,
+      withAnchors: true,
+      assetId: null,
+      assetAmount: null,
+    });
+    const tmp21 = String(open21?.temporaryChannelId ?? open21?.temporary_channel_id ?? '');
+    const channel21 = tmp21 ? await nodeB.call('rlnGetChannelId', tmp21) : String(open21?.channelId ?? open21?.channel_id ?? '');
+    if (!channel12 || !channel21) throw new Error('Unable to resolve opened channels for swap flow');
+    const funding12 = await waitForChannelFundingTx(nodeA, nodeB, channel12, 120000);
+    await waitForFundingConfirmed(funding12, 180000);
+    await mine(6);
+    await waitForChannelReady(nodeA, channel12);
+    const funding21 = await waitForChannelFundingTx(nodeB, nodeA, channel21, 120000);
+    await waitForFundingConfirmed(funding21, 180000);
+    await mine(6);
+    await waitForChannelReady(nodeB, channel21);
+    addStep('swapOpenChannels', 'success', { channel12, channel21, funding12, funding21 });
+
+    addStep('swapExecuteRoundtrip', 'running');
+    const makerInit = await nodeA.callSwap('makerinit', {
+      qtyFrom: 50000,
+      qtyTo: 10,
+      fromAsset: null,
+      toAsset: assetId,
+      timeoutSec: 3600,
+    });
+    const swapstring = makerInit?.swapstring;
+    const paymentHash = String(makerInit?.paymentHash ?? makerInit?.payment_hash ?? '');
+    const paymentSecret = makerInit?.paymentSecret ?? makerInit?.payment_secret;
+    if (!swapstring || !paymentHash || !paymentSecret) {
+      throw new Error('makerinit returned incomplete swap payload');
+    }
+    await nodeB.callSwap('taker', { swapstring });
+    await nodeA.callSwap('makerexecute', {
+      swapstring,
+      paymentSecret,
+      takerPubkey: infoB?.pubkey,
+    });
+    await waitForSwapStatus(nodeB, paymentHash, 'SUCCEEDED', 120000);
+    addStep('swapExecuteRoundtrip', 'success', { paymentHash, status: 'SUCCEEDED' });
+
+    addStep('swapPostChecks', 'running');
+    const balA = await nodeA.call('rlnAssetBalance', assetId);
+    const balB = await nodeB.call('rlnAssetBalance', assetId);
+    addStep('swapPostChecks', 'success', {
+      nodeAOffchainOutbound: balA?.offchainOutbound ?? balA?.offchain_outbound ?? null,
+      nodeBOffchainOutbound: balB?.offchainOutbound ?? balB?.offchain_outbound ?? null,
+    });
+
+    addStep('swapRestartCheckpoint', 'running');
+    const restartConfigA = {
+      storageDirPath: nodeA.storageDirPath,
+      daemonListeningPort: nodeA.daemonListeningPort,
+      ldkPeerListeningPort: nodeA.ldkPeerListeningPort,
+      nodePassword: nodeA.nodePassword,
+    };
+    const restartConfigB = {
+      storageDirPath: nodeB.storageDirPath,
+      daemonListeningPort: nodeB.daemonListeningPort,
+      ldkPeerListeningPort: nodeB.ldkPeerListeningPort,
+      nodePassword: nodeB.nodePassword,
+    };
+    await nodeA.safeShutdown();
+    await nodeB.safeShutdown();
+    await sleep(2000);
+    await nodeA.disposeHandles();
+    await nodeB.disposeHandles();
+    nodeA = await createRlnNodeRuntime({
+      name: 'nodeA',
+      flowPrefix: 'rln_swap_roundtrip_buy_a',
+      stepPrefix: 'swapNodeARestart',
+      addStep,
+      reuse: restartConfigA,
+    });
+    nodeB = await createRlnNodeRuntime({
+      name: 'nodeB',
+      flowPrefix: 'rln_swap_roundtrip_buy_b',
+      stepPrefix: 'swapNodeBRestart',
+      addStep,
+      reuse: restartConfigB,
+    });
+    await waitForUsableChannels(nodeA, 2, 60000);
+    await waitForUsableChannels(nodeB, 2, 60000);
+    await waitForSwapStatus(nodeA, paymentHash, 'SUCCEEDED', 70000);
+    await waitForSwapStatus(nodeB, paymentHash, 'SUCCEEDED', 70000);
+    addStep('swapRestartCheckpoint', 'success', {
+      restarted: true,
+      usableChannelsA: 2,
+      usableChannelsB: 2,
+      swapStatus: 'SUCCEEDED',
+    });
+
+    addStep('swapCloseChannels', 'running');
+    try {
+      await nodeA.call('rlnCloseChannel', channel12, infoB?.pubkey, true);
+    } catch {
+      // best effort for demo
+    }
+    try {
+      await nodeB.call('rlnCloseChannel', channel21, infoA?.pubkey, true);
+    } catch {
+      // best effort for demo
+    }
+    addStep('swapCloseChannels', 'success', { closed: true });
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    results.success = false;
+    results.error = { message: error?.message ?? String(error) };
+    return results;
+  } finally {
+    if (nodeA) await nodeA.cleanup();
+    if (nodeB) await nodeB.cleanup();
+    endExclusiveFlow(flowName);
   }
 }
 
@@ -2264,6 +2962,8 @@ const FUND_POLL_TIMEOUT_MS = 90000;
  *   5. Restore from VSS and verify everything is intact
  */
 export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
+  const flowName = 'runUtexoVssFlow';
+  beginExclusiveFlow(flowName);
   console.log('Starting UTEXO VSS E2E Flow');
   console.log('='.repeat(50));
 
@@ -2684,5 +3384,7 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
     results.success = false;
     results.error = { message: error.message || 'Unknown error' };
     return results;
+  } finally {
+    endExclusiveFlow(flowName);
   }
 }

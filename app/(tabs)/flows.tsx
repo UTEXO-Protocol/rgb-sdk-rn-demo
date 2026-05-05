@@ -47,7 +47,13 @@ import {
 } from '@utexo/rgb-sdk-rn';
 
 import { AppColors } from '@/constants/theme';
-import { runRlnPlaygroundFlow, runUtexoVssFlow } from '@/utils/wallet-flow';
+import {
+  runRlnMultiOpenCloseFlow,
+  runRlnPaymentFlow,
+  runRlnRestartFlow,
+  runRlnSwapRoundtripBuyFlow,
+  runUtexoVssFlow,
+} from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
 
@@ -243,6 +249,14 @@ function FlowCard({
         </View>
       </View>
 
+      {/* Flow-level error summary */}
+      {hasResults && !effectiveRunning && success === false && results?.error && (
+        <View style={fStyles.flowErrorBox}>
+          <Text style={fStyles.flowErrorTitle}>Failure reason</Text>
+          <Text style={fStyles.flowErrorText}>{formatDetail(results.error)}</Text>
+        </View>
+      )}
+
       {/* Progress dots */}
       {steps.length > 0 && total > 0 && (
         <View style={fStyles.progressRow}>
@@ -421,20 +435,77 @@ const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
   verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
 };
 
-const RLN_PLAYGROUND_STEP_META: Record<string, { label: string; desc: string }> = {
-  createSender: { label: 'Create Sender', desc: 'Initialize WalletManager in RLN mode' },
-  senderAddressBalance: { label: 'Sender Address/BTC', desc: 'Read address and current BTC balance' },
-  fundSender: { label: 'Fund Sender', desc: 'Send BTC to sender and mine confirmations' },
-  createUtxos: { label: 'Create UTXOs', desc: 'Prepare spendable UTXOs before issuance' },
-  issueAssetNia: { label: 'Issue NIA', desc: 'Issue a small test asset for playground cycles' },
-  createReceiver: { label: 'Create Receiver', desc: 'Initialize second WalletManager in RLN mode' },
-  onchainCycle: { label: 'Onchain Request Cycle', desc: 'Run onchain receive/status through RLN adapter' },
-  lightningCycle: { label: 'Lightning Request Cycle', desc: 'Run lightning invoice/status through RLN adapter' },
+const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
+  rlnCreateNode: { label: 'Create Node', desc: 'Create RLN node with local storage and ports' },
+  rlnInitNode: { label: 'Init Node', desc: 'Initialize node with wallet mnemonic' },
+  rlnUnlockNode: { label: 'Unlock Node', desc: 'Unlock node with bitcoind/indexer/proxy settings' },
+  rlnNodeInfo: { label: 'Node Info', desc: 'Read node summary and balances' },
+  rlnNetworkInfo: { label: 'Network Info', desc: 'Read chain network and height' },
+  rlnListPeers: { label: 'List Peers', desc: 'Fetch currently known peers' },
+  rlnConnectPeer: { label: 'Connect Peer', desc: 'Connect to test peer endpoint' },
+  rlnDisconnectPeer: { label: 'Disconnect Peer', desc: 'Disconnect selected peer pubkey' },
+  rlnListChannels: { label: 'List Channels', desc: 'Fetch currently known channels' },
+  rlnOpenChannel: { label: 'Open Channel', desc: 'Try opening a test channel' },
+  rlnCloseChannel: { label: 'Close Channel', desc: 'Close opened channel when available' },
+  rlnListPayments: { label: 'List Payments', desc: 'Fetch payments history from RLN node' },
+  rlnAddress: { label: 'Address', desc: 'Request onchain receive address' },
+  fundAddress: { label: 'Fund Address', desc: 'Send BTC to node address and mine confirmation blocks' },
+  rlnBtcBalance: { label: 'BTC Balance', desc: 'Read BTC balances from RLN node' },
+  rlnAssetBalance: { label: 'Asset Balance', desc: 'Read RGB asset balance for provided assetId' },
+  rlnCheckIndexerUrl: { label: 'Check Indexer URL', desc: 'Validate indexer endpoint reachability' },
+  rlnCheckProxyEndpoint: { label: 'Check Proxy Endpoint', desc: 'Validate proxy endpoint reachability' },
+  rlnEstimateFee: { label: 'Estimate Fee', desc: 'Estimate fee rates for target blocks' },
+  rlnCreateUtxos: { label: 'Create UTXOs', desc: 'Request UTXO creation on RLN node wallet' },
+  rlnDecodeLnInvoice: { label: 'Decode LN Invoice', desc: 'Decode BOLT11 lightning invoice string' },
+  rlnDecodeRgbInvoice: { label: 'Decode RGB Invoice', desc: 'Decode RGB invoice string' },
+  rlnFailTransfers: { label: 'Fail Transfers', desc: 'Mark pending transfers as failed' },
+  rlnGetChannelId: { label: 'Get Channel ID', desc: 'Resolve channel id from temporary id' },
+  rlnGetPayment: { label: 'Get Payment', desc: 'Lookup payment by payment hash' },
+  rlnInvoiceStatus: { label: 'Invoice Status', desc: 'Read status for LN invoice' },
+  rlnKeysend: { label: 'Keysend', desc: 'Send keysend payment attempt' },
+  rlnListAssets: { label: 'List Assets', desc: 'List RGB assets tracked by RLN wallet' },
+  rlnListTransactions: { label: 'List Transactions', desc: 'List onchain transactions' },
+  rlnListTransfers: { label: 'List Transfers', desc: 'List RGB transfers for assetId' },
+  rlnListUnspents: { label: 'List Unspents', desc: 'List spendable unspent outputs' },
+  rlnLnInvoice: { label: 'Create LN Invoice', desc: 'Create lightning invoice request' },
+  rlnRefreshTransfers: { label: 'Refresh Transfers', desc: 'Refresh transfer statuses from network' },
+  rlnRgbInvoice: { label: 'Create RGB Invoice', desc: 'Create RGB receive invoice request' },
+  rlnSendBtc: { label: 'Send BTC', desc: 'Send onchain BTC transaction attempt' },
+  rlnSendPayment: { label: 'Send Payment', desc: 'Pay lightning invoice attempt' },
+  rlnSendRgb: { label: 'Send RGB', desc: 'Send RGB transfer attempt' },
+  rlnBackup: { label: 'Backup', desc: 'Trigger RLN wallet backup request' },
+  rlnSync: { label: 'Sync', desc: 'Sync RLN node wallet state' },
+  rlnLock: { label: 'Lock', desc: 'Not supported in current RLN bindings' },
+  rlnRestore: { label: 'Restore', desc: 'Wallet-level restore, not RLN node method' },
+  rlnShutdown: { label: 'Shutdown', desc: 'Shutdown RLN node process' },
+  rlnDestroyNode: { label: 'Destroy Node', desc: 'Destroy node handle and cleanup resources' },
+  rlnSyncBeforeRestart: { label: 'Sync Before Restart', desc: 'Sync node before restart sequence' },
+  rlnShutdownForRestart: { label: 'Shutdown For Restart', desc: 'Shutdown node to validate restart lifecycle' },
+  rlnUnlockAfterRestart: { label: 'Unlock After Restart', desc: 'Unlock node again after shutdown' },
+  rlnNodeInfoAfterRestart: { label: 'Node Info After Restart', desc: 'Validate node information after restart' },
+  rlnOpenCloseCycle1: { label: 'Open/Close Cycle 1', desc: 'First open-close channel diagnostic cycle' },
+  rlnOpenCloseCycle2: { label: 'Open/Close Cycle 2', desc: 'Second open-close channel diagnostic cycle' },
+  swapNodeACreateNode: { label: 'Swap Node A Create', desc: 'Create maker node A' },
+  swapNodeAInitNode: { label: 'Swap Node A Init', desc: 'Initialize maker node A' },
+  swapNodeAUnlockNode: { label: 'Swap Node A Unlock', desc: 'Unlock maker node A' },
+  swapNodeBCreateNode: { label: 'Swap Node B Create', desc: 'Create taker node B' },
+  swapNodeBInitNode: { label: 'Swap Node B Init', desc: 'Initialize taker node B' },
+  swapNodeBUnlockNode: { label: 'Swap Node B Unlock', desc: 'Unlock taker node B' },
+  swapNodeAFund: { label: 'Swap Node A Fund', desc: 'Fund node A with BTC' },
+  swapNodeBFund: { label: 'Swap Node B Fund', desc: 'Fund node B with BTC' },
+  swapNodeACreateUtxos: { label: 'Swap Node A UTXOs', desc: 'Create UTXOs for node A' },
+  swapNodeBCreateUtxos: { label: 'Swap Node B UTXOs', desc: 'Create UTXOs for node B' },
+  swapIssueAsset: { label: 'Swap Issue Asset', desc: 'Issue test asset for swap' },
+  swapOpenChannels: { label: 'Swap Open Channels', desc: 'Open asset and BTC channels between nodes' },
+  swapExecuteRoundtrip: { label: 'Swap Execute', desc: 'Run makerinit -> taker -> makerexecute sequence' },
+  swapPostChecks: { label: 'Swap Post Checks', desc: 'Validate swap and balances after execution' },
+  swapCloseChannels: { label: 'Swap Close Channels', desc: 'Close swap test channels' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
+  const RLN_ONLY_MODE = true;
   const [testResults, setTestResults] = useState<TestSuite | null>(null);
   const [testLoading, setTestLoading] = useState(true);
 
@@ -449,9 +520,47 @@ export default function FlowsScreen() {
 
   const [reuseAddressFlowResults, setReuseAddressFlowResults] = useState<FlowResults>(null);
   const [runningReuseAddressFlow, setRunningReuseAddressFlow] = useState(false);
-  const [rlnPlaygroundResults, setRlnPlaygroundResults] = useState<FlowResults>(null);
-  const [runningRlnPlaygroundFlow, setRunningRlnPlaygroundFlow] = useState(false);
-  const rlnPlaygroundInFlightRef = useRef(false);
+  const [rlnPaymentResults, setRlnPaymentResults] = useState<FlowResults>(null);
+  const [runningRlnPaymentFlow, setRunningRlnPaymentFlow] = useState(false);
+  const rlnPaymentInFlightRef = useRef(false);
+  const [rlnRestartResults, setRlnRestartResults] = useState<FlowResults>(null);
+  const [runningRlnRestartFlow, setRunningRlnRestartFlow] = useState(false);
+  const rlnRestartInFlightRef = useRef(false);
+  const [rlnMultiOpenCloseResults, setRlnMultiOpenCloseResults] = useState<FlowResults>(null);
+  const [runningRlnMultiOpenCloseFlow, setRunningRlnMultiOpenCloseFlow] = useState(false);
+  const rlnMultiOpenCloseInFlightRef = useRef(false);
+  const [rlnSwapRoundtripResults, setRlnSwapRoundtripResults] = useState<FlowResults>(null);
+  const [runningRlnSwapRoundtripFlow, setRunningRlnSwapRoundtripFlow] = useState(false);
+  const rlnSwapRoundtripInFlightRef = useRef(false);
+  const effectiveRpcHost =
+    process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
+    (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+  const effectiveUnlockRequestFromConfig = {
+    password: process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD ?? 'password',
+    bitcoindRpcUsername: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME ?? 'user',
+    bitcoindRpcPassword: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD ?? 'password',
+    bitcoindRpcHost: effectiveRpcHost,
+    bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT ?? '18443'),
+    indexerUrl: process.env.EXPO_PUBLIC_RLN_INDEXER_URL ?? `${effectiveRpcHost}:50001`,
+    proxyEndpoint:
+      process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT ?? `rpc://${effectiveRpcHost}:3000/json-rpc`,
+  };
+  const rlnUnlockStep = [...(rlnPaymentResults?.steps ?? [])]
+    .reverse()
+    .find((step: any) => step?.step === 'rlnUnlockNode');
+  const rlnUnlockRequest =
+    rlnUnlockStep?.data?.request ??
+    rlnUnlockStep?.result?.request ??
+    effectiveUnlockRequestFromConfig;
+  const rlnEffectiveUnlockConfig = [
+    ['password', rlnUnlockRequest?.password ?? '(unset)'],
+    ['bitcoindRpcUsername', rlnUnlockRequest?.bitcoindRpcUsername ?? '(unset)'],
+    ['bitcoindRpcPassword', rlnUnlockRequest?.bitcoindRpcPassword ?? '(unset)'],
+    ['bitcoindRpcHost', rlnUnlockRequest?.bitcoindRpcHost ?? '(unset)'],
+    ['bitcoindRpcPort', String(rlnUnlockRequest?.bitcoindRpcPort ?? '(unset)')],
+    ['indexerUrl', rlnUnlockRequest?.indexerUrl ?? '(unset)'],
+    ['proxyEndpoint', rlnUnlockRequest?.proxyEndpoint ?? '(unset)'],
+  ] as const;
 
   // ── On-mount SDK tests ────────────────────────────────────────────────────
 
@@ -649,6 +758,9 @@ export default function FlowsScreen() {
   // ── Flow handlers ─────────────────────────────────────────────────────────
 
   async function handleUtexoVssFlow() {
+    if (RLN_ONLY_MODE) {
+      return;
+    }
     try {
       setRunningUtexoVssFlow(true);
       setUtexoVssFlowResults({ running: true, steps: [] });
@@ -662,6 +774,9 @@ export default function FlowsScreen() {
   }
 
   async function handleVssFlow() {
+    if (RLN_ONLY_MODE) {
+      return;
+    }
     const VSS_SERVER_URL = 'https://vss-server.utexo.com/vss';
     const steps: { step: string; status: string; result?: any; error?: string }[] = [];
 
@@ -775,6 +890,9 @@ export default function FlowsScreen() {
   }
 
   async function handleTestnetWalletFlow() {
+    if (RLN_ONLY_MODE) {
+      return;
+    }
     const steps: { step: string; status: string; result?: any; error?: string }[] = [];
 
     const addStep = (step: string, status: string, result?: any, error?: string) => {
@@ -863,6 +981,9 @@ export default function FlowsScreen() {
   }
 
   async function handleReuseAddressFlow() {
+    if (RLN_ONLY_MODE) {
+      return;
+    }
     const steps: { step: string; status: string; result?: any; error?: string }[] = [];
 
     const addStep = (step: string, status: string, result?: any, error?: string) => {
@@ -979,26 +1100,95 @@ export default function FlowsScreen() {
     }
   }
 
-  async function handleRlnPlaygroundFlow() {
-    if (rlnPlaygroundInFlightRef.current) {
+  async function handleRlnPaymentFlow() {
+    if (rlnPaymentInFlightRef.current) {
       return;
     }
-    rlnPlaygroundInFlightRef.current = true;
+    rlnPaymentInFlightRef.current = true;
     try {
-      setRunningRlnPlaygroundFlow(true);
-      setRlnPlaygroundResults({ running: true, steps: [] });
-      const r = await runRlnPlaygroundFlow();
-      setRlnPlaygroundResults({ ...r, running: false });
+      setRunningRlnPaymentFlow(true);
+      setRlnPaymentResults({ running: true, steps: [] });
+      const r = await runRlnPaymentFlow();
+      setRlnPaymentResults({ ...r, running: false });
     } catch (e: any) {
-      setRlnPlaygroundResults({
+      setRlnPaymentResults({
         running: false,
         success: false,
         error: e instanceof Error ? e.message : String(e),
         steps: [],
       });
     } finally {
-      setRunningRlnPlaygroundFlow(false);
-      rlnPlaygroundInFlightRef.current = false;
+      setRunningRlnPaymentFlow(false);
+      rlnPaymentInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnRestartFlow() {
+    if (rlnRestartInFlightRef.current) {
+      return;
+    }
+    rlnRestartInFlightRef.current = true;
+    try {
+      setRunningRlnRestartFlow(true);
+      setRlnRestartResults({ running: true, steps: [] });
+      const r = await runRlnRestartFlow();
+      setRlnRestartResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnRestartResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnRestartFlow(false);
+      rlnRestartInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnMultiOpenCloseFlow() {
+    if (rlnMultiOpenCloseInFlightRef.current) {
+      return;
+    }
+    rlnMultiOpenCloseInFlightRef.current = true;
+    try {
+      setRunningRlnMultiOpenCloseFlow(true);
+      setRlnMultiOpenCloseResults({ running: true, steps: [] });
+      const r = await runRlnMultiOpenCloseFlow();
+      setRlnMultiOpenCloseResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnMultiOpenCloseResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnMultiOpenCloseFlow(false);
+      rlnMultiOpenCloseInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnSwapRoundtripFlow() {
+    if (rlnSwapRoundtripInFlightRef.current) {
+      return;
+    }
+    rlnSwapRoundtripInFlightRef.current = true;
+    try {
+      setRunningRlnSwapRoundtripFlow(true);
+      setRlnSwapRoundtripResults({ running: true, steps: [] });
+      const r = await runRlnSwapRoundtripBuyFlow();
+      setRlnSwapRoundtripResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnSwapRoundtripResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnSwapRoundtripFlow(false);
+      rlnSwapRoundtripInFlightRef.current = false;
     }
   }
 
@@ -1017,6 +1207,13 @@ export default function FlowsScreen() {
           <Text style={styles.headerSubtitle}>
             Run live SDK tests and end-to-end flow demos against real infrastructure.
           </Text>
+          {RLN_ONLY_MODE && (
+            <View style={styles.rlnOnlyBanner}>
+              <Text style={styles.rlnOnlyBannerText}>
+                RLN-only mode is enabled. Other demo flows are disabled to avoid node-state conflicts.
+              </Text>
+            </View>
+          )}
           <View style={styles.networkRow}>
             <View style={styles.networkBadge}>
               <View style={styles.networkDot} />
@@ -1025,76 +1222,94 @@ export default function FlowsScreen() {
               </Text>
             </View>
           </View>
+          <View style={styles.envCard}>
+            <Text style={styles.envTitle}>Effective RLN unlock payload sent to SDK</Text>
+            <Text style={styles.envSubtitle}>
+              {rlnUnlockStep
+                ? 'Captured from the latest `rlnUnlockNode` step.'
+                : 'Pre-run payload derived from current runtime config (same defaults used by flow).'}
+            </Text>
+            {rlnEffectiveUnlockConfig.map(([key, value]) => (
+              <View key={key} style={styles.envRow}>
+                <Text style={styles.envKey}>{key}</Text>
+                <Text style={styles.envValue}>{value}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
         {/* SDK Tests */}
         <TestSummaryCard results={testResults} loading={testLoading} />
 
-        {/* ── Testnet WalletManager (sync + address + balance) ─────────────── */}
-        <FlowCard
-          title="Testnet Wallet"
-          subtitle="Iris Electrum · testnet"
-          description="Live path: generateKeys(testnet) → WalletManager(testnet + DEFAULT_INDEXER_URLS) → initialize → sync → refresh → address → BTC balance → dispose."
-          accentColor="#0D9488"
-          totalSteps={8}
-          results={testnetWalletFlowResults}
-          running={runningTestnetWalletFlow}
-          onRun={handleTestnetWalletFlow}>
-          {testnetWalletFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = TESTNET_WALLET_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#0D9488"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningTestnetWalletFlow}
-              />
-            );
-          })}
-        </FlowCard>
+        {!RLN_ONLY_MODE && (
+          <>
+            {/* ── Testnet WalletManager (sync + address + balance) ─────────────── */}
+            <FlowCard
+              title="Testnet Wallet"
+              subtitle="Iris Electrum · testnet"
+              description="Live path: generateKeys(testnet) → WalletManager(testnet + DEFAULT_INDEXER_URLS) → initialize → sync → refresh → address → BTC balance → dispose."
+              accentColor="#0D9488"
+              totalSteps={8}
+              results={testnetWalletFlowResults}
+              running={runningTestnetWalletFlow}
+              onRun={handleTestnetWalletFlow}>
+              {testnetWalletFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = TESTNET_WALLET_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#0D9488"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningTestnetWalletFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        {/* ── Testnet WalletManager: reuseAddresses + rotation ─────────────── */}
-        <FlowCard
-          title="Reuse address + rotation"
-          subtitle="WalletManager · reuseAddresses"
-          description="Init with reuseAddresses: true → two getAddress() (must match) → rotateVanilla + rotateColored → two getAddress() again (must match; may differ from pre-rotate)."
-          accentColor="#0F766E"
-          totalSteps={9}
-          results={reuseAddressFlowResults}
-          running={runningReuseAddressFlow}
-          onRun={handleReuseAddressFlow}>
-          {reuseAddressFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = REUSE_ADDRESS_FLOW_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#0F766E"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningReuseAddressFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            {/* ── Testnet WalletManager: reuseAddresses + rotation ─────────────── */}
+            <FlowCard
+              title="Reuse address + rotation"
+              subtitle="WalletManager · reuseAddresses"
+              description="Init with reuseAddresses: true → two getAddress() (must match) → rotateVanilla + rotateColored → two getAddress() again (must match; may differ from pre-rotate)."
+              accentColor="#0F766E"
+              totalSteps={9}
+              results={reuseAddressFlowResults}
+              running={runningReuseAddressFlow}
+              onRun={handleReuseAddressFlow}>
+              {reuseAddressFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = REUSE_ADDRESS_FLOW_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#0F766E"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningReuseAddressFlow}
+                  />
+                );
+              })}
+            </FlowCard>
+          </>
+        )}
 
         <FlowCard
-          title="RLN Playground"
-          subtitle="RN binding scaffold"
-          description="Scaffold flow for rgb-lightning-node integration: RLN-mode managers + onchain/lightning request cycles through shared protocol types."
+          title="RLN Payment Flow"
+          subtitle="PaymentTest parity"
+          description="Baseline create/init/unlock/fund/sync/balance lifecycle on local regtest."
           accentColor="#1D4ED8"
-          totalSteps={8}
-          results={rlnPlaygroundResults}
-          running={runningRlnPlaygroundFlow}
-          onRun={handleRlnPlaygroundFlow}>
-          {rlnPlaygroundResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_PLAYGROUND_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          totalSteps={10}
+          results={rlnPaymentResults}
+          running={runningRlnPaymentFlow}
+          onRun={handleRlnPaymentFlow}>
+          {rlnPaymentResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
               <StepCard
                 key={idx}
@@ -1104,53 +1319,136 @@ export default function FlowsScreen() {
                 desc={meta.desc}
                 accentColor="#1D4ED8"
                 isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnPlaygroundFlow}
+                deferErrorDisplay={runningRlnPaymentFlow}
               />
             );
           })}
         </FlowCard>
 
-        {/* ── UTEXO VSS E2E Flow ────────────────────────────────────────── */}
         <FlowCard
-          title="UTEXO VSS E2E"
-          subtitle="Create → Backup → Restore"
-          description="Full lifecycle: create wallet → fund → issue NIA → VSS backup → destroy → restore → verify."
-          accentColor="#0891B2"
-          totalSteps={16}
-          results={utexoVssFlowResults}
-          running={runningUtexoVssFlow}
-          onRun={handleUtexoVssFlow}>
-          {utexoVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          title="RLN Restart Flow"
+          subtitle="RestartTest parity"
+          description="Validates shutdown and unlock-after-restart lifecycle against local regtest."
+          accentColor="#2563EB"
+          totalSteps={9}
+          results={rlnRestartResults}
+          running={runningRlnRestartFlow}
+          onRun={handleRlnRestartFlow}>
+          {rlnRestartResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#0891B2" isLast={idx === arr.length - 1} deferErrorDisplay={runningUtexoVssFlow} />
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#2563EB"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnRestartFlow}
+              />
             );
           })}
         </FlowCard>
 
-        {/* ── VSS Cloud Backup ─────────────────────────────────────────── */}
         <FlowCard
-          title="VSS Cloud Backup"
-          subtitle="vss-server.utexo.com"
-          description="End-to-end test against the live VSS server: generate keys → init wallet → backup → check status → configure → disable → restore → verify."
-          accentColor="#7C3AED"
+          title="RLN Multi Open/Close Flow"
+          subtitle="MultiOpenCloseTest parity"
+          description="Runs repeated open-close channel diagnostics with resilient handling for missing peers."
+          accentColor="#1E40AF"
           totalSteps={8}
-          results={vssFlowResults}
-          running={runningVssFlow}
-          onRun={handleVssFlow}
-          extra={vssFlowResults?.storeId && !vssFlowResults.running ? (
-            <View style={styles.storeIdRow}>
-              <Text style={styles.storeIdLabel}>Store ID</Text>
-              <Text style={styles.storeIdValue} numberOfLines={1}>{vssFlowResults.storeId}</Text>
-            </View>
-          ) : undefined}>
-          {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          results={rlnMultiOpenCloseResults}
+          running={runningRlnMultiOpenCloseFlow}
+          onRun={handleRlnMultiOpenCloseFlow}
+          >
+          {rlnMultiOpenCloseResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#7C3AED" isLast={idx === arr.length - 1} deferErrorDisplay={runningVssFlow} />
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1E40AF"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnMultiOpenCloseFlow}
+              />
             );
           })}
         </FlowCard>
+
+        <FlowCard
+          title="RLN Swap Roundtrip Buy Flow"
+          subtitle="SwapRoundtripBuyTest parity"
+          description="Dual-node swap flow using maker/taker lifecycle, channel setup, and succeeded-status validation."
+          accentColor="#1E3A8A"
+          totalSteps={15}
+          results={rlnSwapRoundtripResults}
+          running={runningRlnSwapRoundtripFlow}
+          onRun={handleRlnSwapRoundtripFlow}>
+          {rlnSwapRoundtripResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1E3A8A"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnSwapRoundtripFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        {!RLN_ONLY_MODE && (
+          <>
+            {/* ── UTEXO VSS E2E Flow ────────────────────────────────────────── */}
+            <FlowCard
+              title="UTEXO VSS E2E"
+              subtitle="Create → Backup → Restore"
+              description="Full lifecycle: create wallet → fund → issue NIA → VSS backup → destroy → restore → verify."
+              accentColor="#0891B2"
+              totalSteps={16}
+              results={utexoVssFlowResults}
+              running={runningUtexoVssFlow}
+              onRun={handleUtexoVssFlow}>
+              {utexoVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#0891B2" isLast={idx === arr.length - 1} deferErrorDisplay={runningUtexoVssFlow} />
+                );
+              })}
+            </FlowCard>
+
+            {/* ── VSS Cloud Backup ─────────────────────────────────────────── */}
+            <FlowCard
+              title="VSS Cloud Backup"
+              subtitle="vss-server.utexo.com"
+              description="End-to-end test against the live VSS server: generate keys → init wallet → backup → check status → configure → disable → restore → verify."
+              accentColor="#7C3AED"
+              totalSteps={8}
+              results={vssFlowResults}
+              running={runningVssFlow}
+              onRun={handleVssFlow}
+              extra={vssFlowResults?.storeId && !vssFlowResults.running ? (
+                <View style={styles.storeIdRow}>
+                  <Text style={styles.storeIdLabel}>Store ID</Text>
+                  <Text style={styles.storeIdValue} numberOfLines={1}>{vssFlowResults.storeId}</Text>
+                </View>
+              ) : undefined}>
+              {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#7C3AED" isLast={idx === arr.length - 1} deferErrorDisplay={runningVssFlow} />
+                );
+              })}
+            </FlowCard>
+          </>
+        )}
 
         <View style={styles.footer} />
       </ScrollView>
@@ -1170,6 +1468,21 @@ const styles = StyleSheet.create({
   header: { paddingTop: 24, paddingBottom: 16, gap: 8 },
   headerTitle: { fontSize: 26, fontWeight: '800', color: AppColors.textPrimary, letterSpacing: 0.5 },
   headerSubtitle: { fontSize: 14, color: AppColors.textSecondary, lineHeight: 20 },
+  rlnOnlyBanner: {
+    marginTop: 4,
+    backgroundColor: '#1E3A8A1F',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#3B82F680',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  rlnOnlyBannerText: {
+    fontSize: 12,
+    color: '#BFDBFE',
+    lineHeight: 16,
+    fontWeight: '600',
+  },
   networkRow: { flexDirection: 'row', marginTop: 4 },
   networkBadge: {
     flexDirection: 'row',
@@ -1184,6 +1497,44 @@ const styles = StyleSheet.create({
   },
   networkDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: AppColors.success },
   networkText: { fontSize: 12, color: AppColors.textSecondary, fontFamily: MONO },
+  envCard: {
+    marginTop: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.bgCard,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  envTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: AppColors.textSecondary,
+  },
+  envSubtitle: {
+    fontSize: 11,
+    color: AppColors.textTertiary,
+  },
+  envRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  envKey: {
+    flex: 1,
+    fontSize: 11,
+    color: AppColors.textTertiary,
+    fontFamily: MONO,
+  },
+  envValue: {
+    flex: 1,
+    fontSize: 11,
+    color: AppColors.textSecondary,
+    textAlign: 'right',
+    fontFamily: MONO,
+  },
 
   storeIdRow: {
     flexDirection: 'row',
@@ -1315,6 +1666,30 @@ const fStyles = StyleSheet.create({
   },
   statusText: { fontSize: 11, fontWeight: '600' },
   cardDesc: { fontSize: 13, color: AppColors.textSecondary, lineHeight: 18 },
+  flowErrorBox: {
+    marginHorizontal: 14,
+    marginTop: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: AppColors.errorBorder,
+    backgroundColor: AppColors.errorBg,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  flowErrorTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: AppColors.error,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  flowErrorText: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#FCA5A5',
+    fontFamily: MONO,
+  },
 
   progressRow: {
     flexDirection: 'row',
