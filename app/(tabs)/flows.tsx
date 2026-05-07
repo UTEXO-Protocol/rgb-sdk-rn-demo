@@ -48,6 +48,8 @@ import {
 
 import { AppColors } from '@/constants/theme';
 import {
+  runRlnConcurrentBtcPaymentsFlow,
+  runRlnExternalSignerFlow,
   runRlnMultiOpenCloseFlow,
   runRlnPaymentFlow,
   runRlnRestartFlow,
@@ -479,12 +481,142 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   rlnRestore: { label: 'Restore', desc: 'Wallet-level restore, not RLN node method' },
   rlnShutdown: { label: 'Shutdown', desc: 'Shutdown RLN node process' },
   rlnDestroyNode: { label: 'Destroy Node', desc: 'Destroy node handle and cleanup resources' },
+  rlnCreateNativeExternalSigner: { label: 'Create External Signer', desc: 'Create native external signer from BIP39 seed' },
+  rlnInitNodeWithNativeExternalSigner: { label: 'Init With External Signer', desc: 'Initialize node using native external signer instead of password' },
+  rlnUnlockNodeWithNativeExternalSigner: { label: 'Unlock With External Signer', desc: 'Unlock node using native external signer with bitcoind/indexer settings' },
+  rlnDestroyNativeExternalSigner: { label: 'Destroy External Signer', desc: 'Destroy native external signer handle' },
   rlnSyncBeforeRestart: { label: 'Sync Before Restart', desc: 'Sync node before restart sequence' },
   rlnShutdownForRestart: { label: 'Shutdown For Restart', desc: 'Shutdown node to validate restart lifecycle' },
   rlnUnlockAfterRestart: { label: 'Unlock After Restart', desc: 'Unlock node again after shutdown' },
   rlnNodeInfoAfterRestart: { label: 'Node Info After Restart', desc: 'Validate node information after restart' },
   rlnOpenCloseCycle1: { label: 'Open/Close Cycle 1', desc: 'First open-close channel diagnostic cycle' },
   rlnOpenCloseCycle2: { label: 'Open/Close Cycle 2', desc: 'Second open-close channel diagnostic cycle' },
+  // ── Payment flow steps ────────────────────────────────────────────────────
+  payACreateNode: { label: 'Pay Node A Create', desc: 'Create RLN node A for payment flow' },
+  payAInitNode: { label: 'Pay Node A Init', desc: 'Initialize payment node A' },
+  payAUnlockNode: { label: 'Pay Node A Unlock', desc: 'Unlock payment node A' },
+  payBCreateNode: { label: 'Pay Node B Create', desc: 'Create RLN node B for payment flow' },
+  payBInitNode: { label: 'Pay Node B Init', desc: 'Initialize payment node B' },
+  payBUnlockNode: { label: 'Pay Node B Unlock', desc: 'Unlock payment node B' },
+  payCCreateNode: { label: 'Pay Node C Create', desc: 'Create RLN node C for payment flow' },
+  payCInitNode: { label: 'Pay Node C Init', desc: 'Initialize payment node C' },
+  payCUnlockNode: { label: 'Pay Node C Unlock', desc: 'Unlock payment node C' },
+  payAFund: { label: 'Pay Node A Fund', desc: 'Fund payment node A with BTC' },
+  payACreateUtxos: { label: 'Pay Node A UTXOs', desc: 'Create UTXOs for payment node A' },
+  payBFund: { label: 'Pay Node B Fund', desc: 'Fund payment node B with BTC' },
+  payBCreateUtxos: { label: 'Pay Node B UTXOs', desc: 'Create UTXOs for payment node B' },
+  payCFund: { label: 'Pay Node C Fund', desc: 'Fund payment node C with BTC' },
+  payCCreateUtxos: { label: 'Pay Node C UTXOs', desc: 'Create UTXOs for payment node C' },
+  payNodeInfos: { label: 'Pay Node Infos', desc: 'Fetch pubkeys for payment nodes A and B' },
+  payConnectPeers: { label: 'Pay Connect Peers', desc: 'Connect B→A and C→B peers' },
+  payOpenChannel: { label: 'Pay Open Channel', desc: 'B opens channel to A; wait for funding confirmation' },
+  payCreateInvoices: { label: 'Pay Create Invoices', desc: 'A creates 4 invoices concurrently' },
+  paySendPayment1: { label: 'Pay Send Payment 1', desc: 'B sends first payment to A (10k msat)' },
+  payWaitInvoice1: { label: 'Pay Wait Invoice 1', desc: 'Wait for invoice 1 SUCCEEDED on A' },
+  payWaitSender1: { label: 'Pay Wait Sender 1', desc: 'Wait for payment 1 success on B' },
+  paySendPayment2: { label: 'Pay Send Payment 2', desc: 'B sends second payment to A (20k msat)' },
+  payWaitInvoice2: { label: 'Pay Wait Invoice 2', desc: 'Wait for invoice 2 SUCCEEDED on A' },
+  payWaitSender2: { label: 'Pay Wait Sender 2', desc: 'Wait for payment 2 success on B' },
+  paySendPayment3: { label: 'Pay Send Payment 3', desc: 'B sends third payment to A (30k msat)' },
+  payWaitInvoice3: { label: 'Pay Wait Invoice 3', desc: 'Wait for invoice 3 SUCCEEDED on A' },
+  payWaitSender3: { label: 'Pay Wait Sender 3', desc: 'Wait for payment 3 success on B' },
+  paySendPayment4: { label: 'Pay Send Payment 4', desc: 'B sends fourth payment to A (40k msat)' },
+  payWaitInvoice4: { label: 'Pay Wait Invoice 4', desc: 'Wait for invoice 4 SUCCEEDED on A' },
+  payWaitSender4: { label: 'Pay Wait Sender 4', desc: 'Wait for payment 4 success on B' },
+  payCloseChannel: { label: 'Pay Close Channel', desc: 'Force close channel and mine confirmation blocks' },
+  payFinalBalance: { label: 'Pay Final Balance', desc: 'Read final BTC balance on node A' },
+  // ── Restart flow steps ────────────────────────────────────────────────────
+  restartACreateNode: { label: 'Restart Node A Create', desc: 'Create RLN node A for restart flow' },
+  restartAInitNode: { label: 'Restart Node A Init', desc: 'Initialize restart node A' },
+  restartAUnlockNode: { label: 'Restart Node A Unlock', desc: 'Unlock restart node A' },
+  restartBCreateNode: { label: 'Restart Node B Create', desc: 'Create RLN node B for restart flow' },
+  restartBInitNode: { label: 'Restart Node B Init', desc: 'Initialize restart node B' },
+  restartBUnlockNode: { label: 'Restart Node B Unlock', desc: 'Unlock restart node B' },
+  restartCCreateNode: { label: 'Restart Node C Create', desc: 'Create RLN node C for restart flow' },
+  restartCInitNode: { label: 'Restart Node C Init', desc: 'Initialize restart node C' },
+  restartCUnlockNode: { label: 'Restart Node C Unlock', desc: 'Unlock restart node C' },
+  restartAFund: { label: 'Restart Node A Fund', desc: 'Fund restart node A with BTC' },
+  restartACreateUtxos: { label: 'Restart Node A UTXOs', desc: 'Create UTXOs for restart node A' },
+  restartBFund: { label: 'Restart Node B Fund', desc: 'Fund restart node B with BTC' },
+  restartBCreateUtxos: { label: 'Restart Node B UTXOs', desc: 'Create UTXOs for restart node B' },
+  restartCFund: { label: 'Restart Node C Fund', desc: 'Fund restart node C with BTC' },
+  restartCCreateUtxos: { label: 'Restart Node C UTXOs', desc: 'Create UTXOs for restart node C' },
+  restartNodeInfos: { label: 'Restart Node Infos', desc: 'Fetch pubkeys for restart nodes A and B' },
+  restartConnectPeer: { label: 'Restart Connect Peer', desc: 'Connect B→A peer' },
+  restartOpenChannel: { label: 'Restart Open Channel', desc: 'A opens channel to B; wait for funding' },
+  restartPreRestartPayment: { label: 'Restart Pre-Restart Payment', desc: 'A pays B before restart' },
+  restartShutdownA: { label: 'Restart Shutdown A', desc: 'Shutdown node A for restart' },
+  restartShutdownB: { label: 'Restart Shutdown B', desc: 'Shutdown node B for restart' },
+  restartShutdownC: { label: 'Restart Shutdown C', desc: 'Shutdown node C for restart' },
+  restartARecreateCreateNode: { label: 'Restart A Recreate Create', desc: 'Recreate node A after shutdown' },
+  restartARecreateInitNode: { label: 'Restart A Recreate Init', desc: 'Re-init node A after shutdown' },
+  restartARecreateUnlockNode: { label: 'Restart A Recreate Unlock', desc: 'Re-unlock node A after shutdown' },
+  restartBRecreateCreateNode: { label: 'Restart B Recreate Create', desc: 'Recreate node B after shutdown' },
+  restartBRecreateInitNode: { label: 'Restart B Recreate Init', desc: 'Re-init node B after shutdown' },
+  restartBRecreateUnlockNode: { label: 'Restart B Recreate Unlock', desc: 'Re-unlock node B after shutdown' },
+  restartCRecreateCreateNode: { label: 'Restart C Recreate Create', desc: 'Recreate node C after shutdown' },
+  restartCRecreateInitNode: { label: 'Restart C Recreate Init', desc: 'Re-init node C after shutdown' },
+  restartCRecreateUnlockNode: { label: 'Restart C Recreate Unlock', desc: 'Re-unlock node C after shutdown' },
+  restartWaitUsableChannel: { label: 'Restart Wait Usable Channel', desc: 'Wait for channel to become usable after restart' },
+  restartVerifyPayment: { label: 'Restart Verify Payment', desc: 'Confirm pre-restart payment survived' },
+  // ── Multi open/close flow steps ───────────────────────────────────────────
+  mocACreateNode: { label: 'MOC Node A Create', desc: 'Create RLN node A for multi open/close flow' },
+  mocAInitNode: { label: 'MOC Node A Init', desc: 'Initialize multi open/close node A' },
+  mocAUnlockNode: { label: 'MOC Node A Unlock', desc: 'Unlock multi open/close node A' },
+  mocBCreateNode: { label: 'MOC Node B Create', desc: 'Create RLN node B for multi open/close flow' },
+  mocBInitNode: { label: 'MOC Node B Init', desc: 'Initialize multi open/close node B' },
+  mocBUnlockNode: { label: 'MOC Node B Unlock', desc: 'Unlock multi open/close node B' },
+  mocCCreateNode: { label: 'MOC Node C Create', desc: 'Create RLN node C for multi open/close flow' },
+  mocCInitNode: { label: 'MOC Node C Init', desc: 'Initialize multi open/close node C' },
+  mocCUnlockNode: { label: 'MOC Node C Unlock', desc: 'Unlock multi open/close node C' },
+  mocAFund: { label: 'MOC Node A Fund', desc: 'Fund multi open/close node A' },
+  mocACreateUtxos: { label: 'MOC Node A UTXOs', desc: 'Create UTXOs for multi open/close node A' },
+  mocBFund: { label: 'MOC Node B Fund', desc: 'Fund multi open/close node B' },
+  mocBCreateUtxos: { label: 'MOC Node B UTXOs', desc: 'Create UTXOs for multi open/close node B' },
+  mocCFund: { label: 'MOC Node C Fund', desc: 'Fund multi open/close node C' },
+  mocCCreateUtxos: { label: 'MOC Node C UTXOs', desc: 'Create UTXOs for multi open/close node C' },
+  mocNodeInfos: { label: 'MOC Node Infos', desc: 'Fetch pubkeys for nodes A and B' },
+  mocConnectPeers: { label: 'MOC Connect Peers', desc: 'Connect B→A and C→B peers' },
+  mocOpenChannel1: { label: 'MOC Open Channel 1', desc: 'B opens channel to A — cycle 1' },
+  mocKeysend1: { label: 'MOC Keysend 1', desc: 'A keysends 1000 sat to B — cycle 1' },
+  mocBalanceCheck1: { label: 'MOC Balance Check 1', desc: 'Check BTC balances after keysend — cycle 1' },
+  mocCloseChannel1: { label: 'MOC Close Channel 1', desc: 'Cooperative close channel — cycle 1' },
+  mocOpenChannel2: { label: 'MOC Open Channel 2', desc: 'B opens channel to A — cycle 2' },
+  mocKeysend2: { label: 'MOC Keysend 2', desc: 'A keysends 1000 sat to B — cycle 2' },
+  mocBalanceCheck2: { label: 'MOC Balance Check 2', desc: 'Check BTC balances after keysend — cycle 2' },
+  mocCloseChannel2: { label: 'MOC Close Channel 2', desc: 'Cooperative close channel — cycle 2' },
+  // ── Concurrent BTC payments flow steps ───────────────────────────────────
+  cbpACreateNode: { label: 'CBP Node A Create', desc: 'Create RLN node A for concurrent payments flow' },
+  cbpAInitNode: { label: 'CBP Node A Init', desc: 'Initialize concurrent payments node A' },
+  cbpAUnlockNode: { label: 'CBP Node A Unlock', desc: 'Unlock concurrent payments node A' },
+  cbpBCreateNode: { label: 'CBP Node B Create', desc: 'Create RLN node B for concurrent payments flow' },
+  cbpBInitNode: { label: 'CBP Node B Init', desc: 'Initialize concurrent payments node B' },
+  cbpBUnlockNode: { label: 'CBP Node B Unlock', desc: 'Unlock concurrent payments node B' },
+  cbpCCreateNode: { label: 'CBP Node C Create', desc: 'Create RLN node C for concurrent payments flow' },
+  cbpCInitNode: { label: 'CBP Node C Init', desc: 'Initialize concurrent payments node C' },
+  cbpCUnlockNode: { label: 'CBP Node C Unlock', desc: 'Unlock concurrent payments node C' },
+  cbpDCreateNode: { label: 'CBP Node D Create', desc: 'Create RLN node D for concurrent payments flow' },
+  cbpDInitNode: { label: 'CBP Node D Init', desc: 'Initialize concurrent payments node D' },
+  cbpDUnlockNode: { label: 'CBP Node D Unlock', desc: 'Unlock concurrent payments node D' },
+  cbpAFund: { label: 'CBP Node A Fund', desc: 'Fund concurrent payments node A' },
+  cbpACreateUtxos: { label: 'CBP Node A UTXOs', desc: 'Create UTXOs for concurrent payments node A' },
+  cbpBFund: { label: 'CBP Node B Fund', desc: 'Fund concurrent payments node B' },
+  cbpBCreateUtxos: { label: 'CBP Node B UTXOs', desc: 'Create UTXOs for concurrent payments node B' },
+  cbpCFund: { label: 'CBP Node C Fund', desc: 'Fund concurrent payments node C' },
+  cbpCCreateUtxos: { label: 'CBP Node C UTXOs', desc: 'Create UTXOs for concurrent payments node C' },
+  cbpDFund: { label: 'CBP Node D Fund', desc: 'Fund concurrent payments node D' },
+  cbpDCreateUtxos: { label: 'CBP Node D UTXOs', desc: 'Create UTXOs for concurrent payments node D' },
+  cbpNodeInfos: { label: 'CBP Node Infos', desc: 'Fetch pubkeys for nodes A and B' },
+  cbpConnectPeers: { label: 'CBP Connect Peers', desc: 'Connect B→A, C→B, D→B peers' },
+  cbpOpenChannelBtoA: { label: 'CBP Open Channel B→A', desc: 'B opens channel to A (routing channel)' },
+  cbpOpenChannelCtoB: { label: 'CBP Open Channel C→B', desc: 'C opens channel to B' },
+  cbpOpenChannelDtoB: { label: 'CBP Open Channel D→B', desc: 'D opens channel to B' },
+  cbpCreateInvoices: { label: 'CBP Create Invoices', desc: 'A creates 2 invoices concurrently' },
+  cbpConcurrentSend: { label: 'CBP Concurrent Send', desc: 'C and D send payments to A concurrently' },
+  cbpWaitInvoice1: { label: 'CBP Wait Invoice 1', desc: 'Wait for invoice 1 SUCCEEDED on A' },
+  cbpWaitInvoice2: { label: 'CBP Wait Invoice 2', desc: 'Wait for invoice 2 SUCCEEDED on A' },
+  cbpWaitSenders: { label: 'CBP Wait Senders', desc: 'Wait for both C and D payments to succeed' },
+  cbpFinalBalance: { label: 'CBP Final Balance', desc: 'Read final BTC balance on node A' },
   swapNodeACreateNode: { label: 'Swap Node A Create', desc: 'Create maker node A' },
   swapNodeAInitNode: { label: 'Swap Node A Init', desc: 'Initialize maker node A' },
   swapNodeAUnlockNode: { label: 'Swap Node A Unlock', desc: 'Unlock maker node A' },
@@ -529,9 +661,15 @@ export default function FlowsScreen() {
   const [rlnMultiOpenCloseResults, setRlnMultiOpenCloseResults] = useState<FlowResults>(null);
   const [runningRlnMultiOpenCloseFlow, setRunningRlnMultiOpenCloseFlow] = useState(false);
   const rlnMultiOpenCloseInFlightRef = useRef(false);
+  const [rlnConcurrentBtcPayResults, setRlnConcurrentBtcPayResults] = useState<FlowResults>(null);
+  const [runningRlnConcurrentBtcPayFlow, setRunningRlnConcurrentBtcPayFlow] = useState(false);
+  const rlnConcurrentBtcPayInFlightRef = useRef(false);
   const [rlnSwapRoundtripResults, setRlnSwapRoundtripResults] = useState<FlowResults>(null);
   const [runningRlnSwapRoundtripFlow, setRunningRlnSwapRoundtripFlow] = useState(false);
   const rlnSwapRoundtripInFlightRef = useRef(false);
+  const [rlnExternalSignerResults, setRlnExternalSignerResults] = useState<FlowResults>(null);
+  const [runningRlnExternalSignerFlow, setRunningRlnExternalSignerFlow] = useState(false);
+  const rlnExternalSignerInFlightRef = useRef(false);
   const effectiveRpcHost =
     process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
     (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
@@ -547,7 +685,7 @@ export default function FlowsScreen() {
   };
   const rlnUnlockStep = [...(rlnPaymentResults?.steps ?? [])]
     .reverse()
-    .find((step: any) => step?.step === 'rlnUnlockNode');
+    .find((step: any) => String(step?.step ?? '').endsWith('UnlockNode'));
   const rlnUnlockRequest =
     rlnUnlockStep?.data?.request ??
     rlnUnlockStep?.result?.request ??
@@ -752,7 +890,7 @@ export default function FlowsScreen() {
       }
     }
 
-    runSdkTests();
+    // runSdkTests();
   }, []);
 
   // ── Flow handlers ─────────────────────────────────────────────────────────
@@ -1169,6 +1307,29 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleRlnConcurrentBtcPaymentsFlow() {
+    if (rlnConcurrentBtcPayInFlightRef.current) {
+      return;
+    }
+    rlnConcurrentBtcPayInFlightRef.current = true;
+    try {
+      setRunningRlnConcurrentBtcPayFlow(true);
+      setRlnConcurrentBtcPayResults({ running: true, steps: [] });
+      const r = await runRlnConcurrentBtcPaymentsFlow();
+      setRlnConcurrentBtcPayResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnConcurrentBtcPayResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnConcurrentBtcPayFlow(false);
+      rlnConcurrentBtcPayInFlightRef.current = false;
+    }
+  }
+
   async function handleRlnSwapRoundtripFlow() {
     if (rlnSwapRoundtripInFlightRef.current) {
       return;
@@ -1189,6 +1350,29 @@ export default function FlowsScreen() {
     } finally {
       setRunningRlnSwapRoundtripFlow(false);
       rlnSwapRoundtripInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnExternalSignerFlow() {
+    if (rlnExternalSignerInFlightRef.current) {
+      return;
+    }
+    rlnExternalSignerInFlightRef.current = true;
+    try {
+      setRunningRlnExternalSignerFlow(true);
+      setRlnExternalSignerResults({ running: true, steps: [] });
+      const r = await runRlnExternalSignerFlow();
+      setRlnExternalSignerResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnExternalSignerResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnExternalSignerFlow(false);
+      rlnExternalSignerInFlightRef.current = false;
     }
   }
 
@@ -1302,9 +1486,9 @@ export default function FlowsScreen() {
         <FlowCard
           title="RLN Payment Flow"
           subtitle="PaymentTest parity"
-          description="Baseline create/init/unlock/fund/sync/balance lifecycle on local regtest."
+          description="3-node regtest flow: fund/UTXO setup, B→A channel, 4 sequential BTC payments."
           accentColor="#1D4ED8"
-          totalSteps={10}
+          totalSteps={33}
           results={rlnPaymentResults}
           running={runningRlnPaymentFlow}
           onRun={handleRlnPaymentFlow}>
@@ -1328,9 +1512,9 @@ export default function FlowsScreen() {
         <FlowCard
           title="RLN Restart Flow"
           subtitle="RestartTest parity"
-          description="Validates shutdown and unlock-after-restart lifecycle against local regtest."
+          description="3-node regtest flow: open channel, make payment, restart all nodes, verify channel and payment survived."
           accentColor="#2563EB"
-          totalSteps={9}
+          totalSteps={33}
           results={rlnRestartResults}
           running={runningRlnRestartFlow}
           onRun={handleRlnRestartFlow}>
@@ -1354,9 +1538,9 @@ export default function FlowsScreen() {
         <FlowCard
           title="RLN Multi Open/Close Flow"
           subtitle="MultiOpenCloseTest parity"
-          description="Runs repeated open-close channel diagnostics with resilient handling for missing peers."
+          description="3-node regtest flow: 2 cycles of B→A channel open, A keysend to B, balance check, cooperative close."
           accentColor="#1E40AF"
-          totalSteps={8}
+          totalSteps={25}
           results={rlnMultiOpenCloseResults}
           running={runningRlnMultiOpenCloseFlow}
           onRun={handleRlnMultiOpenCloseFlow}
@@ -1373,6 +1557,32 @@ export default function FlowsScreen() {
                 accentColor="#1E40AF"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnMultiOpenCloseFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="RLN Concurrent BTC Payments Flow"
+          subtitle="ConcurrentBtcPaymentsTest parity"
+          description="4-node regtest flow: 3 channels (B→A, C→B, D→B), C and D send concurrent payments to A."
+          accentColor="#1E3A8A"
+          totalSteps={31}
+          results={rlnConcurrentBtcPayResults}
+          running={runningRlnConcurrentBtcPayFlow}
+          onRun={handleRlnConcurrentBtcPaymentsFlow}>
+          {rlnConcurrentBtcPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1E3A8A"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnConcurrentBtcPayFlow}
               />
             );
           })}
@@ -1399,6 +1609,32 @@ export default function FlowsScreen() {
                 accentColor="#1E3A8A"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnSwapRoundtripFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="RLN External Signer Flow"
+          subtitle="NativeExternalSigner lifecycle"
+          description="Same baseline as Payment Flow but uses a native external signer (BIP39 seed) instead of a password for init and unlock."
+          accentColor="#1D4ED8"
+          totalSteps={11}
+          results={rlnExternalSignerResults}
+          running={runningRlnExternalSignerFlow}
+          onRun={handleRlnExternalSignerFlow}>
+          {rlnExternalSignerResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1D4ED8"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnExternalSignerFlow}
               />
             );
           })}
