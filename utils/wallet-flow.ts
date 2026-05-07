@@ -1731,7 +1731,7 @@ export async function runRlnPlaygroundFlow() {
 
     await runRlnStep('rlnSendRgb', async () => {
       if (!senderRlnReady) return { request: { donation: false, feeRate: 1, minConfirmations: 1, skipSync: true }, skipped: true, reason: rlnReadinessBlocker ?? 'Skipped: node is not ready' };
-      const response = await rlnSendRgb(false, 1, 1, true);
+      const response = await rlnSendRgb(false, 1, 1, true, 'placeholder_asset_id', 'placeholder_recipient_id', 1, []);
       return { request: { donation: false, feeRate: 1, minConfirmations: 1, skipSync: true }, response };
     });
 
@@ -1914,6 +1914,7 @@ type RlnNodeRuntime = {
   daemonListeningPort: number;
   ldkPeerListeningPort: number;
   nodePassword: string;
+  proxyEndpoint: string;
   cleanup: () => Promise<void>;
   safeShutdown: () => Promise<void>;
   disposeHandles: () => Promise<void>;
@@ -2302,6 +2303,7 @@ async function createRlnNodeRuntime(
     daemonListeningPort: basePort,
     ldkPeerListeningPort,
     nodePassword,
+    proxyEndpoint,
     cleanup,
     safeShutdown,
     disposeHandles,
@@ -2347,7 +2349,7 @@ async function waitForChannelFundingTx(
     console.log(`[flow] waitForChannelFundingTx attempt=${attempt} elapsed=${elapsedSec}s channelId="${channelId}" fundingTxid="${fundingTxid}" found=${!!ch}`);
     if (ch) return { channelId, fundingTxid };
     try { await mine(1); } catch (e: any) { console.warn(`[flow] mine(1): ${e?.message}`); }
-    await sleep(1000);
+    await sleep(2000);
   }
   throw new Error(`Channel not found after ${attempt} attempts (${timeoutMs / 1000}s)`);
 }
@@ -2372,8 +2374,8 @@ async function waitForFundingConfirmed(
     const confirmed = !!(tx && (tx.confirmationTime != null || tx.confirmation_time != null));
     console.log(`[flow] waitForFundingConfirmed attempt=${attempt} txid=${fundingTxid.substring(0, 12)}... confirmed=${confirmed} tx=${JSON.stringify(tx ?? null)}`);
     if (confirmed) return;
-    await mine(1);
-    await sleep(1000);
+    await mine(2);
+    await sleep(2000);
   }
   throw new Error(`Funding tx not confirmed after ${attempt} attempts: ${fundingTxid}`);
 }
@@ -2444,7 +2446,7 @@ async function waitForAssetBalance(
       console.warn(`[flow] waitForAssetBalance: ${e?.message}`);
     }
     try { await node.call('rlnRefreshTransfers', false); } catch {}
-    await sleep(1000);
+    await sleep(2000);
   }
   throw new Error(`Asset balance did not reach ${expectedSpendable}, last=${last}`);
 }
@@ -2524,7 +2526,7 @@ async function waitForPaymentSuccess(
     } catch (e: any) {
       if (e?.message?.includes('Payment failed')) throw e;
     }
-    await sleep(1000);
+    await sleep(3000);
   }
   throw new Error(`Payment did not succeed in ${timeoutMs}ms: ${paymentHash}`);
 }
@@ -2673,8 +2675,20 @@ export async function runRlnPaymentFlow() {
 
     // Cooperative close
     addStep('payCloseChannel', 'running');
+   
     await nodeA.call('rlnCloseChannel', channelId, pubkeyB, false);
     await mine(6);
+    await nodeA.call('rlnRefreshTransfers', false);
+    await nodeB.call('rlnRefreshTransfers', false);
+    await sleep(20000);
+    await mine(6);
+    await nodeA.call('rlnRefreshTransfers', false);
+    await nodeB.call('rlnRefreshTransfers', false);
+    await sleep(20000);
+    await mine(6);
+    await nodeA.call('rlnRefreshTransfers', false);
+    await nodeB.call('rlnRefreshTransfers', false);
+    await nodeA.call('rlnListChannels');
     addStep('payCloseChannel', 'success', { channelId });
 
     // After close: A=950 (400 settled + 550 from channel), B=50
@@ -2685,9 +2699,9 @@ export async function runRlnPaymentFlow() {
 
     // RGB sends to nodeC (A sends 925, B sends 25) — mirrors Android
     addStep('payRgbSendA', 'running');
-    const invoiceC1 = await nodeC.call('rlnRgbInvoice', assetId, 925, 3600, 1, false);
+    const invoiceC1 = await nodeC.call('rlnRgbInvoice', null, null, null, 1, false);
     const recipientC1 = String(invoiceC1?.recipientId ?? invoiceC1?.recipient_id ?? '');
-    await nodeA.call('rlnSendRgb', false, 1, 1, false);
+    await nodeA.call('rlnSendRgb', true, 1, 1, false, assetId, recipientC1, 925, [nodeA.proxyEndpoint]);
     await mine(1);
     await nodeC.call('rlnRefreshTransfers', false);
     await nodeC.call('rlnRefreshTransfers', false);
@@ -2695,9 +2709,9 @@ export async function runRlnPaymentFlow() {
     addStep('payRgbSendA', 'success', { amount: 925, recipient: recipientC1.substring(0, 20) + '...' });
 
     addStep('payRgbSendB', 'running');
-    const invoiceC2 = await nodeC.call('rlnRgbInvoice', assetId, 25, 3600, 1, false);
+    const invoiceC2 = await nodeC.call('rlnRgbInvoice', null, null, null, 1, false);
     const recipientC2 = String(invoiceC2?.recipientId ?? invoiceC2?.recipient_id ?? '');
-    await nodeB.call('rlnSendRgb', false, 1, 1, false);
+    await nodeB.call('rlnSendRgb', true, 1, 1, false, assetId, recipientC2, 25, [nodeB.proxyEndpoint]);
     await mine(1);
     await nodeC.call('rlnRefreshTransfers', false);
     await nodeC.call('rlnRefreshTransfers', false);
