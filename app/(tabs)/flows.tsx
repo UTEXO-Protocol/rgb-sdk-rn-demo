@@ -48,11 +48,11 @@ import {
 
 import { AppColors } from '@/constants/theme';
 import {
-  runRlnConcurrentBtcPaymentsFlow,
+  runRlnExternalSignerChannelPaymentFlow,
   runRlnExternalSignerFlow,
-  runRlnMultiOpenCloseFlow,
+  runRlnExternalSignerIssueAssetFlow,
+  runRlnExternalSignerPaymentFlow,
   runRlnPaymentFlow,
-  runRlnRestartFlow,
   runRlnSwapRoundtripBuyFlow,
   runUtexoVssFlow,
 } from '@/utils/wallet-flow';
@@ -632,6 +632,33 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   swapExecuteRoundtrip: { label: 'Swap Execute', desc: 'Run makerinit -> taker -> makerexecute sequence' },
   swapPostChecks: { label: 'Swap Post Checks', desc: 'Validate swap and balances after execution' },
   swapCloseChannels: { label: 'Swap Close Channels', desc: 'Close swap test channels' },
+  // ── External signer issue asset flow steps ────────────────────────────────
+  extIssueCreateNode: { label: 'Create Node', desc: 'Create RLN node with external signer' },
+  extIssueCreateExternalSigner: { label: 'Create External Signer', desc: 'Create native external signer from BIP39 seed' },
+  extIssueInitNode: { label: 'Init Node', desc: 'Initialize node using native external signer' },
+  extIssueUnlockNode: { label: 'Unlock Node', desc: 'Unlock node using native external signer' },
+  extIssueNodeInfoAfter: { label: 'Node Info (after unlock)', desc: 'Read node info after unlock' },
+  extIssueFund: { label: 'Fund Node', desc: 'Fund node with BTC and mine confirmation blocks' },
+  extIssueCreateUtxos: { label: 'Create UTXOs', desc: 'Create UTXOs for RGB asset operations' },
+  extIssueAsset: { label: 'Issue Asset', desc: 'Issue NIA asset using external signer node' },
+  // ── External signer channel payment flow steps ────────────────────────────
+  extChanACreateNode: { label: 'Node A Create', desc: 'Create nodeA with external signer' },
+  extChanACreateExternalSigner: { label: 'Node A Create Signer', desc: 'Create native external signer for nodeA' },
+  extChanAInitNode: { label: 'Node A Init', desc: 'Init nodeA with external signer' },
+  extChanAUnlockNode: { label: 'Node A Unlock', desc: 'Unlock nodeA with external signer' },
+  extChanBCreateNode: { label: 'Node B Create', desc: 'Create nodeB with password auth' },
+  extChanBInitNode: { label: 'Node B Init', desc: 'Init nodeB with password' },
+  extChanBUnlockNode: { label: 'Node B Unlock', desc: 'Unlock nodeB with password' },
+  extChanAFund: { label: 'Node A Fund', desc: 'Fund nodeA' },
+  extChanACreateUtxos: { label: 'Node A UTXOs', desc: 'Create UTXOs for nodeA' },
+  extChanBFund: { label: 'Node B Fund', desc: 'Fund nodeB' },
+  extChanBCreateUtxos: { label: 'Node B UTXOs', desc: 'Create UTXOs for nodeB' },
+  extChanNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys for both nodes' },
+  extChanConnectPeers: { label: 'Connect Peers', desc: 'NodeA connects to nodeB' },
+  extChanOpenChannel: { label: 'Open BTC Channel', desc: 'Open 500k sat BTC channel nodeA→nodeB' },
+  extChanPayment1: { label: 'Payment 1', desc: 'NodeB invoice, nodeA pays (3M msat)' },
+  extChanRestartNodeA: { label: 'Restart NodeA', desc: 'Shutdown and restart nodeA with same external signer' },
+  extChanPayment2: { label: 'Payment 2', desc: 'Second payment after nodeA restart' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
@@ -655,21 +682,21 @@ export default function FlowsScreen() {
   const [rlnPaymentResults, setRlnPaymentResults] = useState<FlowResults>(null);
   const [runningRlnPaymentFlow, setRunningRlnPaymentFlow] = useState(false);
   const rlnPaymentInFlightRef = useRef(false);
-  const [rlnRestartResults, setRlnRestartResults] = useState<FlowResults>(null);
-  const [runningRlnRestartFlow, setRunningRlnRestartFlow] = useState(false);
-  const rlnRestartInFlightRef = useRef(false);
-  const [rlnMultiOpenCloseResults, setRlnMultiOpenCloseResults] = useState<FlowResults>(null);
-  const [runningRlnMultiOpenCloseFlow, setRunningRlnMultiOpenCloseFlow] = useState(false);
-  const rlnMultiOpenCloseInFlightRef = useRef(false);
-  const [rlnConcurrentBtcPayResults, setRlnConcurrentBtcPayResults] = useState<FlowResults>(null);
-  const [runningRlnConcurrentBtcPayFlow, setRunningRlnConcurrentBtcPayFlow] = useState(false);
-  const rlnConcurrentBtcPayInFlightRef = useRef(false);
+  const [rlnExternalSignerPayResults, setRlnExternalSignerPayResults] = useState<FlowResults>(null);
+  const [runningRlnExternalSignerPayFlow, setRunningRlnExternalSignerPayFlow] = useState(false);
+  const rlnExternalSignerPayInFlightRef = useRef(false);
   const [rlnSwapRoundtripResults, setRlnSwapRoundtripResults] = useState<FlowResults>(null);
   const [runningRlnSwapRoundtripFlow, setRunningRlnSwapRoundtripFlow] = useState(false);
   const rlnSwapRoundtripInFlightRef = useRef(false);
   const [rlnExternalSignerResults, setRlnExternalSignerResults] = useState<FlowResults>(null);
   const [runningRlnExternalSignerFlow, setRunningRlnExternalSignerFlow] = useState(false);
   const rlnExternalSignerInFlightRef = useRef(false);
+  const [rlnExtIssueAssetResults, setRlnExtIssueAssetResults] = useState<FlowResults>(null);
+  const [runningRlnExtIssueAssetFlow, setRunningRlnExtIssueAssetFlow] = useState(false);
+  const rlnExtIssueAssetInFlightRef = useRef(false);
+  const [rlnExtChanPayResults, setRlnExtChanPayResults] = useState<FlowResults>(null);
+  const [runningRlnExtChanPayFlow, setRunningRlnExtChanPayFlow] = useState(false);
+  const rlnExtChanPayInFlightRef = useRef(false);
   const effectiveRpcHost =
     process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
     (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
@@ -1261,72 +1288,24 @@ export default function FlowsScreen() {
     }
   }
 
-  async function handleRlnRestartFlow() {
-    if (rlnRestartInFlightRef.current) {
-      return;
-    }
-    rlnRestartInFlightRef.current = true;
+  async function handleRlnExternalSignerPaymentFlow() {
+    if (rlnExternalSignerPayInFlightRef.current) return;
+    rlnExternalSignerPayInFlightRef.current = true;
     try {
-      setRunningRlnRestartFlow(true);
-      setRlnRestartResults({ running: true, steps: [] });
-      const r = await runRlnRestartFlow();
-      setRlnRestartResults({ ...r, running: false });
+      setRunningRlnExternalSignerPayFlow(true);
+      setRlnExternalSignerPayResults({ running: true, steps: [] });
+      const r = await runRlnExternalSignerPaymentFlow();
+      setRlnExternalSignerPayResults({ ...r, running: false });
     } catch (e: any) {
-      setRlnRestartResults({
+      setRlnExternalSignerPayResults({
         running: false,
         success: false,
         error: e instanceof Error ? e.message : String(e),
         steps: [],
       });
     } finally {
-      setRunningRlnRestartFlow(false);
-      rlnRestartInFlightRef.current = false;
-    }
-  }
-
-  async function handleRlnMultiOpenCloseFlow() {
-    if (rlnMultiOpenCloseInFlightRef.current) {
-      return;
-    }
-    rlnMultiOpenCloseInFlightRef.current = true;
-    try {
-      setRunningRlnMultiOpenCloseFlow(true);
-      setRlnMultiOpenCloseResults({ running: true, steps: [] });
-      const r = await runRlnMultiOpenCloseFlow();
-      setRlnMultiOpenCloseResults({ ...r, running: false });
-    } catch (e: any) {
-      setRlnMultiOpenCloseResults({
-        running: false,
-        success: false,
-        error: e instanceof Error ? e.message : String(e),
-        steps: [],
-      });
-    } finally {
-      setRunningRlnMultiOpenCloseFlow(false);
-      rlnMultiOpenCloseInFlightRef.current = false;
-    }
-  }
-
-  async function handleRlnConcurrentBtcPaymentsFlow() {
-    if (rlnConcurrentBtcPayInFlightRef.current) {
-      return;
-    }
-    rlnConcurrentBtcPayInFlightRef.current = true;
-    try {
-      setRunningRlnConcurrentBtcPayFlow(true);
-      setRlnConcurrentBtcPayResults({ running: true, steps: [] });
-      const r = await runRlnConcurrentBtcPaymentsFlow();
-      setRlnConcurrentBtcPayResults({ ...r, running: false });
-    } catch (e: any) {
-      setRlnConcurrentBtcPayResults({
-        running: false,
-        success: false,
-        error: e instanceof Error ? e.message : String(e),
-        steps: [],
-      });
-    } finally {
-      setRunningRlnConcurrentBtcPayFlow(false);
-      rlnConcurrentBtcPayInFlightRef.current = false;
+      setRunningRlnExternalSignerPayFlow(false);
+      rlnExternalSignerPayInFlightRef.current = false;
     }
   }
 
@@ -1373,6 +1352,48 @@ export default function FlowsScreen() {
     } finally {
       setRunningRlnExternalSignerFlow(false);
       rlnExternalSignerInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnExtIssueAssetFlow() {
+    if (rlnExtIssueAssetInFlightRef.current) return;
+    rlnExtIssueAssetInFlightRef.current = true;
+    try {
+      setRunningRlnExtIssueAssetFlow(true);
+      setRlnExtIssueAssetResults({ running: true, steps: [] });
+      const r = await runRlnExternalSignerIssueAssetFlow();
+      setRlnExtIssueAssetResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnExtIssueAssetResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnExtIssueAssetFlow(false);
+      rlnExtIssueAssetInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnExtChanPayFlow() {
+    if (rlnExtChanPayInFlightRef.current) return;
+    rlnExtChanPayInFlightRef.current = true;
+    try {
+      setRunningRlnExtChanPayFlow(true);
+      setRlnExtChanPayResults({ running: true, steps: [] });
+      const r = await runRlnExternalSignerChannelPaymentFlow();
+      setRlnExtChanPayResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnExtChanPayResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnExtChanPayFlow(false);
+      rlnExtChanPayInFlightRef.current = false;
     }
   }
 
@@ -1510,15 +1531,15 @@ export default function FlowsScreen() {
         </FlowCard>
 
         <FlowCard
-          title="RLN Restart Flow"
-          subtitle="RestartTest parity"
-          description="3-node regtest flow: open channel, make payment, restart all nodes, verify channel and payment survived."
+          title="RLN External Signer Payment Flow"
+          subtitle="PaymentTest parity with external signer"
+          description="Same as Payment Flow but all nodes use a native external signer (BIP39 seed) instead of password+mnemonic for init and unlock."
           accentColor="#2563EB"
           totalSteps={33}
-          results={rlnRestartResults}
-          running={runningRlnRestartFlow}
-          onRun={handleRlnRestartFlow}>
-          {rlnRestartResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+          results={rlnExternalSignerPayResults}
+          running={runningRlnExternalSignerPayFlow}
+          onRun={handleRlnExternalSignerPaymentFlow}>
+          {rlnExternalSignerPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
             const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
               <StepCard
@@ -1529,60 +1550,7 @@ export default function FlowsScreen() {
                 desc={meta.desc}
                 accentColor="#2563EB"
                 isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnRestartFlow}
-              />
-            );
-          })}
-        </FlowCard>
-
-        <FlowCard
-          title="RLN Multi Open/Close Flow"
-          subtitle="MultiOpenCloseTest parity"
-          description="3-node regtest flow: 2 cycles of B→A channel open, A keysend to B, balance check, cooperative close."
-          accentColor="#1E40AF"
-          totalSteps={25}
-          results={rlnMultiOpenCloseResults}
-          running={runningRlnMultiOpenCloseFlow}
-          onRun={handleRlnMultiOpenCloseFlow}
-          >
-          {rlnMultiOpenCloseResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#1E40AF"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnMultiOpenCloseFlow}
-              />
-            );
-          })}
-        </FlowCard>
-
-        <FlowCard
-          title="RLN Concurrent BTC Payments Flow"
-          subtitle="ConcurrentBtcPaymentsTest parity"
-          description="4-node regtest flow: 3 channels (B→A, C→B, D→B), C and D send concurrent payments to A."
-          accentColor="#1E3A8A"
-          totalSteps={31}
-          results={rlnConcurrentBtcPayResults}
-          running={runningRlnConcurrentBtcPayFlow}
-          onRun={handleRlnConcurrentBtcPaymentsFlow}>
-          {rlnConcurrentBtcPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#1E3A8A"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnConcurrentBtcPayFlow}
+                deferErrorDisplay={runningRlnExternalSignerPayFlow}
               />
             );
           })}
@@ -1635,6 +1603,58 @@ export default function FlowsScreen() {
                 accentColor="#1D4ED8"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnExternalSignerFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="RLN External Signer: Issue Asset"
+          subtitle="Usage example — create node, fund, issue"
+          description="Minimal example: create one node with a native external signer, fund it, create UTXOs, then issue an NIA asset."
+          accentColor="#1D4ED8"
+          totalSteps={8}
+          results={rlnExtIssueAssetResults}
+          running={runningRlnExtIssueAssetFlow}
+          onRun={handleRlnExtIssueAssetFlow}>
+          {rlnExtIssueAssetResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1D4ED8"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnExtIssueAssetFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="RLN External Signer: Channel + Payment"
+          subtitle="nodeA (ext signer) + nodeB (password) — BTC channel + 2 payments + restart"
+          description="Opens a 500k sat BTC channel from nodeA (native external signer) to nodeB (password). Sends two payments; restarts nodeA between them to verify signer persistence."
+          accentColor="#1E40AF"
+          totalSteps={17}
+          results={rlnExtChanPayResults}
+          running={runningRlnExtChanPayFlow}
+          onRun={handleRlnExtChanPayFlow}>
+          {rlnExtChanPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1E40AF"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnExtChanPayFlow}
               />
             );
           })}

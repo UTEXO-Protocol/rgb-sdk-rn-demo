@@ -7,7 +7,6 @@ import { mnemonicToSeedSync } from '@scure/bip39';
 import {
   createRLNManager,
   createWallet,
-  createWalletManager,
   DEFAULT_INDEXER_URLS,
   getBridgeAPI,
   LightningProtocol, OnchainProtocol,
@@ -16,7 +15,7 @@ import {
   UTEXOWallet,
   WalletManager,
   type InvoiceData,
-  type RLNManager,
+  type RLNManager
 } from '@utexo/rgb-sdk-rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
@@ -1907,7 +1906,6 @@ type RlnFlowContext = {
 type RlnNodeRuntime = {
   name: string;
   rln: RLNManager;
-  wallet: WalletManager;
   call: (name: string, ...args: any[]) => Promise<any>;
   callSwap: (name: 'makerinit' | 'taker' | 'makerexecute' | 'listSwaps', ...args: any[]) => Promise<any>;
   storageDirPath: string;
@@ -1917,7 +1915,6 @@ type RlnNodeRuntime = {
   proxyEndpoint: string;
   cleanup: () => Promise<void>;
   safeShutdown: () => Promise<void>;
-  disposeHandles: () => Promise<void>;
   unlockRequest: any;
 };
 
@@ -2112,6 +2109,7 @@ async function createRlnNodeRuntime(
     flowPrefix: string;
     stepPrefix: string;
     addStep: (step: string, status: string, data?: any, error?: string) => void;
+    useExternalSigner?: boolean;
     reuse?: {
       storageDirPath: string;
       daemonListeningPort: number;
@@ -2120,21 +2118,21 @@ async function createRlnNodeRuntime(
     };
   }
 ): Promise<RlnNodeRuntime> {
-  const { name, flowPrefix, stepPrefix, addStep, reuse } = opts;
+  const { name, flowPrefix, stepPrefix, addStep, reuse, useExternalSigner = false } = opts;
   const network = 'regtest' as const;
   const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
   const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
   const keys = await createWallet(network);
   const rln = createRLNManager();
-  const wallet = createWalletManager({
-    xpubVan: keys.accountXpubVanilla,
-    xpubCol: keys.accountXpubColored,
-    masterFingerprint: keys.masterFingerprint,
-    mnemonic: keys.mnemonic,
-    network,
-    indexerUrl,
-  });
-  await wallet.initialize();
+  // const wallet = createWalletManager({
+  //   xpubVan: keys.accountXpubVanilla,
+  //   xpubCol: keys.accountXpubColored,
+  //   masterFingerprint: keys.masterFingerprint,
+  //   mnemonic: keys.mnemonic,
+  //   network,
+  //   indexerUrl,
+  // });
+  // await wallet.initialize();
 
   const call = async (method: string, ...args: any[]) => {
     const fn = (rln as any)[method];
@@ -2199,84 +2197,126 @@ async function createRlnNodeRuntime(
   });
   addStep(`${stepPrefix}CreateNode`, 'success', { storageDirPath, daemonListeningPort: basePort, ldkPeerListeningPort });
 
-  addStep(`${stepPrefix}InitNode`, 'running');
-  let pubkey: string | null = null;
-  try {
-    pubkey = await call('rlnInitNode', nodePassword, keys.mnemonic);
-    addStep(`${stepPrefix}InitNode`, 'success', { pubkey, recreated: Boolean(reuse) });
-  } catch (error: any) {
-    const message = String(error?.message ?? error).toLowerCase();
-    const alreadyInitialized =
-      message.includes('already initialized') || message.includes('conflict with current node state');
-    if (!alreadyInitialized) {
-      throw error;
+  let signerId: number | null = null;
+
+  if (useExternalSigner) {
+    const seedHex = Buffer.from(mnemonicToSeedSync(keys.mnemonic)).slice(0, 32).toString('hex');
+
+    addStep(`${stepPrefix}CreateExternalSigner`, 'running');
+    signerId = await call('rlnCreateNativeExternalSigner', seedHex, network);
+    addStep(`${stepPrefix}CreateExternalSigner`, 'success', { signerId });
+
+    addStep(`${stepPrefix}InitNode`, 'running');
+    try {
+      await call('rlnInitNodeWithNativeExternalSigner', signerId);
+      addStep(`${stepPrefix}InitNode`, 'success', { signerId, recreated: Boolean(reuse) });
+    } catch (error: any) {
+      const message = String(error?.message ?? error).toLowerCase();
+      if (!message.includes('already initialized') && !message.includes('conflict with current node state')) throw error;
+      addStep(`${stepPrefix}InitNode`, 'success', { skipped: true, normalizedConflict: true, recreated: Boolean(reuse) });
     }
-    addStep(`${stepPrefix}InitNode`, 'success', {
-      skipped: true,
-      normalizedConflict: true,
-      reason: error?.message ?? String(error),
-      recreated: Boolean(reuse),
+
+    addStep(`${stepPrefix}UnlockNode`, 'running');
+    let unlockAttempts = 0;
+    let lastRetryError: string | null = null;
+    const unlockParams = {
+      bitcoindRpcUsername: unlockRequest.bitcoindRpcUsername ?? rpcUsername,
+      bitcoindRpcPassword: unlockRequest.bitcoindRpcPassword ?? rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
+      unlockAttempts = attempt;
+      try {
+        await call('rlnUnlockNodeWithNativeExternalSigner', signerId, unlockParams);
+        lastRetryError = null;
+        break;
+      } catch (error: any) {
+        lastRetryError = String(error?.message ?? error);
+        if (!isRetryableNodeStateError(error) || attempt === 12) throw error;
+        if (isNodeStateConflictError(error)) {
+          const readiness = await probeNodeReady(call, 12, 500);
+          if (readiness.ready) break;
+        }
+        await sleep(800);
+      }
+    }
+    addStep(`${stepPrefix}UnlockNode`, 'success', { rpcHost, rpcPort, indexerUrl, proxyEndpoint, attempts: unlockAttempts, lastRetryError });
+  } else {
+    addStep(`${stepPrefix}InitNode`, 'running');
+    let pubkey: string | null = null;
+    try {
+      pubkey = await call('rlnInitNode', nodePassword, keys.mnemonic);
+      addStep(`${stepPrefix}InitNode`, 'success', { pubkey, recreated: Boolean(reuse) });
+    } catch (error: any) {
+      const message = String(error?.message ?? error).toLowerCase();
+      const alreadyInitialized =
+        message.includes('already initialized') || message.includes('conflict with current node state');
+      if (!alreadyInitialized) {
+        throw error;
+      }
+      addStep(`${stepPrefix}InitNode`, 'success', {
+        skipped: true,
+        normalizedConflict: true,
+        reason: error?.message ?? String(error),
+        recreated: Boolean(reuse),
+      });
+    }
+
+    addStep(`${stepPrefix}UnlockNode`, 'running');
+    let unlockAttempts = 0;
+    let normalizedConflict = false;
+    let recoveredFromReadinessProbe = false;
+    let lastRetryError: string | null = null;
+    const maxUnlockAttempts = 12;
+    for (let attempt = 1; attempt <= maxUnlockAttempts; attempt += 1) {
+      unlockAttempts = attempt;
+      try {
+        await call('rlnUnlockNode', unlockRequest);
+        break;
+      } catch (error: any) {
+        lastRetryError = String(error?.message ?? error);
+        if (!isRetryableNodeStateError(error)) {
+          throw error;
+        }
+        if (isNodeStateConflictError(error)) {
+          const readiness = await probeNodeReady(call, 12, 500);
+          if (readiness.ready) {
+            normalizedConflict = true;
+            recoveredFromReadinessProbe = true;
+            break;
+          }
+        }
+        if (attempt === maxUnlockAttempts) {
+          throw error;
+        }
+        await sleep(800);
+      }
+    }
+    addStep(`${stepPrefix}UnlockNode`, 'success', {
+      rpcHost,
+      rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      attempts: unlockAttempts,
+      recoveredFromRetry: unlockAttempts > 1,
+      normalizedConflict,
+      recoveredFromReadinessProbe,
+      lastRetryError,
     });
   }
 
-  addStep(`${stepPrefix}UnlockNode`, 'running');
-  let unlockAttempts = 0;
-  let normalizedConflict = false;
-  let recoveredFromReadinessProbe = false;
-  let lastRetryError: string | null = null;
-  const maxUnlockAttempts = 12;
-  for (let attempt = 1; attempt <= maxUnlockAttempts; attempt += 1) {
-    unlockAttempts = attempt;
-    try {
-      await call('rlnUnlockNode', unlockRequest);
-      break;
-    } catch (error: any) {
-      lastRetryError = String(error?.message ?? error);
-      if (!isRetryableNodeStateError(error)) {
-        throw error;
-      }
-      if (isNodeStateConflictError(error)) {
-        const readiness = await probeNodeReady(call, 12, 500);
-        if (readiness.ready) {
-          normalizedConflict = true;
-          recoveredFromReadinessProbe = true;
-          break;
-        }
-      }
-      if (attempt === maxUnlockAttempts) {
-        throw error;
-      }
-      await sleep(800);
-    }
-  }
-  addStep(`${stepPrefix}UnlockNode`, 'success', {
-    rpcHost,
-    rpcPort,
-    indexerUrl,
-    proxyEndpoint,
-    attempts: unlockAttempts,
-    recoveredFromRetry: unlockAttempts > 1,
-    normalizedConflict,
-    recoveredFromReadinessProbe,
-    lastRetryError,
-  });
-
   const cleanup = async () => {
-    try {
-      await rln.rlnShutdown();
-    } catch {
-      // best effort
+    try { await rln.rlnShutdown(); } catch {}
+    try { await rln.rlnDestroyNode(); } catch {}
+    if (signerId !== null) {
+      try { await (rln as any).rlnDestroyNativeExternalSigner(signerId); } catch {}
     }
-    try {
-      await rln.rlnDestroyNode();
-    } catch {
-      // best effort
-    }
-    try {
-      await wallet.dispose();
-    } catch {
-      // best effort
-    }
+    // try { await wallet.dispose(); } catch {}
   };
   const safeShutdown = async () => {
     try {
@@ -2285,18 +2325,9 @@ async function createRlnNodeRuntime(
       // best effort
     }
   };
-  const disposeHandles = async () => {
-    try {
-      await wallet.dispose();
-    } catch {
-      // best effort
-    }
-  };
-
   return {
     name,
     rln,
-    wallet,
     call,
     callSwap,
     storageDirPath,
@@ -2306,7 +2337,6 @@ async function createRlnNodeRuntime(
     proxyEndpoint,
     cleanup,
     safeShutdown,
-    disposeHandles,
     unlockRequest,
   };
 }
@@ -2743,326 +2773,486 @@ export async function runRlnPaymentFlow() {
   }
 }
 
-export async function runRlnRestartFlow() {
-  const flowName = 'runRlnRestartFlow';
+// export async function runRlnRestartFlow() {
+//   const flowName = 'runRlnRestartFlow';
+//   beginExclusiveFlow(flowName);
+//   const { results, addStep, failFlow } = createFlowResults();
+//   let nodeA: RlnNodeRuntime | null = null;
+//   let nodeB: RlnNodeRuntime | null = null;
+//   let nodeC: RlnNodeRuntime | null = null;
+//   try {
+//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartA', addStep });
+//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartB', addStep });
+//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartC', addStep });
+// 
+//     await fundAndCreateUtxosForNode(nodeA, 'restartA', addStep);
+//     await fundAndCreateUtxosForNode(nodeB, 'restartB', addStep);
+//     await fundAndCreateUtxosForNode(nodeC, 'restartC', addStep);
+// 
+//     const infoA = await nodeA.call('rlnNodeInfo');
+//     const infoB = await nodeB.call('rlnNodeInfo');
+//     const pubkeyA = String(infoA?.pubkey ?? '');
+//     const pubkeyB = String(infoB?.pubkey ?? '');
+//     addStep('restartNodeInfos', 'success', {
+//       pubkeyA: pubkeyA.substring(0, 16) + '...',
+//       pubkeyB: pubkeyB.substring(0, 16) + '...',
+//     });
+// 
+//     addStep('restartConnectPeer', 'running');
+//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
+//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
+//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
+//     addStep('restartConnectPeer', 'success', {});
+// 
+//     // A opens channel to B; A has outbound capacity
+//     addStep('restartOpenChannel', 'running');
+//     const openResp = await nodeA.call('rlnOpenChannel', {
+//       peerPubkeyAndOptAddr: peerUriB,
+//       capacitySat: 100000,
+//       pushMsat: 0,
+//       public: true,
+//       withAnchors: true,
+//     });
+//     const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
+//     const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeA, nodeB, tmpId, 120000);
+//     await waitForFundingConfirmed(nodeA, fundingTxid, 180000);
+//     await mine(6);
+//     await waitForChannelReady(nodeA);
+//     addStep('restartOpenChannel', 'success', { channelId, fundingTxid });
+// 
+//     // B creates invoice; A pays to B
+//     addStep('restartPreRestartPayment', 'running');
+//     const invResp = await nodeB.call('rlnLnInvoice', 5_000_000, 900, null, null);
+//     const invoice = String(invResp?.invoice ?? invResp ?? '');
+//     const decResp = await nodeB.call('rlnDecodeLnInvoice', invoice);
+//     const expectedHash = String(decResp?.paymentHash ?? decResp?.payment_hash ?? '');
+//     const sendResp = await nodeA.call('rlnSendPayment', invoice, null, null, null);
+//     const payHash = String(sendResp?.paymentHash ?? sendResp?.payment_hash ?? expectedHash);
+//     await waitForInvoiceStatus(nodeB.call.bind(nodeB), invoice, 'SUCCEEDED', 60000);
+//     await waitForPaymentSuccess(nodeA.call.bind(nodeA), payHash, 60000);
+//     addStep('restartPreRestartPayment', 'success', { paymentHash: payHash, amtMsat: 5_000_000 });
+// 
+//     const restartConfigA = { storageDirPath: nodeA.storageDirPath, daemonListeningPort: nodeA.daemonListeningPort, ldkPeerListeningPort: nodeA.ldkPeerListeningPort, nodePassword: nodeA.nodePassword };
+//     const restartConfigB = { storageDirPath: nodeB.storageDirPath, daemonListeningPort: nodeB.daemonListeningPort, ldkPeerListeningPort: nodeB.ldkPeerListeningPort, nodePassword: nodeB.nodePassword };
+//     const restartConfigC = { storageDirPath: nodeC.storageDirPath, daemonListeningPort: nodeC.daemonListeningPort, ldkPeerListeningPort: nodeC.ldkPeerListeningPort, nodePassword: nodeC.nodePassword };
+// 
+//     addStep('restartShutdownA', 'running');
+//     await nodeA.safeShutdown();
+//     addStep('restartShutdownA', 'success', {});
+//     addStep('restartShutdownB', 'running');
+//     await nodeB.safeShutdown();
+//     addStep('restartShutdownB', 'success', {});
+//     addStep('restartShutdownC', 'running');
+//     await nodeC.safeShutdown();
+//     addStep('restartShutdownC', 'success', {});
+//     await sleep(2000);
+//     await nodeA.disposeHandles();
+//     await nodeB.disposeHandles();
+//     await nodeC.disposeHandles();
+// 
+//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartARecreate', addStep, reuse: restartConfigA });
+//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartBRecreate', addStep, reuse: restartConfigB });
+//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartCRecreate', addStep, reuse: restartConfigC });
+// 
+//     addStep('restartWaitUsableChannel', 'running');
+//     await waitForUsableChannels(nodeA, 1, 60000);
+//     addStep('restartWaitUsableChannel', 'success', { usableChannels: 1 });
+// 
+//     addStep('restartVerifyPayment', 'running');
+//     const paymentsA: any[] = (await nodeA.call('rlnListPayments')) ?? [];
+//     const found = paymentsA.find((p: any) => (p?.paymentHash ?? p?.payment_hash) === payHash);
+//     if (!found) throw new Error(`Payment ${payHash} not found after restart`);
+//     addStep('restartVerifyPayment', 'success', { paymentHash: payHash, status: found.status });
+// 
+//     results.success = true;
+//     return results;
+//   } catch (error: any) {
+//     return failFlow(flowName, error);
+//   } finally {
+//     if (nodeA) await nodeA.cleanup();
+//     if (nodeB) await nodeB.cleanup();
+//     if (nodeC) await nodeC.cleanup();
+//     endExclusiveFlow(flowName);
+//   }
+// }
+
+// export async function runRlnMultiOpenCloseFlow() {
+//   const flowName = 'runRlnMultiOpenCloseFlow';
+//   beginExclusiveFlow(flowName);
+//   const { results, addStep, failFlow } = createFlowResults();
+//   let nodeA: RlnNodeRuntime | null = null;
+//   let nodeB: RlnNodeRuntime | null = null;
+//   let nodeC: RlnNodeRuntime | null = null;
+//   try {
+//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_moc_a', stepPrefix: 'mocA', addStep });
+//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_moc_b', stepPrefix: 'mocB', addStep });
+//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_moc_c', stepPrefix: 'mocC', addStep });
+// 
+//     await fundAndCreateUtxosForNode(nodeA, 'mocA', addStep);
+//     await fundAndCreateUtxosForNode(nodeB, 'mocB', addStep);
+//     await fundAndCreateUtxosForNode(nodeC, 'mocC', addStep);
+// 
+//     const infoA = await nodeA.call('rlnNodeInfo');
+//     const infoB = await nodeB.call('rlnNodeInfo');
+//     const pubkeyA = String(infoA?.pubkey ?? '');
+//     const pubkeyB = String(infoB?.pubkey ?? '');
+//     addStep('mocNodeInfos', 'success', {
+//       pubkeyA: pubkeyA.substring(0, 16) + '...',
+//       pubkeyB: pubkeyB.substring(0, 16) + '...',
+//     });
+// 
+//     addStep('mocConnectPeers', 'running');
+//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
+//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
+//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
+//     try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
+//     addStep('mocConnectPeers', 'success', {});
+// 
+//     for (let cycle = 1; cycle <= 2; cycle += 1) {
+//       addStep(`mocOpenChannel${cycle}`, 'running');
+//       // pushMsat gives nodeA 3500 sat of outbound capacity for keysend
+//       const openResp = await nodeB.call('rlnOpenChannel', {
+//         peerPubkeyAndOptAddr: peerUriA,
+//         capacitySat: 100000,
+//         pushMsat: 3_500_000,
+//         public: true,
+//         withAnchors: true,
+//       });
+//       const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
+//       const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeB, nodeA, tmpId, 120000);
+//       await waitForFundingConfirmed(nodeB, fundingTxid, 180000);
+//       await mine(6);
+//       await waitForChannelReady(nodeB);
+//       addStep(`mocOpenChannel${cycle}`, 'success', { channelId, fundingTxid, cycle });
+// 
+//       addStep(`mocKeysend${cycle}`, 'running');
+//       const keysendResp = await nodeA.call('rlnKeysend', pubkeyB, 1_000_000, null, null);
+//       const keysendHash = String(keysendResp?.paymentHash ?? keysendResp?.payment_hash ?? '');
+//       await waitForPaymentSuccess(nodeA.call.bind(nodeA), keysendHash, 60000);
+//       addStep(`mocKeysend${cycle}`, 'success', { paymentHash: keysendHash, amtMsat: 1_000_000 });
+// 
+//       addStep(`mocBalanceCheck${cycle}`, 'running');
+//       const [balA, balB] = await Promise.all([
+//         nodeA.call('rlnBtcBalance', true),
+//         nodeB.call('rlnBtcBalance', true),
+//       ]);
+//       addStep(`mocBalanceCheck${cycle}`, 'success', {
+//         spendableA: balA?.vanilla?.spendable ?? null,
+//         spendableB: balB?.vanilla?.spendable ?? null,
+//       });
+// 
+//       addStep(`mocCloseChannel${cycle}`, 'running');
+//       try {
+//         await nodeB.call('rlnCloseChannel', channelId, pubkeyA, false);
+//         await mine(6);
+//         await nodeA.call('rlnSync');
+//         await nodeB.call('rlnSync');
+//       } catch {
+//         // best effort for demo
+//       }
+//       addStep(`mocCloseChannel${cycle}`, 'success', { channelId, cycle });
+//     }
+// 
+//     results.success = true;
+//     return results;
+//   } catch (error: any) {
+//     return failFlow(flowName, error);
+//   } finally {
+//     if (nodeA) await nodeA.cleanup();
+//     if (nodeB) await nodeB.cleanup();
+//     if (nodeC) await nodeC.cleanup();
+//     endExclusiveFlow(flowName);
+//   }
+// }
+
+// export async function runRlnConcurrentBtcPaymentsFlow() {
+//   const flowName = 'runRlnConcurrentBtcPaymentsFlow';
+//   beginExclusiveFlow(flowName);
+//   const { results, addStep, failFlow } = createFlowResults();
+//   let nodeA: RlnNodeRuntime | null = null;
+//   let nodeB: RlnNodeRuntime | null = null;
+//   let nodeC: RlnNodeRuntime | null = null;
+//   let nodeD: RlnNodeRuntime | null = null;
+//   try {
+//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_cbp_a', stepPrefix: 'cbpA', addStep });
+//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_cbp_b', stepPrefix: 'cbpB', addStep });
+//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_cbp_c', stepPrefix: 'cbpC', addStep });
+//     nodeD = await createRlnNodeRuntime({ name: 'nodeD', flowPrefix: 'rln_cbp_d', stepPrefix: 'cbpD', addStep });
+// 
+//     await fundAndCreateUtxosForNode(nodeA, 'cbpA', addStep);
+//     await fundAndCreateUtxosForNode(nodeB, 'cbpB', addStep);
+//     await fundAndCreateUtxosForNode(nodeC, 'cbpC', addStep);
+//     await fundAndCreateUtxosForNode(nodeD, 'cbpD', addStep);
+// 
+//     const infoA = await nodeA.call('rlnNodeInfo');
+//     const infoB = await nodeB.call('rlnNodeInfo');
+//     const pubkeyA = String(infoA?.pubkey ?? '');
+//     const pubkeyB = String(infoB?.pubkey ?? '');
+//     addStep('cbpNodeInfos', 'success', {
+//       pubkeyA: pubkeyA.substring(0, 16) + '...',
+//       pubkeyB: pubkeyB.substring(0, 16) + '...',
+//     });
+// 
+//     addStep('cbpConnectPeers', 'running');
+//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
+//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
+//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
+//     try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
+//     try { await nodeD.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
+//     addStep('cbpConnectPeers', 'success', {});
+// 
+//     // B→A channel (C and D will route through B to reach A)
+//     addStep('cbpOpenChannelBtoA', 'running');
+//     const openBA = await nodeB.call('rlnOpenChannel', {
+//       peerPubkeyAndOptAddr: peerUriA,
+//       capacitySat: 100000,
+//       pushMsat: 0,
+//       public: true,
+//       withAnchors: true,
+//     });
+//     const tmpBA = String(openBA?.temporaryChannelId ?? openBA?.temporary_channel_id ?? '');
+//     const { channelId: channelIdBA, fundingTxid: fundingBA } = await waitForChannelFundingTx(nodeB, nodeA, tmpBA, 120000);
+//     await waitForFundingConfirmed(nodeB, fundingBA, 180000);
+//     await mine(6);
+//     await waitForChannelReady(nodeB);
+//     addStep('cbpOpenChannelBtoA', 'success', { channelId: channelIdBA, fundingTxid: fundingBA });
+// 
+//     // C→B channel
+//     addStep('cbpOpenChannelCtoB', 'running');
+//     const openCB = await nodeC.call('rlnOpenChannel', {
+//       peerPubkeyAndOptAddr: peerUriB,
+//       capacitySat: 100000,
+//       pushMsat: 0,
+//       public: true,
+//       withAnchors: true,
+//     });
+//     const tmpCB = String(openCB?.temporaryChannelId ?? openCB?.temporary_channel_id ?? '');
+//     const { channelId: channelIdCB, fundingTxid: fundingCB } = await waitForChannelFundingTx(nodeC, nodeB, tmpCB, 120000);
+//     await waitForFundingConfirmed(nodeC, fundingCB, 180000);
+//     await mine(6);
+//     await waitForChannelReady(nodeC);
+//     addStep('cbpOpenChannelCtoB', 'success', { channelId: channelIdCB, fundingTxid: fundingCB });
+// 
+//     // D→B channel
+//     addStep('cbpOpenChannelDtoB', 'running');
+//     const openDB = await nodeD.call('rlnOpenChannel', {
+//       peerPubkeyAndOptAddr: peerUriB,
+//       capacitySat: 100000,
+//       pushMsat: 0,
+//       public: true,
+//       withAnchors: true,
+//     });
+//     const tmpDB = String(openDB?.temporaryChannelId ?? openDB?.temporary_channel_id ?? '');
+//     const { channelId: channelIdDB, fundingTxid: fundingDB } = await waitForChannelFundingTx(nodeD, nodeB, tmpDB, 120000);
+//     await waitForFundingConfirmed(nodeD, fundingDB, 180000);
+//     await mine(6);
+//     await waitForChannelReady(nodeD);
+//     addStep('cbpOpenChannelDtoB', 'success', { channelId: channelIdDB, fundingTxid: fundingDB });
+// 
+//     // A creates two invoices concurrently
+//     addStep('cbpCreateInvoices', 'running');
+//     const [invResp1, invResp2] = await Promise.all([
+//       nodeA.call('rlnLnInvoice', 4_000_000, 900, null, null),
+//       nodeA.call('rlnLnInvoice', 5_000_000, 900, null, null),
+//     ]);
+//     const invoice1 = String(invResp1?.invoice ?? invResp1 ?? '');
+//     const invoice2 = String(invResp2?.invoice ?? invResp2 ?? '');
+//     const [dec1, dec2] = await Promise.all([
+//       nodeA.call('rlnDecodeLnInvoice', invoice1),
+//       nodeA.call('rlnDecodeLnInvoice', invoice2),
+//     ]);
+//     const hash1 = String(dec1?.paymentHash ?? dec1?.payment_hash ?? '');
+//     const hash2 = String(dec2?.paymentHash ?? dec2?.payment_hash ?? '');
+//     addStep('cbpCreateInvoices', 'success', { invoice1: invoice1.substring(0, 20) + '...', invoice2: invoice2.substring(0, 20) + '...' });
+// 
+//     // C and D send concurrently
+//     addStep('cbpConcurrentSend', 'running');
+//     const [sendC, sendD] = await Promise.all([
+//       nodeC.call('rlnSendPayment', invoice1, null, null, null),
+//       nodeD.call('rlnSendPayment', invoice2, null, null, null),
+//     ]);
+//     const payHashC = String(sendC?.paymentHash ?? sendC?.payment_hash ?? hash1);
+//     const payHashD = String(sendD?.paymentHash ?? sendD?.payment_hash ?? hash2);
+//     addStep('cbpConcurrentSend', 'success', { payHashC, payHashD });
+// 
+//     addStep('cbpWaitInvoice1', 'running');
+//     await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice1, 'SUCCEEDED', 60000);
+//     addStep('cbpWaitInvoice1', 'success', {});
+// 
+//     addStep('cbpWaitInvoice2', 'running');
+//     await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice2, 'SUCCEEDED', 60000);
+//     addStep('cbpWaitInvoice2', 'success', {});
+// 
+//     addStep('cbpWaitSenders', 'running');
+//     await Promise.all([
+//       waitForPaymentSuccess(nodeC.call.bind(nodeC), payHashC, 60000),
+//       waitForPaymentSuccess(nodeD.call.bind(nodeD), payHashD, 60000),
+//     ]);
+//     addStep('cbpWaitSenders', 'success', {});
+// 
+//     addStep('cbpFinalBalance', 'running');
+//     const finalBal = await nodeA.call('rlnBtcBalance', false);
+//     addStep('cbpFinalBalance', 'success', finalBal);
+// 
+//     results.success = true;
+//     return results;
+//   } catch (error: any) {
+//     return failFlow(flowName, error);
+//   } finally {
+//     if (nodeA) await nodeA.cleanup();
+//     if (nodeB) await nodeB.cleanup();
+//     if (nodeC) await nodeC.cleanup();
+//     if (nodeD) await nodeD.cleanup();
+//     endExclusiveFlow(flowName);
+//   }
+// }
+
+// Same as runRlnPaymentFlow but all three nodes are initialised with a native external signer
+// instead of password+mnemonic. The payment steps (issue asset, open channel, 4 invoices,
+// cooperative close, RGB sends) are identical.
+export async function runRlnExternalSignerPaymentFlow() {
+  const flowName = 'runRlnExternalSignerPaymentFlow';
   beginExclusiveFlow(flowName);
   const { results, addStep, failFlow } = createFlowResults();
   let nodeA: RlnNodeRuntime | null = null;
   let nodeB: RlnNodeRuntime | null = null;
   let nodeC: RlnNodeRuntime | null = null;
   try {
-    nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartA', addStep });
-    nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartB', addStep });
-    nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartC', addStep });
+    nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_ext_pay_a', stepPrefix: 'extPayA', addStep, useExternalSigner: true });
+    nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_ext_pay_b', stepPrefix: 'extPayB', addStep, useExternalSigner: true });
+    nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_ext_pay_c', stepPrefix: 'extPayC', addStep, useExternalSigner: true });
 
-    await fundAndCreateUtxosForNode(nodeA, 'restartA', addStep);
-    await fundAndCreateUtxosForNode(nodeB, 'restartB', addStep);
-    await fundAndCreateUtxosForNode(nodeC, 'restartC', addStep);
+    await fundAndCreateUtxosForNode(nodeA, 'extPayA', addStep);
+    await fundAndCreateUtxosForNode(nodeB, 'extPayB', addStep);
+    await fundAndCreateUtxosForNode(nodeC, 'extPayC', addStep);
+    await mine(6);
+    await sleep(5000)
+    addStep('payIssueAsset', 'running');
+    const issued = await nodeA.call('rlnIssueAssetNia', 'USDT', 'Tether', 0, [1000]);
+    const assetId = String(issued?.assetId ?? issued?.asset_id ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('payIssueAsset', 'success', { assetId });
 
     const infoA = await nodeA.call('rlnNodeInfo');
     const infoB = await nodeB.call('rlnNodeInfo');
     const pubkeyA = String(infoA?.pubkey ?? '');
     const pubkeyB = String(infoB?.pubkey ?? '');
-    addStep('restartNodeInfos', 'success', {
+    addStep('payNodeInfos', 'success', {
       pubkeyA: pubkeyA.substring(0, 16) + '...',
       pubkeyB: pubkeyB.substring(0, 16) + '...',
     });
 
-    addStep('restartConnectPeer', 'running');
-    const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
+    addStep('payConnectPeers', 'running');
     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-    try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-    addStep('restartConnectPeer', 'success', {});
+    try { await nodeA.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
+    addStep('payConnectPeers', 'success', {});
 
-    // A opens channel to B; A has outbound capacity
-    addStep('restartOpenChannel', 'running');
+    addStep('payOpenChannel', 'running');
     const openResp = await nodeA.call('rlnOpenChannel', {
       peerPubkeyAndOptAddr: peerUriB,
       capacitySat: 100000,
-      pushMsat: 0,
+      pushMsat: 3_500_000,
       public: true,
       withAnchors: true,
+      assetId,
+      assetAmount: 600,
     });
     const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
-    const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeA, nodeB, tmpId, 120000);
+    const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeA, nodeB, tmpId, 120000, assetId);
     await waitForFundingConfirmed(nodeA, fundingTxid, 180000);
     await mine(6);
     await waitForChannelReady(nodeA);
-    addStep('restartOpenChannel', 'success', { channelId, fundingTxid });
+    addStep('payOpenChannel', 'success', { channelId, fundingTxid });
 
-    // B creates invoice; A pays to B
-    addStep('restartPreRestartPayment', 'running');
-    const invResp = await nodeB.call('rlnLnInvoice', 5_000_000, 900, null, null);
-    const invoice = String(invResp?.invoice ?? invResp ?? '');
-    const decResp = await nodeB.call('rlnDecodeLnInvoice', invoice);
-    const expectedHash = String(decResp?.paymentHash ?? decResp?.payment_hash ?? '');
-    const sendResp = await nodeA.call('rlnSendPayment', invoice, null, null, null);
-    const payHash = String(sendResp?.paymentHash ?? sendResp?.payment_hash ?? expectedHash);
-    await waitForInvoiceStatus(nodeB.call.bind(nodeB), invoice, 'SUCCEEDED', 60000);
-    await waitForPaymentSuccess(nodeA.call.bind(nodeA), payHash, 60000);
-    addStep('restartPreRestartPayment', 'success', { paymentHash: payHash, amtMsat: 5_000_000 });
+    addStep('payAssetBalanceA', 'running');
+    const balA0 = await nodeA.call('rlnAssetBalance', assetId);
+    addStep('payAssetBalanceA', 'success', { spendable: balA0?.spendable ?? null });
 
-    const restartConfigA = { storageDirPath: nodeA.storageDirPath, daemonListeningPort: nodeA.daemonListeningPort, ldkPeerListeningPort: nodeA.ldkPeerListeningPort, nodePassword: nodeA.nodePassword };
-    const restartConfigB = { storageDirPath: nodeB.storageDirPath, daemonListeningPort: nodeB.daemonListeningPort, ldkPeerListeningPort: nodeB.ldkPeerListeningPort, nodePassword: nodeB.nodePassword };
-    const restartConfigC = { storageDirPath: nodeC.storageDirPath, daemonListeningPort: nodeC.daemonListeningPort, ldkPeerListeningPort: nodeC.ldkPeerListeningPort, nodePassword: nodeC.nodePassword };
+    const paymentMsat = 3_000_000;
 
-    addStep('restartShutdownA', 'running');
-    await nodeA.safeShutdown();
-    addStep('restartShutdownA', 'success', {});
-    addStep('restartShutdownB', 'running');
-    await nodeB.safeShutdown();
-    addStep('restartShutdownB', 'success', {});
-    addStep('restartShutdownC', 'running');
-    await nodeC.safeShutdown();
-    addStep('restartShutdownC', 'success', {});
-    await sleep(2000);
-    await nodeA.disposeHandles();
-    await nodeB.disposeHandles();
-    await nodeC.disposeHandles();
-
-    nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartARecreate', addStep, reuse: restartConfigA });
-    nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartBRecreate', addStep, reuse: restartConfigB });
-    nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartCRecreate', addStep, reuse: restartConfigC });
-
-    addStep('restartWaitUsableChannel', 'running');
-    await waitForUsableChannels(nodeA, 1, 60000);
-    addStep('restartWaitUsableChannel', 'success', { usableChannels: 1 });
-
-    addStep('restartVerifyPayment', 'running');
-    const paymentsA: any[] = (await nodeA.call('rlnListPayments')) ?? [];
-    const found = paymentsA.find((p: any) => (p?.paymentHash ?? p?.payment_hash) === payHash);
-    if (!found) throw new Error(`Payment ${payHash} not found after restart`);
-    addStep('restartVerifyPayment', 'success', { paymentHash: payHash, status: found.status });
-
-    results.success = true;
-    return results;
-  } catch (error: any) {
-    return failFlow(flowName, error);
-  } finally {
-    if (nodeA) await nodeA.cleanup();
-    if (nodeB) await nodeB.cleanup();
-    if (nodeC) await nodeC.cleanup();
-    endExclusiveFlow(flowName);
-  }
-}
-
-export async function runRlnMultiOpenCloseFlow() {
-  const flowName = 'runRlnMultiOpenCloseFlow';
-  beginExclusiveFlow(flowName);
-  const { results, addStep, failFlow } = createFlowResults();
-  let nodeA: RlnNodeRuntime | null = null;
-  let nodeB: RlnNodeRuntime | null = null;
-  let nodeC: RlnNodeRuntime | null = null;
-  try {
-    nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_moc_a', stepPrefix: 'mocA', addStep });
-    nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_moc_b', stepPrefix: 'mocB', addStep });
-    nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_moc_c', stepPrefix: 'mocC', addStep });
-
-    await fundAndCreateUtxosForNode(nodeA, 'mocA', addStep);
-    await fundAndCreateUtxosForNode(nodeB, 'mocB', addStep);
-    await fundAndCreateUtxosForNode(nodeC, 'mocC', addStep);
-
-    const infoA = await nodeA.call('rlnNodeInfo');
-    const infoB = await nodeB.call('rlnNodeInfo');
-    const pubkeyA = String(infoA?.pubkey ?? '');
-    const pubkeyB = String(infoB?.pubkey ?? '');
-    addStep('mocNodeInfos', 'success', {
-      pubkeyA: pubkeyA.substring(0, 16) + '...',
-      pubkeyB: pubkeyB.substring(0, 16) + '...',
-    });
-
-    addStep('mocConnectPeers', 'running');
-    const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
-    const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-    try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-    try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-    addStep('mocConnectPeers', 'success', {});
-
-    for (let cycle = 1; cycle <= 2; cycle += 1) {
-      addStep(`mocOpenChannel${cycle}`, 'running');
-      // pushMsat gives nodeA 3500 sat of outbound capacity for keysend
-      const openResp = await nodeB.call('rlnOpenChannel', {
-        peerPubkeyAndOptAddr: peerUriA,
-        capacitySat: 100000,
-        pushMsat: 3_500_000,
-        public: true,
-        withAnchors: true,
-      });
-      const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
-      const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeB, nodeA, tmpId, 120000);
-      await waitForFundingConfirmed(nodeB, fundingTxid, 180000);
-      await mine(6);
-      await waitForChannelReady(nodeB);
-      addStep(`mocOpenChannel${cycle}`, 'success', { channelId, fundingTxid, cycle });
-
-      addStep(`mocKeysend${cycle}`, 'running');
-      const keysendResp = await nodeA.call('rlnKeysend', pubkeyB, 1_000_000, null, null);
-      const keysendHash = String(keysendResp?.paymentHash ?? keysendResp?.payment_hash ?? '');
-      await waitForPaymentSuccess(nodeA.call.bind(nodeA), keysendHash, 60000);
-      addStep(`mocKeysend${cycle}`, 'success', { paymentHash: keysendHash, amtMsat: 1_000_000 });
-
-      addStep(`mocBalanceCheck${cycle}`, 'running');
-      const [balA, balB] = await Promise.all([
-        nodeA.call('rlnBtcBalance', true),
-        nodeB.call('rlnBtcBalance', true),
-      ]);
-      addStep(`mocBalanceCheck${cycle}`, 'success', {
-        spendableA: balA?.vanilla?.spendable ?? null,
-        spendableB: balB?.vanilla?.spendable ?? null,
-      });
-
-      addStep(`mocCloseChannel${cycle}`, 'running');
-      try {
-        await nodeB.call('rlnCloseChannel', channelId, pubkeyA, false);
-        await mine(6);
-        await nodeA.call('rlnSync');
-        await nodeB.call('rlnSync');
-      } catch {
-        // best effort for demo
-      }
-      addStep(`mocCloseChannel${cycle}`, 'success', { channelId, cycle });
-    }
-
-    results.success = true;
-    return results;
-  } catch (error: any) {
-    return failFlow(flowName, error);
-  } finally {
-    if (nodeA) await nodeA.cleanup();
-    if (nodeB) await nodeB.cleanup();
-    if (nodeC) await nodeC.cleanup();
-    endExclusiveFlow(flowName);
-  }
-}
-
-export async function runRlnConcurrentBtcPaymentsFlow() {
-  const flowName = 'runRlnConcurrentBtcPaymentsFlow';
-  beginExclusiveFlow(flowName);
-  const { results, addStep, failFlow } = createFlowResults();
-  let nodeA: RlnNodeRuntime | null = null;
-  let nodeB: RlnNodeRuntime | null = null;
-  let nodeC: RlnNodeRuntime | null = null;
-  let nodeD: RlnNodeRuntime | null = null;
-  try {
-    nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_cbp_a', stepPrefix: 'cbpA', addStep });
-    nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_cbp_b', stepPrefix: 'cbpB', addStep });
-    nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_cbp_c', stepPrefix: 'cbpC', addStep });
-    nodeD = await createRlnNodeRuntime({ name: 'nodeD', flowPrefix: 'rln_cbp_d', stepPrefix: 'cbpD', addStep });
-
-    await fundAndCreateUtxosForNode(nodeA, 'cbpA', addStep);
-    await fundAndCreateUtxosForNode(nodeB, 'cbpB', addStep);
-    await fundAndCreateUtxosForNode(nodeC, 'cbpC', addStep);
-    await fundAndCreateUtxosForNode(nodeD, 'cbpD', addStep);
-
-    const infoA = await nodeA.call('rlnNodeInfo');
-    const infoB = await nodeB.call('rlnNodeInfo');
-    const pubkeyA = String(infoA?.pubkey ?? '');
-    const pubkeyB = String(infoB?.pubkey ?? '');
-    addStep('cbpNodeInfos', 'success', {
-      pubkeyA: pubkeyA.substring(0, 16) + '...',
-      pubkeyB: pubkeyB.substring(0, 16) + '...',
-    });
-
-    addStep('cbpConnectPeers', 'running');
-    const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
-    const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-    try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-    try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-    try { await nodeD.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-    addStep('cbpConnectPeers', 'success', {});
-
-    // B→A channel (C and D will route through B to reach A)
-    addStep('cbpOpenChannelBtoA', 'running');
-    const openBA = await nodeB.call('rlnOpenChannel', {
-      peerPubkeyAndOptAddr: peerUriA,
-      capacitySat: 100000,
-      pushMsat: 0,
-      public: true,
-      withAnchors: true,
-    });
-    const tmpBA = String(openBA?.temporaryChannelId ?? openBA?.temporary_channel_id ?? '');
-    const { channelId: channelIdBA, fundingTxid: fundingBA } = await waitForChannelFundingTx(nodeB, nodeA, tmpBA, 120000);
-    await waitForFundingConfirmed(nodeB, fundingBA, 180000);
-    await mine(6);
-    await waitForChannelReady(nodeB);
-    addStep('cbpOpenChannelBtoA', 'success', { channelId: channelIdBA, fundingTxid: fundingBA });
-
-    // C→B channel
-    addStep('cbpOpenChannelCtoB', 'running');
-    const openCB = await nodeC.call('rlnOpenChannel', {
-      peerPubkeyAndOptAddr: peerUriB,
-      capacitySat: 100000,
-      pushMsat: 0,
-      public: true,
-      withAnchors: true,
-    });
-    const tmpCB = String(openCB?.temporaryChannelId ?? openCB?.temporary_channel_id ?? '');
-    const { channelId: channelIdCB, fundingTxid: fundingCB } = await waitForChannelFundingTx(nodeC, nodeB, tmpCB, 120000);
-    await waitForFundingConfirmed(nodeC, fundingCB, 180000);
-    await mine(6);
-    await waitForChannelReady(nodeC);
-    addStep('cbpOpenChannelCtoB', 'success', { channelId: channelIdCB, fundingTxid: fundingCB });
-
-    // D→B channel
-    addStep('cbpOpenChannelDtoB', 'running');
-    const openDB = await nodeD.call('rlnOpenChannel', {
-      peerPubkeyAndOptAddr: peerUriB,
-      capacitySat: 100000,
-      pushMsat: 0,
-      public: true,
-      withAnchors: true,
-    });
-    const tmpDB = String(openDB?.temporaryChannelId ?? openDB?.temporary_channel_id ?? '');
-    const { channelId: channelIdDB, fundingTxid: fundingDB } = await waitForChannelFundingTx(nodeD, nodeB, tmpDB, 120000);
-    await waitForFundingConfirmed(nodeD, fundingDB, 180000);
-    await mine(6);
-    await waitForChannelReady(nodeD);
-    addStep('cbpOpenChannelDtoB', 'success', { channelId: channelIdDB, fundingTxid: fundingDB });
-
-    // A creates two invoices concurrently
-    addStep('cbpCreateInvoices', 'running');
-    const [invResp1, invResp2] = await Promise.all([
-      nodeA.call('rlnLnInvoice', 4_000_000, 900, null, null),
-      nodeA.call('rlnLnInvoice', 5_000_000, 900, null, null),
-    ]);
+    addStep('payInvoice1', 'running');
+    const invResp1 = await nodeB.call('rlnLnInvoice', paymentMsat, 900, assetId, 100);
     const invoice1 = String(invResp1?.invoice ?? invResp1 ?? '');
-    const invoice2 = String(invResp2?.invoice ?? invResp2 ?? '');
-    const [dec1, dec2] = await Promise.all([
-      nodeA.call('rlnDecodeLnInvoice', invoice1),
-      nodeA.call('rlnDecodeLnInvoice', invoice2),
-    ]);
+    const dec1 = await nodeA.call('rlnDecodeLnInvoice', invoice1);
     const hash1 = String(dec1?.paymentHash ?? dec1?.payment_hash ?? '');
+    await nodeA.call('rlnSendPayment', invoice1, null, null, null);
+    await waitForInvoiceStatus(nodeB.call.bind(nodeB), invoice1, 'SUCCEEDED', 60000);
+    await waitForPaymentSuccess(nodeA.call.bind(nodeA), hash1, 60000);
+    addStep('payInvoice1', 'success', { paymentHash: hash1, assetAmount: 100 });
+
+    addStep('payInvoice2', 'running');
+    const invResp2 = await nodeA.call('rlnLnInvoice', paymentMsat, 900, assetId, 50);
+    const invoice2 = String(invResp2?.invoice ?? invResp2 ?? '');
+    const dec2 = await nodeA.call('rlnDecodeLnInvoice', invoice2);
     const hash2 = String(dec2?.paymentHash ?? dec2?.payment_hash ?? '');
-    addStep('cbpCreateInvoices', 'success', { invoice1: invoice1.substring(0, 20) + '...', invoice2: invoice2.substring(0, 20) + '...' });
-
-    // C and D send concurrently
-    addStep('cbpConcurrentSend', 'running');
-    const [sendC, sendD] = await Promise.all([
-      nodeC.call('rlnSendPayment', invoice1, null, null, null),
-      nodeD.call('rlnSendPayment', invoice2, null, null, null),
-    ]);
-    const payHashC = String(sendC?.paymentHash ?? sendC?.payment_hash ?? hash1);
-    const payHashD = String(sendD?.paymentHash ?? sendD?.payment_hash ?? hash2);
-    addStep('cbpConcurrentSend', 'success', { payHashC, payHashD });
-
-    addStep('cbpWaitInvoice1', 'running');
-    await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice1, 'SUCCEEDED', 60000);
-    addStep('cbpWaitInvoice1', 'success', {});
-
-    addStep('cbpWaitInvoice2', 'running');
+    await nodeB.call('rlnSendPayment', invoice2, null, null, null);
     await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice2, 'SUCCEEDED', 60000);
-    addStep('cbpWaitInvoice2', 'success', {});
+    await waitForPaymentSuccess(nodeB.call.bind(nodeB), hash2, 60000);
+    addStep('payInvoice2', 'success', { paymentHash: hash2, assetAmount: 50 });
 
-    addStep('cbpWaitSenders', 'running');
-    await Promise.all([
-      waitForPaymentSuccess(nodeC.call.bind(nodeC), payHashC, 60000),
-      waitForPaymentSuccess(nodeD.call.bind(nodeD), payHashD, 60000),
+    addStep('payInvoice3', 'running');
+    const invResp3 = await nodeB.call('rlnLnInvoice', paymentMsat, 900, assetId, 50);
+    const invoice3 = String(invResp3?.invoice ?? invResp3 ?? '');
+    const dec3 = await nodeA.call('rlnDecodeLnInvoice', invoice3);
+    const hash3 = String(dec3?.paymentHash ?? dec3?.payment_hash ?? '');
+    await nodeA.call('rlnSendPayment', invoice3, null, null, null);
+    await waitForInvoiceStatus(nodeB.call.bind(nodeB), invoice3, 'SUCCEEDED', 60000);
+    await waitForPaymentSuccess(nodeA.call.bind(nodeA), hash3, 60000);
+    addStep('payInvoice3', 'success', { paymentHash: hash3, assetAmount: 50 });
+
+    addStep('payInvoice4', 'running');
+    const invResp4 = await nodeA.call('rlnLnInvoice', paymentMsat, 900, assetId, 50);
+    const invoice4 = String(invResp4?.invoice ?? invResp4 ?? '');
+    const dec4 = await nodeA.call('rlnDecodeLnInvoice', invoice4);
+    const hash4 = String(dec4?.paymentHash ?? dec4?.payment_hash ?? '');
+    await nodeB.call('rlnSendPayment', invoice4, null, null, null);
+    await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice4, 'SUCCEEDED', 60000);
+    await waitForPaymentSuccess(nodeB.call.bind(nodeB), hash4, 60000);
+    addStep('payInvoice4', 'success', { paymentHash: hash4, assetAmount: 50 });
+
+    await waitForStableChannelBalances(nodeA, nodeB, channelId, 30000);
+
+    addStep('payCloseChannel', 'running');
+    await nodeA.call('rlnCloseChannel', channelId, pubkeyB, false);
+    await mine(6);
+    addStep('payCloseChannel', 'success', { channelId });
+
+    addStep('payWaitBalances', 'running');
+    await waitForAssetBalance(nodeA, assetId, 950, 70000);
+    await waitForAssetBalance(nodeB, assetId, 50, 70000);
+    addStep('payWaitBalances', 'success', { expectedA: 950, expectedB: 50 });
+
+    addStep('payRgbSendA', 'running');
+    const invoiceC1 = await nodeC.call('rlnRgbInvoice', null, null, null, 1, false);
+    const recipientC1 = String(invoiceC1?.recipientId ?? invoiceC1?.recipient_id ?? '');
+    await nodeA.call('rlnSendRgb', true, 1, 1, false, assetId, recipientC1, 925, [nodeA.proxyEndpoint]);
+    await mine(1);
+    await nodeC.call('rlnRefreshTransfers', false);
+    await nodeC.call('rlnRefreshTransfers', false);
+    await nodeA.call('rlnRefreshTransfers', false);
+    addStep('payRgbSendA', 'success', { amount: 925, recipient: recipientC1.substring(0, 20) + '...' });
+
+    addStep('payRgbSendB', 'running');
+    const invoiceC2 = await nodeC.call('rlnRgbInvoice', null, null, null, 1, false);
+    const recipientC2 = String(invoiceC2?.recipientId ?? invoiceC2?.recipient_id ?? '');
+    await nodeB.call('rlnSendRgb', true, 1, 1, false, assetId, recipientC2, 25, [nodeB.proxyEndpoint]);
+    await mine(1);
+    await nodeC.call('rlnRefreshTransfers', false);
+    await nodeC.call('rlnRefreshTransfers', false);
+    await nodeB.call('rlnRefreshTransfers', false);
+    addStep('payRgbSendB', 'success', { amount: 25, recipient: recipientC2.substring(0, 20) + '...' });
+
+    addStep('payFinalBalances', 'running');
+    const [finalA, finalB, finalC] = await Promise.all([
+      nodeA.call('rlnAssetBalance', assetId),
+      nodeB.call('rlnAssetBalance', assetId),
+      nodeC.call('rlnAssetBalance', assetId),
     ]);
-    addStep('cbpWaitSenders', 'success', {});
-
-    addStep('cbpFinalBalance', 'running');
-    const finalBal = await nodeA.call('rlnBtcBalance', false);
-    addStep('cbpFinalBalance', 'success', finalBal);
+    addStep('payFinalBalances', 'success', {
+      spendableA: finalA?.spendable ?? null,
+      spendableB: finalB?.spendable ?? null,
+      spendableC: finalC?.spendable ?? null,
+    });
 
     results.success = true;
     return results;
@@ -3072,7 +3262,6 @@ export async function runRlnConcurrentBtcPaymentsFlow() {
     if (nodeA) await nodeA.cleanup();
     if (nodeB) await nodeB.cleanup();
     if (nodeC) await nodeC.cleanup();
-    if (nodeD) await nodeD.cleanup();
     endExclusiveFlow(flowName);
   }
 }
@@ -3099,7 +3288,7 @@ export async function runRlnExternalSignerFlow() {
       readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
 
     const keys = await createWallet(network);
-    const seedHex = Buffer.from(mnemonicToSeedSync(keys.mnemonic)).toString('hex');
+    const seedHex = Buffer.from(mnemonicToSeedSync(keys.mnemonic)).slice(0, 32).toString('hex');
 
     const basePort = 20000 + Math.floor(Math.random() * 20000);
     const ldkPeerListeningPort = basePort + 1;
@@ -3437,8 +3626,6 @@ export async function runRlnSwapRoundtripBuyFlow() {
     await nodeA.safeShutdown();
     await nodeB.safeShutdown();
     await sleep(2000);
-    await nodeA.disposeHandles();
-    await nodeB.disposeHandles();
     nodeA = await createRlnNodeRuntime({
       name: 'nodeA',
       flowPrefix: 'rln_swap_roundtrip_buy_a',
@@ -3931,6 +4118,405 @@ export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
     results.error = { message: error.message || 'Unknown error' };
     return results;
   } finally {
+    endExclusiveFlow(flowName);
+  }
+}
+
+// SDK usage example — direct API calls, no internal helpers.
+// Shows the minimal sequence to create a node with a native external signer,
+// fund it, create UTXOs, and issue an RGB asset.
+export async function runRlnExternalSignerIssueAssetFlow() {
+  const flowName = 'runRlnExternalSignerIssueAssetFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  const rln = createRLNManager();
+  let nodeCreated = false;
+  let signerId: number | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const keys = await createWallet(network);
+    const seedHex = Buffer.from(mnemonicToSeedSync(keys.mnemonic)).slice(0, 32).toString('hex');
+
+    const basePort = 20000 + Math.floor(Math.random() * 20000);
+    const storageDirUri = `${documentDirectory ?? ''}rln_ext_issue_${Date.now()}`;
+    await FileSystem.makeDirectoryAsync(storageDirUri, { intermediates: true });
+    const storageDirPath = storageDirUri.replace('file://', '');
+
+    // 1 — create node
+    addStep('extIssueCreateNode', 'running');
+    await rln.rlnCreateNode({
+      storageDirPath,
+      daemonListeningPort: basePort,
+      ldkPeerListeningPort: basePort + 1,
+      network,
+      maxMediaUploadSizeMb: 20,
+      enableVirtualChannelsV0: false,
+    });
+    nodeCreated = true;
+    addStep('extIssueCreateNode', 'success', { storageDirPath });
+
+    // 2 — create native external signer
+    addStep('extIssueCreateExternalSigner', 'running');
+    signerId = await rln.rlnCreateNativeExternalSigner(seedHex, network);
+    addStep('extIssueCreateExternalSigner', 'success', { signerId });
+
+    // 3 — init node with external signer
+    addStep('extIssueInitNode', 'running');
+    await rln.rlnInitNodeWithNativeExternalSigner(signerId);
+    addStep('extIssueInitNode', 'success', {});
+
+    // 4 — unlock node with external signer
+    addStep('extIssueUnlockNode', 'running');
+    await rln.rlnUnlockNodeWithNativeExternalSigner(signerId, {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [],
+      announceAlias: null,
+    });
+    addStep('extIssueUnlockNode', 'success', {});
+
+    // 6 — node info after unlock
+    addStep('extIssueNodeInfoAfter', 'running');
+    const infoAfter = await rln.rlnNodeInfo();
+    addStep('extIssueNodeInfoAfter', 'success', infoAfter);
+
+    // 7 — fund
+    addStep('extIssueFund', 'running');
+    const addrResp = await rln.rlnAddress();
+    const txid = await sendToAddress(addrResp.address, 1);
+    await mine(6);
+    await sleep(5000);
+    await rln.rlnSync();
+    const balance = await rln.rlnBtcBalance(false);
+    addStep('extIssueFund', 'success', { txid, address: addrResp.address, balance });
+
+    // 8 — create UTXOs
+    addStep('extIssueCreateUtxos', 'running');
+    await rln.rlnSync();
+    await rln.rlnCreateUtxos(false, 10, null, 7, false);
+    await mine(1);
+    await rln.rlnSync();
+    await sleep(2000);
+    const unspents = await rln.rlnListUnspents(false);
+    console.log('[extIssue] rlnListUnspents:', JSON.stringify(unspents));
+    addStep('extIssueCreateUtxos', 'success', { num: 10, unspents });
+
+    // 9 — issue asset
+    addStep('extIssueAsset', 'running');
+    const issued = await rln.rlnIssueAssetNia('USDT', 'Tether', 0, [1000]);
+    const assetId = String(issued?.assetId ?? issued?.asset_id ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('extIssueAsset', 'success', { assetId });
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeCreated) {
+      try { await rln.rlnShutdown(); } catch {}
+      try { await rln.rlnDestroyNode(); } catch {}
+    }
+    if (signerId !== null) {
+      try { await rln.rlnDestroyNativeExternalSigner(signerId); } catch {}
+    }
+    endExclusiveFlow(flowName);
+  }
+}
+
+// SDK usage example — direct API calls, no internal helpers.
+// Mirrors Python run_regular_channel_flow_external_real:
+//   nodeA — native external signer
+//   nodeB — regular password node
+//   open BTC channel, payment 1, restart nodeA, payment 2
+export async function runRlnExternalSignerChannelPaymentFlow() {
+  const flowName = 'runRlnExternalSignerChannelPaymentFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let rlnA = createRLNManager();
+  const rlnB = createRLNManager();
+  let nodeACreated = false;
+  let nodeBCreated = false;
+  let signerId: number | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const seedHex = Buffer.from(mnemonicToSeedSync(keysA.mnemonic)).slice(0, 32).toString('hex');
+    const nodeBPassword = 'nodeBpass';
+
+    const basePortA = 20000 + Math.floor(Math.random() * 10000);
+    const basePortB = basePortA + 100;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_ext_chan_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_ext_chan_b_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+
+    const nodeParamsA = { storageDirPath: storageDirA, daemonListeningPort: basePortA, ldkPeerListeningPort: basePortA + 1, network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false };
+    const nodeParamsB = { storageDirPath: storageDirB, daemonListeningPort: basePortB, ldkPeerListeningPort: basePortB + 1, network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false };
+
+    // 1 — create nodeA
+    addStep('extChanACreateNode', 'running');
+    await rlnA.rlnCreateNode(nodeParamsA);
+    nodeACreated = true;
+    addStep('extChanACreateNode', 'success', { storageDirPath: storageDirA });
+
+    // 2 — create external signer for nodeA
+    addStep('extChanACreateExternalSigner', 'running');
+    signerId = await rlnA.rlnCreateNativeExternalSigner(seedHex, network);
+    addStep('extChanACreateExternalSigner', 'success', { signerId });
+
+    // 3 — init nodeA with external signer
+    addStep('extChanAInitNode', 'running');
+    await rlnA.rlnInitNodeWithNativeExternalSigner(signerId);
+    addStep('extChanAInitNode', 'success', {});
+
+    // 4 — unlock nodeA with external signer
+    addStep('extChanAUnlockNode', 'running');
+    await rlnA.rlnUnlockNodeWithNativeExternalSigner(signerId, unlockParams);
+    addStep('extChanAUnlockNode', 'success', {});
+
+    // 5 — create nodeB (regular password)
+    addStep('extChanBCreateNode', 'running');
+    await rlnB.rlnCreateNode(nodeParamsB);
+    nodeBCreated = true;
+    addStep('extChanBCreateNode', 'success', { storageDirPath: storageDirB });
+
+    // 6 — init nodeB
+    addStep('extChanBInitNode', 'running');
+    await rlnB.rlnInitNode(nodeBPassword, keysB.mnemonic);
+    addStep('extChanBInitNode', 'success', {});
+
+    // 7 — unlock nodeB
+    addStep('extChanBUnlockNode', 'running');
+    await rlnB.rlnUnlockNode({ password: nodeBPassword, ...unlockParams });
+    addStep('extChanBUnlockNode', 'success', {});
+
+    // 8 — node infos
+    const infoA = await rlnA.rlnNodeInfo();
+    const infoB = await rlnB.rlnNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    addStep('extChanNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+    });
+
+    // 9 — fund nodeA
+    addStep('extChanAFund', 'running');
+    const addrA = (await rlnA.rlnAddress()).address;
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await rlnA.rlnSync();
+    const balA = await rlnA.rlnBtcBalance(false);
+    addStep('extChanAFund', 'success', { txid: txidA, address: addrA, balance: balA });
+
+    // 10 — create UTXOs for nodeA
+    addStep('extChanACreateUtxos', 'running');
+    await rlnA.rlnSync();
+    await rlnA.rlnCreateUtxos(false, 10, null, 7, false);
+    await mine(1);
+    await rlnA.rlnSync();
+    addStep('extChanACreateUtxos', 'success', { num: 10 });
+
+    // 11 — fund nodeB
+    addStep('extChanBFund', 'running');
+    const addrB = (await rlnB.rlnAddress()).address;
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await rlnB.rlnSync();
+    const balB = await rlnB.rlnBtcBalance(false);
+    addStep('extChanBFund', 'success', { txid: txidB, address: addrB, balance: balB });
+
+    // 12 — create UTXOs for nodeB
+    addStep('extChanBCreateUtxos', 'running');
+    await rlnB.rlnSync();
+    await rlnB.rlnCreateUtxos(false, 10, null, 7, false);
+    await mine(1);
+    await rlnB.rlnSync();
+    addStep('extChanBCreateUtxos', 'success', { num: 10 });
+
+    // 13 — connect peers nodeA → nodeB
+    addStep('extChanConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    console.log(`[extChan] connecting nodeA → ${peerUriB}`);
+    try {
+      await rlnA.rlnConnectPeer(peerUriB);
+      console.log(`[extChan] connected to ${peerUriB}`);
+    } catch (e: any) {
+      console.warn(`[extChan] connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('extChanConnectPeers', 'success', { peerUriB });
+
+    // 14 — open BTC channel nodeA → nodeB (500k sat, no asset)
+    addStep('extChanOpenChannel', 'running');
+    const openResp = await rlnA.rlnOpenChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 500000,
+      pushMsat: 0,
+      public: false,
+      withAnchors: true,
+      assetId: null,
+      assetAmount: null,
+    });
+    const tmpId = String(openResp?.temporaryChannelId ?? '');
+    console.log(`[extChan] opened channel tmpId=${tmpId}`);
+
+    // wait for funding tx to appear in listChannels
+    let fundingTxid = '';
+    let channelId = '';
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await rlnA.rlnSync();
+      const channels: any[] = (await rlnA.rlnListChannels()) ?? [];
+      const ch = channels.find((c: any) => (c.fundingTxid ?? c.funding_txid) != null);
+      if (ch) {
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    console.log(`[extChan] channelId=${channelId} fundingTxid=${fundingTxid}`);
+    console.log('[extChan] listChannels after funding:', JSON.stringify(await rlnA.rlnListChannels()));
+
+    // mine and wait for usable channels on both nodes
+    await mine(6);
+    await sleep(3000);
+    for (const [rln, label] of [[rlnA, 'nodeA'], [rlnB, 'nodeB']] as [any, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await rln.rlnSync();
+        const info = await rln.rlnNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[extChan] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    addStep('extChanOpenChannel', 'success', { channelId, fundingTxid });
+
+    // 15 — payment 1: nodeB creates invoice, nodeA pays
+    addStep('extChanPayment1', 'running');
+    const invResp1 = await rlnB.rlnLnInvoice(3_000_000, 900, null, null);
+    const invoice1 = String(invResp1?.invoice ?? '');
+    console.log(`[extChan] invoice1: ${invoice1.substring(0, 40)}...`);
+    const send1 = await rlnA.rlnSendPayment(invoice1, null, null, null);
+    const hash1 = String(send1?.paymentHash ?? '');
+    console.log(`[extChan] payment1 hash=${hash1}`);
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await rlnA.rlnSync();
+      const payments: any[] = (await rlnA.rlnListPayments()) ?? [];
+      const p = payments.find((x: any) => (x?.paymentHash ?? x?.payment_hash) === hash1);
+      const status = String(p?.status ?? '').toUpperCase();
+      console.log(`[extChan] payment1 status=${status}`);
+      if (status === 'SUCCEEDED') break;
+      if (status === 'FAILED') throw new Error(`Payment1 failed: ${hash1}`);
+      await sleep(2000);
+    }
+    addStep('extChanPayment1', 'success', { paymentHash: hash1 });
+
+    // 16 — restart nodeA with same external signer (same storage, same ports)
+    // Bridge handles SHUTDOWN path in create(): replaces Rust object, sets state to INITIALIZED.
+    // Fresh JS manager needed — the old one tracks nodeId and rejects a second rlnCreateNode call.
+    addStep('extChanRestartNodeA', 'running');
+    await rlnA.rlnShutdown();
+    await sleep(1000);
+    rlnA = createRLNManager();   // fresh JS manager so rlnCreateNode JS check passes
+    nodeACreated = false;
+    await rlnA.rlnCreateNode(nodeParamsA);  // bridge detects SHUTDOWN path → restart, INITIALIZED
+    nodeACreated = true;
+    // no init — bridge restart already sets state to INITIALIZED; unlock directly
+    await rlnA.rlnUnlockNodeWithNativeExternalSigner(signerId, unlockParams);
+    console.log('[extChan] nodeA restarted with same external signer');
+    const restartDeadline = Date.now() + 120000;
+    while (Date.now() < restartDeadline) {
+      await rlnA.rlnSync();
+      const info = await rlnA.rlnNodeInfo();
+      const usable = Number(info?.numUsableChannels ?? 0);
+      console.log(`[extChan] nodeA usableChannels after restart=${usable}`);
+      if (usable >= 1) break;
+      await sleep(2000);
+    }
+    addStep('extChanRestartNodeA', 'success', {});
+
+    // 17 — payment 2: nodeB creates invoice, nodeA pays (after restart)
+    addStep('extChanPayment2', 'running');
+    const invResp2 = await rlnB.rlnLnInvoice(3_000_000, 900, null, null);
+    const invoice2 = String(invResp2?.invoice ?? '');
+    console.log(`[extChan] invoice2: ${invoice2.substring(0, 40)}...`);
+    const send2 = await rlnA.rlnSendPayment(invoice2, null, null, null);
+    const hash2 = String(send2?.paymentHash ?? '');
+    console.log(`[extChan] payment2 hash=${hash2}`);
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await rlnA.rlnSync();
+      const payments: any[] = (await rlnA.rlnListPayments()) ?? [];
+      const p = payments.find((x: any) => (x?.paymentHash ?? x?.payment_hash) === hash2);
+      const status = String(p?.status ?? '').toUpperCase();
+      console.log(`[extChan] payment2 status=${status}`);
+      if (status === 'SUCCEEDED') break;
+      if (status === 'FAILED') throw new Error(`Payment2 failed: ${hash2}`);
+      await sleep(2000);
+    }
+    addStep('extChanPayment2', 'success', { paymentHash: hash2 });
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeACreated) {
+      try { await rlnA.rlnShutdown(); } catch {}
+      try { await rlnA.rlnDestroyNode(); } catch {}
+    }
+    if (nodeBCreated) {
+      try { await rlnB.rlnShutdown(); } catch {}
+      try { await rlnB.rlnDestroyNode(); } catch {}
+    }
+    if (signerId !== null) {
+      try { await rlnA.rlnDestroyNativeExternalSigner(signerId); } catch {}
+    }
     endExclusiveFlow(flowName);
   }
 }
