@@ -14,21 +14,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   BadRequestError,
   ConfigurationError,
-  createWalletManager,
   CryptoError,
   DEFAULT_INDEXER_URLS,
   deriveKeysFromMnemonic,
-  generateKeys,
   LightningProtocol,
   NetworkError,
   normalizeNetwork,
   NotFoundError,
   OnchainProtocol,
-  restoreFromVss,
   SDKError,
   signMessage,
-  signPsbt,
-  signPsbtFromSeed,
   UTEXOWallet,
   validateBase64,
   validateHex,
@@ -38,15 +33,14 @@ import {
   ValidationError,
   verifyMessage,
   VssBackupConfig,
-  wallet,
   WalletError,
-  WalletManager
 } from '@utexo/rgb-sdk-rn';
 
 import { AppColors } from '@/constants/theme';
 import {
   runRlnUtexoWalletChannelPaymentFlow,
   runRLNUtexoPaymentFlow,
+  runRlnUtexoWalletAssetChannelExtSignerFlow,
 } from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
@@ -374,61 +368,6 @@ function TestSummaryCard({ results, loading }: { results: TestSuite | null; load
   );
 }
 
-// ─── Wallet flow step meta ────────────────────────────────────────────────────
-
-const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet' },
-  getAddress:           { label: 'Get Deposit Address',   desc: 'Derive a receive address' },
-  fundWallet:           { label: 'Fund via Faucet',       desc: 'Send sats from thunderstack faucet' },
-  waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
-  createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
-  issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
-  sendIssuedAssetToReceiver: { label: 'Witness Send to Receiver', desc: 'Init receiver, witness invoice, send asset, then timed refreshes' },
-  listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
-  getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
-  vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
-  vssBackupInfo:        { label: 'VSS Backup Info',       desc: 'Verify backup exists on server' },
-  disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet handles' },
-  deleteState:          { label: 'Delete Local State',    desc: 'Prepare restore directory' },
-  restoreFromVss:       { label: 'Restore from VSS',      desc: 'Download & decrypt backup' },
-  verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Check assets & balances match' },
-  cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
-};
-
-const TESTNET_WALLET_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:       { label: 'Generate Keys',          desc: 'deriveKeys for Bitcoin testnet' },
-  createWalletManager: { label: 'Create WalletManager',   desc: 'testnet + DEFAULT_INDEXER_URLS.testnet' },
-  initialize:         { label: 'Initialize (go online)', desc: 'Connect Electrum indexer; wallet syncs' },
-  syncWallet:         { label: 'Sync Wallet',            desc: 'syncWallet() — pull chain / indexer state' },
-  refreshWallet:      { label: 'Refresh Wallet',         desc: 'refreshWallet() — update RGB state' },
-  getAddress:         { label: 'Get Deposit Address',    desc: 'Fresh receive address' },
-  getBtcBalance:      { label: 'Get BTC Balance',        desc: 'Vanilla + colored settled sats' },
-  dispose:            { label: 'Dispose',                desc: 'Release native wallet handle' },
-};
-
-const REUSE_ADDRESS_FLOW_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:              { label: 'Generate Keys',              desc: 'deriveKeys for Bitcoin testnet' },
-  createWalletReuse:         { label: 'Create WalletManager',        desc: 'reuseAddresses: true + DEFAULT_INDEXER_URLS.testnet' },
-  initialize:                { label: 'Initialize (go online)',     desc: 'Connect Electrum indexer' },
-  syncWallet:                { label: 'Sync Wallet',                desc: 'syncWallet()' },
-  refreshWallet:             { label: 'Refresh Wallet',             desc: 'refreshWallet()' },
-  addressPairBeforeRotate:   { label: 'Two getAddress (before)',    desc: 'reuse mode: both calls must return the same address' },
-  rotateAddresses:           { label: 'Rotate vanilla + colored', desc: 'rotateVanillaAddress() then rotateColoredAddress()' },
-  addressPairAfterRotate:    { label: 'Two getAddress (after)',     desc: 'reuse mode: pair still matches; value may differ from before' },
-  dispose:                   { label: 'Dispose',                    desc: 'Release native wallet handle' },
-};
-
-const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
-  initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
-  vssBackup:            { label: 'Upload Backup',          desc: 'Encrypt & push to VSS server' },
-  vssBackupInfo:        { label: 'Check Backup Status',    desc: 'Query server for backup metadata' },
-  configureVssBackup:   { label: 'Configure Auto-backup',  desc: 'Enable background auto-backup' },
-  disableVssAutoBackup: { label: 'Disable Auto-backup',    desc: 'Stop background auto-backup' },
-  restoreFromVss:       { label: 'Restore from VSS',       desc: 'Download & decrypt wallet data' },
-  verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
-};
-
 const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   rlnCreateNode: { label: 'Create Node', desc: 'Create RLN node with local storage and ports' },
   rlnInitNode: { label: 'Init Node', desc: 'Initialize node with wallet mnemonic' },
@@ -692,6 +631,21 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   wChanPayment1: { label: 'Payment 1', desc: 'nodeB.createLightningInvoice(), nodeA.payLightningInvoice()' },
   wChanRestartNodeA: { label: 'Restart NodeA', desc: 'nodeA.shutdown() + nodeA.reinit() — same instance, no manager swap' },
   wChanPayment2: { label: 'Payment 2', desc: 'Second payment after nodeA restart' },
+  wAsExtAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner (regular)' },
+  wAsExtAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wAsExtBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + NativeExternalRLNSigner' },
+  wAsExtBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner' },
+  wAsExtNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys via getNodeInfo() on both nodes' },
+  wAsExtAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  wAsExtACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wAsExtBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  wAsExtBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wAsExtIssueAsset: { label: 'Issue Asset', desc: 'nodeA (regular).issueAssetNia() — 1000 USDT' },
+  wAsExtConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  wAsExtOpenChannel: { label: 'Open Asset Channel', desc: 'nodeA.openChannel() 600 asset units, 100k sat, private nodeA→nodeB' },
+  wAsExtPayment1: { label: 'Payment 1', desc: 'nodeB (ext signer).createLightningInvoice(100 units), nodeA.payLightningInvoice()' },
+  wAsExtRestartNodeA: { label: 'Restart NodeA', desc: 'nodeA.shutdown() + nodeA.reinit() — same instance, no manager swap' },
+  wAsExtPayment2: { label: 'Payment 2', desc: 'nodeB (ext signer).createLightningInvoice(50 units), nodeA pays after restart' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
@@ -707,6 +661,9 @@ export default function FlowsScreen() {
   const [rlnUtexoPayResults, setRlnUtexoPayResults] = useState<FlowResults>(null);
   const [runningRlnUtexoPayFlow, setRunningRlnUtexoPayFlow] = useState(false);
   const rlnUtexoPayInFlightRef = useRef(false);
+  const [rlnAssetExtResults, setRlnAssetExtResults] = useState<FlowResults>(null);
+  const [runningRlnAssetExtFlow, setRunningRlnAssetExtFlow] = useState(false);
+  const rlnAssetExtInFlightRef = useRef(false);
   const effectiveRpcHost =
     process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
     (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
@@ -780,6 +737,27 @@ export default function FlowsScreen() {
     } finally {
       setRunningRlnUtexoPayFlow(false);
       rlnUtexoPayInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnAssetExtFlow() {
+    if (rlnAssetExtInFlightRef.current) return;
+    rlnAssetExtInFlightRef.current = true;
+    try {
+      setRunningRlnAssetExtFlow(true);
+      setRlnAssetExtResults({ running: true, steps: [] });
+      const r = await runRlnUtexoWalletAssetChannelExtSignerFlow();
+      setRlnAssetExtResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnAssetExtResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnAssetExtFlow(false);
+      rlnAssetExtInFlightRef.current = false;
     }
   }
 
@@ -869,6 +847,32 @@ export default function FlowsScreen() {
                 accentColor="#1A5C38"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnUtexoPayFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="UTEXOWallet: Regular Node Issues Asset + Ext Signer Invoices"
+          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) — 15 steps"
+          description="nodeA (regular) issues 1000 USDT, opens asset channel (600 units, 100k sat) to nodeB (ext signer). nodeB creates asset LN invoices; nodeA pays both. nodeA restarts between payments."
+          accentColor="#7B2D8A"
+          totalSteps={15}
+          results={rlnAssetExtResults}
+          running={runningRlnAssetExtFlow}
+          onRun={handleRlnAssetExtFlow}>
+          {rlnAssetExtResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#7B2D8A"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnAssetExtFlow}
               />
             );
           })}

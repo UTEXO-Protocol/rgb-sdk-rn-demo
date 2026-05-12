@@ -2563,7 +2563,6 @@
     "@scure/btc-signer" "^2.0.1"
     "@utexo/rgb-sdk-core" "file:../rgb-sdk-core"
     axios "^1.8.4"
-    bdk-rn "https://github.com/UTEXO-Protocol/bdk-rn/releases/download/v2.2.0-Alpha.1/bdk-rn-2.2.0-Alpha.1.tgz"
 
 "@xmldom/xmldom@^0.8.8":
   version "0.8.12"
