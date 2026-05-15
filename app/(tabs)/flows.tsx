@@ -41,6 +41,7 @@ import {
   runRlnUtexoWalletChannelPaymentFlow,
   runRLNUtexoPaymentFlow,
   runRlnUtexoWalletAssetChannelExtSignerFlow,
+  runRLNUtexoExternalPaymentFlow,
 } from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
@@ -646,6 +647,41 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   wAsExtPayment1: { label: 'Payment 1', desc: 'nodeB (ext signer).createLightningInvoice(100 units), nodeA.payLightningInvoice()' },
   wAsExtRestartNodeA: { label: 'Restart NodeA', desc: 'nodeA.shutdown() + nodeA.reinit() — same instance, no manager swap' },
   wAsExtPayment2: { label: 'Payment 2', desc: 'nodeB (ext signer).createLightningInvoice(50 units), nodeA pays after restart' },
+  wAsExtCloseChannel: { label: 'Close Channel', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  wAsExtWaitBalances: { label: 'Wait Balances A+B', desc: 'Poll getAssetBalance() until A=850, B=150' },
+  wAsExtRevConnectPeers: { label: 'Reconnect Peers Rev', desc: 'nodeB (signer).connectPeer(nodeA) before reverse channel' },
+  wAsExtRevOpenChannel: { label: 'Open Channel Rev', desc: 'nodeB (signer).openChannel() 100 asset units to nodeA — nodeB off-chain=50' },
+  wAsExtRevPayment: { label: 'Payment Rev', desc: 'nodeA.createLightningInvoice(50 units), nodeB (signer).payLightningInvoice()' },
+  wAsExtRevCloseChannel: { label: 'Close Channel Rev', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  wAsExtRevWaitBalances: { label: 'Wait Balances Rev', desc: 'Poll getAssetBalance() until A=900, B=100' },
+  wAsExtRgbSendBtoA: { label: 'RGB Send B→A', desc: 'nodeA.blindReceive(), nodeB.send() 150 units on-chain back to nodeA' },
+  wAsExtFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on both nodes — A=1000, B=0' },
+  xPayAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  xPayAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner' },
+  xPayBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + NativeExternalRLNSigner' },
+  xPayBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner (VLS in-process)' },
+  xPayCInit: { label: 'Node C Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  xPayCUnlock: { label: 'Node C Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner' },
+  xPayAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayCFund: { label: 'Fund Node C', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayCCreateUtxos: { label: 'Node C UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayIssueAsset: { label: 'Issue Asset', desc: 'nodeA.issueAssetNia() — 1000 USDT' },
+  xPayNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys via getNodeInfo() on nodeA + nodeB' },
+  xPayConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  xPayOpenChannel: { label: 'Open Asset Channel', desc: 'nodeA.openChannel() 600 units, 100k sat, pushMsat=0 (ext signer acceptor)' },
+  xPayAssetBalanceA: { label: 'Asset Balance A', desc: 'getAssetBalance() — nodeA spendable after open (≈400)' },
+  xPayInvoice1: { label: 'Payment 1 (B→A)', desc: 'nodeB (ext).createLightningInvoice(100 units, 5000 sat), nodeA pays — 5000 sat so B has reserve headroom for inv2' },
+  xPayInvoice2: { label: 'Payment 2 (A→B)', desc: 'nodeA.createLightningInvoice(50 units, 3000 sat), nodeB (ext) pays — RGB min 3000 sat; B has 5000−3000=2000 ≥ 1000 reserve' },
+  xPayInvoice3: { label: 'Payment 3 (B→A)', desc: 'nodeB (ext).createLightningInvoice(50 units, 5000 sat), nodeA pays — refills B sats for inv4' },
+  xPayInvoice4: { label: 'Payment 4 (A→B)', desc: 'nodeA.createLightningInvoice(50 units, 3000 sat), nodeB (ext) pays — B has 7000 sats, comfortably above reserve' },
+  xPayCloseChannel: { label: 'Close Channel', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  xPayWaitBalances: { label: 'Wait Balances A+B', desc: 'Poll getAssetBalance() until A=950, B=50 (5-min deadline for force-close sweep)' },
+  xPayRgbSendA: { label: 'RGB Send A→C', desc: 'nodeC.blindReceive(), nodeA.send() 925 units on-chain' },
+  xPayRgbSendB: { label: 'RGB Send B→C', desc: 'nodeC.blindReceive(), nodeB (ext).send() 25 units on-chain' },
+  xPayFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on all 3 nodes — A=25, B=25, C=950' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
@@ -664,6 +700,9 @@ export default function FlowsScreen() {
   const [rlnAssetExtResults, setRlnAssetExtResults] = useState<FlowResults>(null);
   const [runningRlnAssetExtFlow, setRunningRlnAssetExtFlow] = useState(false);
   const rlnAssetExtInFlightRef = useRef(false);
+  const [rlnExtPayResults, setRlnExtPayResults] = useState<FlowResults>(null);
+  const [runningRlnExtPayFlow, setRunningRlnExtPayFlow] = useState(false);
+  const rlnExtPayInFlightRef = useRef(false);
   const effectiveRpcHost =
     process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
     (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
@@ -761,6 +800,27 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleRlnExtPayFlow() {
+    if (rlnExtPayInFlightRef.current) return;
+    rlnExtPayInFlightRef.current = true;
+    try {
+      setRunningRlnExtPayFlow(true);
+      setRlnExtPayResults({ running: true, steps: [] });
+      const r = await runRLNUtexoExternalPaymentFlow();
+      setRlnExtPayResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnExtPayResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnExtPayFlow(false);
+      rlnExtPayInFlightRef.current = false;
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -854,10 +914,10 @@ export default function FlowsScreen() {
 
         <FlowCard
           title="UTEXOWallet: Regular Node Issues Asset + Ext Signer Invoices"
-          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) — 15 steps"
-          description="nodeA (regular) issues 1000 USDT, opens asset channel (600 units, 100k sat) to nodeB (ext signer). nodeB creates asset LN invoices; nodeA pays both. nodeA restarts between payments."
+          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) — 19 steps"
+          description="nodeA (regular) issues 1000 USDT, opens asset channel (600 units, 100k sat) to nodeB (ext signer). nodeB creates asset LN invoices; nodeA pays both. nodeA restarts between payments. Cooperative close, wait balances, nodeB RGB-sends 150 back to nodeA."
           accentColor="#7B2D8A"
-          totalSteps={15}
+          totalSteps={19}
           results={rlnAssetExtResults}
           running={runningRlnAssetExtFlow}
           onRun={handleRlnAssetExtFlow}>
@@ -873,6 +933,32 @@ export default function FlowsScreen() {
                 accentColor="#7B2D8A"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnAssetExtFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="UTEXOWallet: Ext Signer NodeB — Asset Channel + Payments + RGB Sends"
+          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) + nodeC — 26 steps"
+          description="Same as the 3-node payment flow but nodeB uses NativeExternalRLNSigner (VLS in-process). pushMsat=0 required (VLS rejects non-zero push on acceptor). 4 payments alternating directions, cooperative close, RGB on-chain sends to nodeC. Final: A=25, B=25, C=950."
+          accentColor="#8A3D1D"
+          totalSteps={26}
+          results={rlnExtPayResults}
+          running={runningRlnExtPayFlow}
+          onRun={handleRlnExtPayFlow}>
+          {rlnExtPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#8A3D1D"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnExtPayFlow}
               />
             );
           })}

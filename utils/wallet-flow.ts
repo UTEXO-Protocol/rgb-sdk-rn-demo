@@ -9,20 +9,31 @@ import {
   createWallet,
   DEFAULT_INDEXER_URLS,
   getBridgeAPI,
-  LightningProtocol, OnchainProtocol,
+  LightningProtocol,
   NativeExternalRLNSigner,
+  OnchainProtocol,
   PasswordRLNSigner,
-  UTEXOWallet,
   UTEXOProtocol,
-  type InvoiceData,
+  UTEXOWallet,
   type RLNManager
 } from '@utexo/rgb-sdk-rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 
-const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
 let activeDemoFlow: string | null = null;
+
+function isPoisonLike(e: unknown): boolean {
+  const err = e as { message?: string; code?: unknown } | null;
+  const code = typeof err?.code === 'string' ? err.code.toLowerCase() : '';
+  const msg = typeof err?.message === 'string' ? err.message.toLowerCase() : '';
+  return (
+    code.includes('nodestatecorrupted') ||
+    msg.includes('poisonerror') ||
+    msg.includes('poison error') ||
+    msg.includes('node internal state is corrupted')
+  );
+}
 
 function beginExclusiveFlow(flowName: string) {
   if (activeDemoFlow && activeDemoFlow !== flowName) {
@@ -183,7 +194,8 @@ export async function runUTEXOFlow() {
   try {
     // ── UTEXOWallet: instantiation ──────────────────────────
     pushStep({ step: 'utexoWalletInstantiate', status: 'running' });
-    const utexoWallet: any = new (UTEXOWallet as any)(UTEXO_TEST_MNEMONIC, { network: 'testnet' });
+    const generatedKeys = await createWallet('testnet');
+    const utexoWallet: any = new (UTEXOWallet as any)(generatedKeys.mnemonic, { network: 'testnet' });
     results.instantiation = true;
     pushStep({ step: 'utexoWalletInstantiate', status: 'success' });
 
@@ -2221,339 +2233,6 @@ export async function runRlnPaymentFlow() {
   }
 }
 
-// export async function runRlnRestartFlow() {
-//   const flowName = 'runRlnRestartFlow';
-//   beginExclusiveFlow(flowName);
-//   const { results, addStep, failFlow } = createFlowResults();
-//   let nodeA: RlnNodeRuntime | null = null;
-//   let nodeB: RlnNodeRuntime | null = null;
-//   let nodeC: RlnNodeRuntime | null = null;
-//   try {
-//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartA', addStep });
-//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartB', addStep });
-//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartC', addStep });
-// 
-//     await fundAndCreateUtxosForNode(nodeA, 'restartA', addStep);
-//     await fundAndCreateUtxosForNode(nodeB, 'restartB', addStep);
-//     await fundAndCreateUtxosForNode(nodeC, 'restartC', addStep);
-// 
-//     const infoA = await nodeA.call('rlnNodeInfo');
-//     const infoB = await nodeB.call('rlnNodeInfo');
-//     const pubkeyA = String(infoA?.pubkey ?? '');
-//     const pubkeyB = String(infoB?.pubkey ?? '');
-//     addStep('restartNodeInfos', 'success', {
-//       pubkeyA: pubkeyA.substring(0, 16) + '...',
-//       pubkeyB: pubkeyB.substring(0, 16) + '...',
-//     });
-// 
-//     addStep('restartConnectPeer', 'running');
-//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
-//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-//     addStep('restartConnectPeer', 'success', {});
-// 
-//     // A opens channel to B; A has outbound capacity
-//     addStep('restartOpenChannel', 'running');
-//     const openResp = await nodeA.call('rlnOpenChannel', {
-//       peerPubkeyAndOptAddr: peerUriB,
-//       capacitySat: 100000,
-//       pushMsat: 0,
-//       public: true,
-//       withAnchors: true,
-//     });
-//     const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
-//     const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeA, nodeB, tmpId, 120000);
-//     await waitForFundingConfirmed(nodeA, fundingTxid, 180000);
-//     await mine(6);
-//     await waitForChannelReady(nodeA);
-//     addStep('restartOpenChannel', 'success', { channelId, fundingTxid });
-// 
-//     // B creates invoice; A pays to B
-//     addStep('restartPreRestartPayment', 'running');
-//     const invResp = await nodeB.call('rlnLnInvoice', 5_000_000, 900, null, null);
-//     const invoice = String(invResp?.invoice ?? invResp ?? '');
-//     const decResp = await nodeB.call('rlnDecodeLnInvoice', invoice);
-//     const expectedHash = String(decResp?.paymentHash ?? decResp?.payment_hash ?? '');
-//     const sendResp = await nodeA.call('rlnSendPayment', invoice, null, null, null);
-//     const payHash = String(sendResp?.paymentHash ?? sendResp?.payment_hash ?? expectedHash);
-//     await waitForInvoiceStatus(nodeB.call.bind(nodeB), invoice, 'SUCCEEDED', 60000);
-//     await waitForPaymentSuccess(nodeA.call.bind(nodeA), payHash, 60000);
-//     addStep('restartPreRestartPayment', 'success', { paymentHash: payHash, amtMsat: 5_000_000 });
-// 
-//     const restartConfigA = { storageDirPath: nodeA.storageDirPath, daemonListeningPort: nodeA.daemonListeningPort, ldkPeerListeningPort: nodeA.ldkPeerListeningPort, nodePassword: nodeA.nodePassword };
-//     const restartConfigB = { storageDirPath: nodeB.storageDirPath, daemonListeningPort: nodeB.daemonListeningPort, ldkPeerListeningPort: nodeB.ldkPeerListeningPort, nodePassword: nodeB.nodePassword };
-//     const restartConfigC = { storageDirPath: nodeC.storageDirPath, daemonListeningPort: nodeC.daemonListeningPort, ldkPeerListeningPort: nodeC.ldkPeerListeningPort, nodePassword: nodeC.nodePassword };
-// 
-//     addStep('restartShutdownA', 'running');
-//     await nodeA.safeShutdown();
-//     addStep('restartShutdownA', 'success', {});
-//     addStep('restartShutdownB', 'running');
-//     await nodeB.safeShutdown();
-//     addStep('restartShutdownB', 'success', {});
-//     addStep('restartShutdownC', 'running');
-//     await nodeC.safeShutdown();
-//     addStep('restartShutdownC', 'success', {});
-//     await sleep(2000);
-//     await nodeA.disposeHandles();
-//     await nodeB.disposeHandles();
-//     await nodeC.disposeHandles();
-// 
-//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_restart_a', stepPrefix: 'restartARecreate', addStep, reuse: restartConfigA });
-//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_restart_b', stepPrefix: 'restartBRecreate', addStep, reuse: restartConfigB });
-//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_restart_c', stepPrefix: 'restartCRecreate', addStep, reuse: restartConfigC });
-// 
-//     addStep('restartWaitUsableChannel', 'running');
-//     await waitForUsableChannels(nodeA, 1, 60000);
-//     addStep('restartWaitUsableChannel', 'success', { usableChannels: 1 });
-// 
-//     addStep('restartVerifyPayment', 'running');
-//     const paymentsA: any[] = (await nodeA.call('rlnListPayments')) ?? [];
-//     const found = paymentsA.find((p: any) => (p?.paymentHash ?? p?.payment_hash) === payHash);
-//     if (!found) throw new Error(`Payment ${payHash} not found after restart`);
-//     addStep('restartVerifyPayment', 'success', { paymentHash: payHash, status: found.status });
-// 
-//     results.success = true;
-//     return results;
-//   } catch (error: any) {
-//     return failFlow(flowName, error);
-//   } finally {
-//     if (nodeA) await nodeA.cleanup();
-//     if (nodeB) await nodeB.cleanup();
-//     if (nodeC) await nodeC.cleanup();
-//     endExclusiveFlow(flowName);
-//   }
-// }
-
-// export async function runRlnMultiOpenCloseFlow() {
-//   const flowName = 'runRlnMultiOpenCloseFlow';
-//   beginExclusiveFlow(flowName);
-//   const { results, addStep, failFlow } = createFlowResults();
-//   let nodeA: RlnNodeRuntime | null = null;
-//   let nodeB: RlnNodeRuntime | null = null;
-//   let nodeC: RlnNodeRuntime | null = null;
-//   try {
-//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_moc_a', stepPrefix: 'mocA', addStep });
-//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_moc_b', stepPrefix: 'mocB', addStep });
-//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_moc_c', stepPrefix: 'mocC', addStep });
-// 
-//     await fundAndCreateUtxosForNode(nodeA, 'mocA', addStep);
-//     await fundAndCreateUtxosForNode(nodeB, 'mocB', addStep);
-//     await fundAndCreateUtxosForNode(nodeC, 'mocC', addStep);
-// 
-//     const infoA = await nodeA.call('rlnNodeInfo');
-//     const infoB = await nodeB.call('rlnNodeInfo');
-//     const pubkeyA = String(infoA?.pubkey ?? '');
-//     const pubkeyB = String(infoB?.pubkey ?? '');
-//     addStep('mocNodeInfos', 'success', {
-//       pubkeyA: pubkeyA.substring(0, 16) + '...',
-//       pubkeyB: pubkeyB.substring(0, 16) + '...',
-//     });
-// 
-//     addStep('mocConnectPeers', 'running');
-//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
-//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-//     try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-//     addStep('mocConnectPeers', 'success', {});
-// 
-//     for (let cycle = 1; cycle <= 2; cycle += 1) {
-//       addStep(`mocOpenChannel${cycle}`, 'running');
-//       // pushMsat gives nodeA 3500 sat of outbound capacity for keysend
-//       const openResp = await nodeB.call('rlnOpenChannel', {
-//         peerPubkeyAndOptAddr: peerUriA,
-//         capacitySat: 100000,
-//         pushMsat: 3_500_000,
-//         public: true,
-//         withAnchors: true,
-//       });
-//       const tmpId = String(openResp?.temporaryChannelId ?? openResp?.temporary_channel_id ?? '');
-//       const { channelId, fundingTxid } = await waitForChannelFundingTx(nodeB, nodeA, tmpId, 120000);
-//       await waitForFundingConfirmed(nodeB, fundingTxid, 180000);
-//       await mine(6);
-//       await waitForChannelReady(nodeB);
-//       addStep(`mocOpenChannel${cycle}`, 'success', { channelId, fundingTxid, cycle });
-// 
-//       addStep(`mocKeysend${cycle}`, 'running');
-//       const keysendResp = await nodeA.call('rlnKeysend', pubkeyB, 1_000_000, null, null);
-//       const keysendHash = String(keysendResp?.paymentHash ?? keysendResp?.payment_hash ?? '');
-//       await waitForPaymentSuccess(nodeA.call.bind(nodeA), keysendHash, 60000);
-//       addStep(`mocKeysend${cycle}`, 'success', { paymentHash: keysendHash, amtMsat: 1_000_000 });
-// 
-//       addStep(`mocBalanceCheck${cycle}`, 'running');
-//       const [balA, balB] = await Promise.all([
-//         nodeA.call('rlnBtcBalance', true),
-//         nodeB.call('rlnBtcBalance', true),
-//       ]);
-//       addStep(`mocBalanceCheck${cycle}`, 'success', {
-//         spendableA: balA?.vanilla?.spendable ?? null,
-//         spendableB: balB?.vanilla?.spendable ?? null,
-//       });
-// 
-//       addStep(`mocCloseChannel${cycle}`, 'running');
-//       try {
-//         await nodeB.call('rlnCloseChannel', channelId, pubkeyA, false);
-//         await mine(6);
-//         await nodeA.call('rlnSync');
-//         await nodeB.call('rlnSync');
-//       } catch {
-//         // best effort for demo
-//       }
-//       addStep(`mocCloseChannel${cycle}`, 'success', { channelId, cycle });
-//     }
-// 
-//     results.success = true;
-//     return results;
-//   } catch (error: any) {
-//     return failFlow(flowName, error);
-//   } finally {
-//     if (nodeA) await nodeA.cleanup();
-//     if (nodeB) await nodeB.cleanup();
-//     if (nodeC) await nodeC.cleanup();
-//     endExclusiveFlow(flowName);
-//   }
-// }
-
-// export async function runRlnConcurrentBtcPaymentsFlow() {
-//   const flowName = 'runRlnConcurrentBtcPaymentsFlow';
-//   beginExclusiveFlow(flowName);
-//   const { results, addStep, failFlow } = createFlowResults();
-//   let nodeA: RlnNodeRuntime | null = null;
-//   let nodeB: RlnNodeRuntime | null = null;
-//   let nodeC: RlnNodeRuntime | null = null;
-//   let nodeD: RlnNodeRuntime | null = null;
-//   try {
-//     nodeA = await createRlnNodeRuntime({ name: 'nodeA', flowPrefix: 'rln_cbp_a', stepPrefix: 'cbpA', addStep });
-//     nodeB = await createRlnNodeRuntime({ name: 'nodeB', flowPrefix: 'rln_cbp_b', stepPrefix: 'cbpB', addStep });
-//     nodeC = await createRlnNodeRuntime({ name: 'nodeC', flowPrefix: 'rln_cbp_c', stepPrefix: 'cbpC', addStep });
-//     nodeD = await createRlnNodeRuntime({ name: 'nodeD', flowPrefix: 'rln_cbp_d', stepPrefix: 'cbpD', addStep });
-// 
-//     await fundAndCreateUtxosForNode(nodeA, 'cbpA', addStep);
-//     await fundAndCreateUtxosForNode(nodeB, 'cbpB', addStep);
-//     await fundAndCreateUtxosForNode(nodeC, 'cbpC', addStep);
-//     await fundAndCreateUtxosForNode(nodeD, 'cbpD', addStep);
-// 
-//     const infoA = await nodeA.call('rlnNodeInfo');
-//     const infoB = await nodeB.call('rlnNodeInfo');
-//     const pubkeyA = String(infoA?.pubkey ?? '');
-//     const pubkeyB = String(infoB?.pubkey ?? '');
-//     addStep('cbpNodeInfos', 'success', {
-//       pubkeyA: pubkeyA.substring(0, 16) + '...',
-//       pubkeyB: pubkeyB.substring(0, 16) + '...',
-//     });
-// 
-//     addStep('cbpConnectPeers', 'running');
-//     const peerUriA = `${pubkeyA}@127.0.0.1:${nodeA.ldkPeerListeningPort}`;
-//     const peerUriB = `${pubkeyB}@127.0.0.1:${nodeB.ldkPeerListeningPort}`;
-//     try { await nodeB.call('rlnConnectPeer', peerUriA); } catch { /* already connected */ }
-//     try { await nodeC.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-//     try { await nodeD.call('rlnConnectPeer', peerUriB); } catch { /* already connected */ }
-//     addStep('cbpConnectPeers', 'success', {});
-// 
-//     // B→A channel (C and D will route through B to reach A)
-//     addStep('cbpOpenChannelBtoA', 'running');
-//     const openBA = await nodeB.call('rlnOpenChannel', {
-//       peerPubkeyAndOptAddr: peerUriA,
-//       capacitySat: 100000,
-//       pushMsat: 0,
-//       public: true,
-//       withAnchors: true,
-//     });
-//     const tmpBA = String(openBA?.temporaryChannelId ?? openBA?.temporary_channel_id ?? '');
-//     const { channelId: channelIdBA, fundingTxid: fundingBA } = await waitForChannelFundingTx(nodeB, nodeA, tmpBA, 120000);
-//     await waitForFundingConfirmed(nodeB, fundingBA, 180000);
-//     await mine(6);
-//     await waitForChannelReady(nodeB);
-//     addStep('cbpOpenChannelBtoA', 'success', { channelId: channelIdBA, fundingTxid: fundingBA });
-// 
-//     // C→B channel
-//     addStep('cbpOpenChannelCtoB', 'running');
-//     const openCB = await nodeC.call('rlnOpenChannel', {
-//       peerPubkeyAndOptAddr: peerUriB,
-//       capacitySat: 100000,
-//       pushMsat: 0,
-//       public: true,
-//       withAnchors: true,
-//     });
-//     const tmpCB = String(openCB?.temporaryChannelId ?? openCB?.temporary_channel_id ?? '');
-//     const { channelId: channelIdCB, fundingTxid: fundingCB } = await waitForChannelFundingTx(nodeC, nodeB, tmpCB, 120000);
-//     await waitForFundingConfirmed(nodeC, fundingCB, 180000);
-//     await mine(6);
-//     await waitForChannelReady(nodeC);
-//     addStep('cbpOpenChannelCtoB', 'success', { channelId: channelIdCB, fundingTxid: fundingCB });
-// 
-//     // D→B channel
-//     addStep('cbpOpenChannelDtoB', 'running');
-//     const openDB = await nodeD.call('rlnOpenChannel', {
-//       peerPubkeyAndOptAddr: peerUriB,
-//       capacitySat: 100000,
-//       pushMsat: 0,
-//       public: true,
-//       withAnchors: true,
-//     });
-//     const tmpDB = String(openDB?.temporaryChannelId ?? openDB?.temporary_channel_id ?? '');
-//     const { channelId: channelIdDB, fundingTxid: fundingDB } = await waitForChannelFundingTx(nodeD, nodeB, tmpDB, 120000);
-//     await waitForFundingConfirmed(nodeD, fundingDB, 180000);
-//     await mine(6);
-//     await waitForChannelReady(nodeD);
-//     addStep('cbpOpenChannelDtoB', 'success', { channelId: channelIdDB, fundingTxid: fundingDB });
-// 
-//     // A creates two invoices concurrently
-//     addStep('cbpCreateInvoices', 'running');
-//     const [invResp1, invResp2] = await Promise.all([
-//       nodeA.call('rlnLnInvoice', 4_000_000, 900, null, null),
-//       nodeA.call('rlnLnInvoice', 5_000_000, 900, null, null),
-//     ]);
-//     const invoice1 = String(invResp1?.invoice ?? invResp1 ?? '');
-//     const invoice2 = String(invResp2?.invoice ?? invResp2 ?? '');
-//     const [dec1, dec2] = await Promise.all([
-//       nodeA.call('rlnDecodeLnInvoice', invoice1),
-//       nodeA.call('rlnDecodeLnInvoice', invoice2),
-//     ]);
-//     const hash1 = String(dec1?.paymentHash ?? dec1?.payment_hash ?? '');
-//     const hash2 = String(dec2?.paymentHash ?? dec2?.payment_hash ?? '');
-//     addStep('cbpCreateInvoices', 'success', { invoice1: invoice1.substring(0, 20) + '...', invoice2: invoice2.substring(0, 20) + '...' });
-// 
-//     // C and D send concurrently
-//     addStep('cbpConcurrentSend', 'running');
-//     const [sendC, sendD] = await Promise.all([
-//       nodeC.call('rlnSendPayment', invoice1, null, null, null),
-//       nodeD.call('rlnSendPayment', invoice2, null, null, null),
-//     ]);
-//     const payHashC = String(sendC?.paymentHash ?? sendC?.payment_hash ?? hash1);
-//     const payHashD = String(sendD?.paymentHash ?? sendD?.payment_hash ?? hash2);
-//     addStep('cbpConcurrentSend', 'success', { payHashC, payHashD });
-// 
-//     addStep('cbpWaitInvoice1', 'running');
-//     await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice1, 'SUCCEEDED', 60000);
-//     addStep('cbpWaitInvoice1', 'success', {});
-// 
-//     addStep('cbpWaitInvoice2', 'running');
-//     await waitForInvoiceStatus(nodeA.call.bind(nodeA), invoice2, 'SUCCEEDED', 60000);
-//     addStep('cbpWaitInvoice2', 'success', {});
-// 
-//     addStep('cbpWaitSenders', 'running');
-//     await Promise.all([
-//       waitForPaymentSuccess(nodeC.call.bind(nodeC), payHashC, 60000),
-//       waitForPaymentSuccess(nodeD.call.bind(nodeD), payHashD, 60000),
-//     ]);
-//     addStep('cbpWaitSenders', 'success', {});
-// 
-//     addStep('cbpFinalBalance', 'running');
-//     const finalBal = await nodeA.call('rlnBtcBalance', false);
-//     addStep('cbpFinalBalance', 'success', finalBal);
-// 
-//     results.success = true;
-//     return results;
-//   } catch (error: any) {
-//     return failFlow(flowName, error);
-//   } finally {
-//     if (nodeA) await nodeA.cleanup();
-//     if (nodeB) await nodeB.cleanup();
-//     if (nodeC) await nodeC.cleanup();
-//     if (nodeD) await nodeD.cleanup();
-//     endExclusiveFlow(flowName);
-//   }
-// }
 
 // Same as runRlnPaymentFlow but all three nodes are initialised with a native external signer
 // instead of password+mnemonic. The payment steps (issue asset, open channel, 4 invoices,
@@ -2885,245 +2564,6 @@ export async function runRlnExternalSignerFlow() {
   }
 }
 
-export async function runRlnSwapRoundtripBuyFlow() {
-  const flowName = 'runRlnSwapRoundtripBuyFlow';
-  beginExclusiveFlow(flowName);
-  const { results, addStep } = createFlowResults();
-  let nodeA: RlnNodeRuntime | null = null;
-  let nodeB: RlnNodeRuntime | null = null;
-  try {
-    nodeA = await createRlnNodeRuntime({
-      name: 'nodeA',
-      flowPrefix: 'rln_swap_roundtrip_buy_a',
-      stepPrefix: 'swapNodeA',
-      addStep,
-    });
-    nodeB = await createRlnNodeRuntime({
-      name: 'nodeB',
-      flowPrefix: 'rln_swap_roundtrip_buy_b',
-      stepPrefix: 'swapNodeB',
-      addStep,
-    });
-
-    const retryOnNodeStateConflict = async <T>(
-      runner: () => Promise<T>,
-      opts: { attempts?: number; delayMs?: number; onRetry?: (attempt: number, error: any) => void } = {}
-    ): Promise<T> => {
-      const attempts = opts.attempts ?? 12;
-      const delayMs = opts.delayMs ?? 800;
-      let lastErr: any = null;
-      for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        try {
-          return await runner();
-        } catch (error: any) {
-          lastErr = error;
-          const message = String(error?.message ?? error).toLowerCase();
-          const retryable =
-            message.includes('conflict with current node state') ||
-            message.includes('shutting_down') ||
-            message.includes('shutting down') ||
-            message.includes('non-lifecycle operations are blocked');
-          if (!retryable || attempt === attempts) {
-            throw error;
-          }
-          opts.onRetry?.(attempt, error);
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-        }
-      }
-      throw lastErr;
-    };
-
-    const ensureFundedAndUtxos = async (node: RlnNodeRuntime, stepPrefix: string) => {
-      addStep(`${stepPrefix}Fund`, 'running');
-      const currentBal = await node.call('rlnBtcBalance', false);
-      const currentSpendable = Number(
-        currentBal?.vanilla?.spendable ??
-          currentBal?.vanilla?.spendableSat ??
-          currentBal?.spendable ??
-          0
-      );
-      const addrResp = await node.call('rlnAddress');
-      const address = String(addrResp?.address ?? addrResp ?? '');
-      if (!address) throw new Error(`${stepPrefix}: missing address`);
-      if (currentSpendable < 1) {
-        const txid = await sendToAddress(address, 1);
-        await mine(6);
-        // Keep parity with android-e2e fundAndCreateUtxos helper.
-        await node.call('rlnSync');
-        addStep(`${stepPrefix}Fund`, 'success', { txid, nodeEndpoint: BITCOIN_NODE_ENDPOINT });
-      } else {
-        addStep(`${stepPrefix}Fund`, 'success', { skipped: true, reason: 'already funded' });
-      }
-
-      addStep(`${stepPrefix}CreateUtxos`, 'running');
-      await retryOnNodeStateConflict(
-        () => node.call('rlnSync'),
-        { attempts: 12, delayMs: 800 }
-      );
-      const retryReasons: string[] = [];
-      let retryCount = 0;
-      await retryOnNodeStateConflict(
-        () => node.call('rlnCreateUtxos', false, 10, null, 7, false),
-        {
-          attempts: 15,
-          delayMs: 1000,
-          onRetry: (attempt, error) => {
-            retryCount = attempt;
-            retryReasons.push(String(error?.message ?? error));
-          },
-        }
-      );
-      await mine(1);
-      await node.call('rlnSync');
-      addStep(`${stepPrefix}CreateUtxos`, 'success', {
-        num: 10,
-        feeRate: 7,
-        retries: retryCount,
-        recoveredFromNodeStateConflict: retryCount > 0,
-        retryReasons: retryReasons.slice(-3),
-      });
-    };
-    await ensureFundedAndUtxos(nodeA, 'swapNodeA');
-    await ensureFundedAndUtxos(nodeB, 'swapNodeB');
-
-    addStep('swapIssueAsset', 'running');
-    const issued = await nodeA.call('rlnIssueAssetNia', 'USDT', 'Tether', 0, [1000]);
-    const assetId = String(issued?.assetId ?? issued?.asset_id ?? '');
-    if (!assetId) throw new Error('Failed to issue asset for swap flow');
-    addStep('swapIssueAsset', 'success', { assetId });
-
-    addStep('swapOpenChannels', 'running');
-    const infoA = await nodeA.call('rlnNodeInfo');
-    const infoB = await nodeB.call('rlnNodeInfo');
-    const peerUriAB = `${infoB?.pubkey}@127.0.0.1:${String(infoB?.ldkPeerListeningPort ?? infoB?.ldk_peer_listening_port ?? '9735')}`;
-    const peerUriBA = `${infoA?.pubkey}@127.0.0.1:${String(infoA?.ldkPeerListeningPort ?? infoA?.ldk_peer_listening_port ?? '9735')}`;
-    const open12 = await nodeA.call('rlnOpenChannel', {
-      peerPubkeyAndOptAddr: peerUriAB,
-      capacitySat: 100000,
-      pushMsat: 0,
-      public: true,
-      withAnchors: true,
-      assetId,
-      assetAmount: 600,
-    });
-    const open21 = await nodeB.call('rlnOpenChannel', {
-      peerPubkeyAndOptAddr: peerUriBA,
-      capacitySat: 5000000,
-      pushMsat: 546000,
-      public: true,
-      withAnchors: true,
-      assetId: null,
-      assetAmount: null,
-    });
-    const tmp12 = String(open12?.temporaryChannelId ?? open12?.temporary_channel_id ?? '');
-    const tmp21 = String(open21?.temporaryChannelId ?? open21?.temporary_channel_id ?? '');
-    const { channelId: channel12, fundingTxid: funding12 } = await waitForChannelFundingTx(nodeA, nodeB, tmp12, 120000);
-    await waitForFundingConfirmed(nodeA, funding12, 180000);
-    await mine(6);
-    await waitForChannelReady(nodeA);
-    const { channelId: channel21, fundingTxid: funding21 } = await waitForChannelFundingTx(nodeB, nodeA, tmp21, 120000);
-    await waitForFundingConfirmed(nodeB, funding21, 180000);
-    await mine(6);
-    await waitForChannelReady(nodeB);
-    addStep('swapOpenChannels', 'success', { channel12, channel21, funding12, funding21 });
-
-    addStep('swapExecuteRoundtrip', 'running');
-    const makerInit = await nodeA.callSwap('makerinit', {
-      qtyFrom: 50000,
-      qtyTo: 10,
-      fromAsset: null,
-      toAsset: assetId,
-      timeoutSec: 3600,
-    });
-    const swapstring = makerInit?.swapstring;
-    const paymentHash = String(makerInit?.paymentHash ?? makerInit?.payment_hash ?? '');
-    const paymentSecret = makerInit?.paymentSecret ?? makerInit?.payment_secret;
-    if (!swapstring || !paymentHash || !paymentSecret) {
-      throw new Error('makerinit returned incomplete swap payload');
-    }
-    await nodeB.callSwap('taker', { swapstring });
-    await nodeA.callSwap('makerexecute', {
-      swapstring,
-      paymentSecret,
-      takerPubkey: infoB?.pubkey,
-    });
-    await waitForSwapStatus(nodeB, paymentHash, 'SUCCEEDED', 120000);
-    addStep('swapExecuteRoundtrip', 'success', { paymentHash, status: 'SUCCEEDED' });
-
-    addStep('swapPostChecks', 'running');
-    const balA = await nodeA.call('rlnAssetBalance', assetId);
-    const balB = await nodeB.call('rlnAssetBalance', assetId);
-    addStep('swapPostChecks', 'success', {
-      nodeAOffchainOutbound: balA?.offchainOutbound ?? balA?.offchain_outbound ?? null,
-      nodeBOffchainOutbound: balB?.offchainOutbound ?? balB?.offchain_outbound ?? null,
-    });
-
-    addStep('swapRestartCheckpoint', 'running');
-    const restartConfigA = {
-      storageDirPath: nodeA.storageDirPath,
-      daemonListeningPort: nodeA.daemonListeningPort,
-      ldkPeerListeningPort: nodeA.ldkPeerListeningPort,
-      nodePassword: nodeA.nodePassword,
-    };
-    const restartConfigB = {
-      storageDirPath: nodeB.storageDirPath,
-      daemonListeningPort: nodeB.daemonListeningPort,
-      ldkPeerListeningPort: nodeB.ldkPeerListeningPort,
-      nodePassword: nodeB.nodePassword,
-    };
-    await nodeA.safeShutdown();
-    await nodeB.safeShutdown();
-    await sleep(2000);
-    nodeA = await createRlnNodeRuntime({
-      name: 'nodeA',
-      flowPrefix: 'rln_swap_roundtrip_buy_a',
-      stepPrefix: 'swapNodeARestart',
-      addStep,
-      reuse: restartConfigA,
-    });
-    nodeB = await createRlnNodeRuntime({
-      name: 'nodeB',
-      flowPrefix: 'rln_swap_roundtrip_buy_b',
-      stepPrefix: 'swapNodeBRestart',
-      addStep,
-      reuse: restartConfigB,
-    });
-    await waitForUsableChannels(nodeA, 2, 60000);
-    await waitForUsableChannels(nodeB, 2, 60000);
-    await waitForSwapStatus(nodeA, paymentHash, 'SUCCEEDED', 70000);
-    await waitForSwapStatus(nodeB, paymentHash, 'SUCCEEDED', 70000);
-    addStep('swapRestartCheckpoint', 'success', {
-      restarted: true,
-      usableChannelsA: 2,
-      usableChannelsB: 2,
-      swapStatus: 'SUCCEEDED',
-    });
-
-    addStep('swapCloseChannels', 'running');
-    try {
-      await nodeA.call('rlnCloseChannel', channel12, infoB?.pubkey, true);
-    } catch {
-      // best effort for demo
-    }
-    try {
-      await nodeB.call('rlnCloseChannel', channel21, infoA?.pubkey, true);
-    } catch {
-      // best effort for demo
-    }
-    addStep('swapCloseChannels', 'success', { closed: true });
-    results.success = true;
-    return results;
-  } catch (error: any) {
-    results.success = false;
-    results.error = { message: error?.message ?? String(error) };
-    return results;
-  } finally {
-    if (nodeA) await nodeA.cleanup();
-    if (nodeB) await nodeB.cleanup();
-    endExclusiveFlow(flowName);
-  }
-}
-
 const FAUCET_URL =
   'https://node-api.thunderstack.org/c17bc5d0-80b1-7050-5af5-dfd8a67834f1/1e0cfe422f0e4306bebdab953a0b99f2/sendbtc';
 const FAUCET_TOKEN =
@@ -3132,443 +2572,7 @@ const FAUCET_AMOUNT_SATS = 16900; // fallback only
 const FUND_POLL_INTERVAL_MS = 5000;
 const FUND_POLL_TIMEOUT_MS = 90000;
 
-/**
- * UTEXO Wallet VSS End-to-End Flow
- *
- * Full lifecycle test:
- *   1. Create & fund a UTEXOWallet
- *   2. Issue an NIA asset so the wallet has real on-chain state
- *   3. Back up via VSS (zero-arg – config is derived from the mnemonic)
- *   4. Dispose the wallet and delete local state
- *   5. Restore from VSS and verify everything is intact
- */
-export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
-  const flowName = 'runUtexoVssFlow';
-  beginExclusiveFlow(flowName);
-  console.log('Starting UTEXO VSS E2E Flow');
-  console.log('='.repeat(50));
 
-  const results: any = { steps: [], success: false, error: null };
-
-  const addStep = (step: string, status: string, data?: any, error?: string) => {
-    const idx = results.steps.findIndex((s: any) => s.step === step);
-    const entry = { step, status, data, error };
-    if (idx >= 0) {
-      results.steps[idx] = entry;
-    } else {
-      results.steps.push(entry);
-    }
-    onProgress?.({ ...results, steps: [...results.steps], running: true });
-  };
-
-  let wallet: any = null;
-  let walletAddress: string | null = null;
-  let issuedAssetId: string | null = null;
-  let preBtcBalance: any = null;
-  let preAssetBalance: any = null;
-  const restoreDir = `${documentDirectory ?? ''}utexo_vss_restore`;
-  const utexoVssNetwork: 'testnet' = 'testnet';
-
-  try {
-    // ── Step 1: Create & initialise UTEXOWallet ─────────────────────────────
-    addStep('createUtexoWallet', 'running');
-    try {
-      wallet = new (UTEXOWallet as any)(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
-      await wallet.initialize();
-      addStep('createUtexoWallet', 'success', { network: wallet.getNetwork() });
-    } catch (e: any) {
-      addStep('createUtexoWallet', 'error', undefined, e?.message ?? String(e));
-      throw e;
-    }
-
-    // ── Step 2: Get deposit address ──────────────────────────────────────────
-    addStep('getAddress', 'running');
-    walletAddress = await wallet.getAddress();
-    addStep('getAddress', 'success', { address: walletAddress });
-
-    // ── Step 3: Fund wallet ──────────────────────────────────────────────────
-    // The UTEXO wallet generates BIP86 taproot (bcrt1p…) addresses. The
-    // thunderstack HTTP faucet rejects these with "belongs to another network"
-    // because its node doesn't support P2TR outputs. Instead, we use the same
-    // mechanism that initWallet() uses: sendToAddress via the Bitcoin node RPC,
-    // then mine blocks to confirm.
-    addStep('fundWallet', 'running');
-    try {
-      const txid = await sendToAddress(walletAddress!, 0.0002); // ~20 000 sats
-      await mine(6);
-      addStep('fundWallet', 'success', { txid });
-    } catch (e: any) {
-      // Fallback: try the thunderstack HTTP faucet in case it has been updated
-      // to accept taproot outputs.
-      try {
-        const faucetRes = await fetch(FAUCET_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${FAUCET_TOKEN}`,
-          },
-          body: JSON.stringify({
-            amount: FAUCET_AMOUNT_SATS,
-            address: walletAddress,
-            fee_rate: 5,
-            skip_sync: false,
-          }),
-        });
-        const faucetData = await faucetRes.json().catch(() => ({}));
-        if (!faucetRes.ok) {
-          throw new Error(
-            `Faucet HTTP ${faucetRes.status}: ${JSON.stringify(faucetData)}`
-          );
-        }
-        addStep('fundWallet', 'success', {
-          method: 'faucet',
-          txid: faucetData?.txid ?? faucetData,
-        });
-      } catch (faucetErr: any) {
-        addStep('fundWallet', 'error', undefined,
-          `sendToAddress: ${e?.message}; faucet: ${faucetErr?.message}`
-        );
-      }
-    }
-
-    // ── Step 4: Wait for balance ─────────────────────────────────────────────
-    addStep('waitForFunding', 'running');
-    const deadline = Date.now() + FUND_POLL_TIMEOUT_MS;
-    let funded = false;
-    while (Date.now() < deadline) {
-      const bal = await wallet.getBtcBalance();
-      const total =
-        (bal?.vanilla?.settled ?? 0) +
-        (bal?.vanilla?.future ?? 0) +
-        (bal?.vanilla?.spendable ?? 0);
-      if (total > 0) {
-        preBtcBalance = bal;
-        funded = true;
-        addStep('waitForFunding', 'success', {
-          settled: bal?.vanilla?.settled,
-          future: bal?.vanilla?.future,
-        });
-        break;
-      }
-      await new Promise((r) => setTimeout(r, FUND_POLL_INTERVAL_MS));
-    }
-    if (!funded) {
-      const bal = await wallet.getBtcBalance();
-      preBtcBalance = bal;
-      addStep('waitForFunding', 'error', { balance: bal }, 'Timed out waiting for balance');
-    }
-
-    // ── Step 5: Create UTXOs ─────────────────────────────────────────────────
-    addStep('createUtxos', 'running');
-    try {
-      const created = await wallet.createUtxos({ upTo: true, num: 5, feeRate: 5 });
-      addStep('createUtxos', 'success', { created });
-    } catch (e: any) {
-      // AllocationsAlreadyAvailable means the wallet already has enough UTXOs —
-      // this is a benign "nothing to do" result when upTo: true is set.
-      const isAlreadyAvailable =
-        e?.code === 'AllocationsAlreadyAvailable' ||
-        String(e?.message ?? e).includes('AllocationsAlreadyAvailable');
-      if (isAlreadyAvailable) {
-        addStep('createUtxos', 'success', { created: 0, note: 'AllocationsAlreadyAvailable' });
-      } else {
-        console.error('[UTEXO VSS] createUtxos failed:', e);
-        const errMsg = e?.message || (e?.code ? `[${e.code}] ${String(e)}` : String(e)) || 'Unknown error';
-        addStep('createUtxos', 'error', undefined, errMsg);
-      }
-    }
-
-    // ── Step 6: Issue NIA asset ──────────────────────────────────────────────
-    addStep('issueAssetNia', 'running');
-    try {
-      const asset = await wallet.issueAssetNia({
-        ticker: 'DEMO',
-        name: 'Demo Token',
-        precision: 0,
-        amounts: [1000],
-      });
-      issuedAssetId = asset.assetId;
-      addStep('issueAssetNia', 'success', {
-        assetId: asset.assetId,
-        ticker: asset.ticker,
-      });
-    } catch (e: any) {
-      addStep('issueAssetNia', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 7: Send issued asset to receiver (witness invoice) ─────────────
-    if (issuedAssetId) {
-      addStep('sendIssuedAssetToReceiver', 'running');
-      let receiverWallet: any = null;
-      try {
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: start', { issuedAssetId });
-        const receiverKeys = await createWallet(utexoVssNetwork);
-        receiverWallet = new (UTEXOWallet as any)(receiverKeys.mnemonic, { network: utexoVssNetwork });
-        await receiverWallet.initialize();
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: receiver initialized');
-
-        const witness = await receiverWallet.witnessReceive({
-          amount: 5,
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: witness invoice length', witness?.invoice?.length ?? 0);
-
-        // Witness invoices require sender-side witness parameters (see runWalletFlow witness send).
-        const sendResult = await wallet.send({
-          assetId: issuedAssetId,
-          amount: 5,
-          invoice: witness.invoice,
-          minConfirmations: 1,
-          witnessData: {
-            amountSat: 1000,
-            blinding: 0,
-          },
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: send ok', sendResult?.txid ?? sendResult);
-
-        const refreshRounds: {
-          round: number;
-          senderSettled?: number;
-          receiverSettled?: number;
-        }[] = [];
-        const refreshIntervalMs = 40_000;
-        const refreshCount = 3;
-        let finalSenderBal: any = null;
-        let finalReceiverBal: any = null;
-
-        for (let i = 0; i < refreshCount; i += 1) {
-          await wallet.refreshWallet();
-          await receiverWallet.refreshWallet();
-
-          const [senderBal, receiverBal] = await Promise.all([
-            wallet.getAssetBalance(issuedAssetId).catch(() => null),
-            receiverWallet.getAssetBalance(issuedAssetId).catch(() => null),
-          ]);
-          finalSenderBal = senderBal;
-          finalReceiverBal = receiverBal;
-
-          refreshRounds.push({
-            round: i + 1,
-            senderSettled: senderBal?.settled,
-            receiverSettled: receiverBal?.settled,
-          });
-
-          if (i < refreshCount - 1) {
-            await new Promise((r) => setTimeout(r, refreshIntervalMs));
-          }
-        }
-
-        addStep('sendIssuedAssetToReceiver', 'success', {
-          receiverAddress: await receiverWallet.getAddress(),
-          witnessInvoice: witness.invoice,
-          sendTxid: sendResult?.txid ?? sendResult,
-          refreshIntervalMs,
-          refreshRounds,
-          senderAssetBalance: finalSenderBal
-            ? {
-                settled: finalSenderBal.settled,
-                spendable: finalSenderBal.spendable,
-                future: finalSenderBal.future,
-              }
-            : null,
-          receiverAssetBalance: finalReceiverBal
-            ? {
-                settled: finalReceiverBal.settled,
-                spendable: finalReceiverBal.spendable,
-                future: finalReceiverBal.future,
-              }
-            : null,
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: success', { refreshRounds });
-      } catch (e: any) {
-        const errMsg =
-          e?.message ??
-          (typeof e === 'string' ? e : JSON.stringify(e, Object.getOwnPropertyNames(e)));
-        const errDetail = [
-          `issuedAssetId=${issuedAssetId}`,
-          errMsg,
-          e?.code ? `code=${e.code}` : null,
-          e?.stack ? `stack=${e.stack}` : null,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        console.error('[UTEXO VSS] sendIssuedAssetToReceiver: FAILED', errDetail, e);
-        // Do not pass `data` on error — Flows StepCard prefers detail over step.error.
-        addStep('sendIssuedAssetToReceiver', 'error', undefined, errDetail);
-      } finally {
-        if (receiverWallet) {
-          try {
-            await receiverWallet.dispose();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    } else {
-      console.warn('[UTEXO VSS] sendIssuedAssetToReceiver: skipped — no issuedAssetId');
-      addStep('sendIssuedAssetToReceiver', 'error', undefined, 'No issued asset to send');
-    }
-
-    // ── Step 8: List assets ──────────────────────────────────────────────────
-    addStep('listAssets', 'running');
-    try {
-      const assets = await wallet.listAssets();
-      const niaCount = assets.nia?.length ?? 0;
-      addStep('listAssets', 'success', { niaCount, assetIds: assets.nia?.map((a: any) => a.assetId) });
-    } catch (e: any) {
-      addStep('listAssets', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 9: Get asset balance ────────────────────────────────────────────
-    if (issuedAssetId) {
-      addStep('getAssetBalance', 'running');
-      try {
-        preAssetBalance = await wallet.getAssetBalance(issuedAssetId);
-        addStep('getAssetBalance', 'success', {
-          settled: preAssetBalance?.settled,
-          spendable: preAssetBalance?.spendable,
-          future: preAssetBalance?.future,
-        });
-      } catch (e: any) {
-        addStep('getAssetBalance', 'error', undefined, e?.message ?? String(e));
-      }
-    } else {
-      addStep('getAssetBalance', 'error', undefined, 'No asset to check (issue step failed)');
-    }
-
-    // ── Step 10: VSS Backup (zero-arg!) ──────────────────────────────────────
-    addStep('vssBackup', 'running');
-    let vssConfig: any = null;
-    try {
-      vssConfig = await wallet.getDefaultVssConfig();
-      const version = await wallet.vssBackup();
-      addStep('vssBackup', 'success', {
-        version,
-        storeId: vssConfig.storeId,
-      });
-    } catch (e: any) {
-      addStep('vssBackup', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 11: VSS Backup info (zero-arg!) ─────────────────────────────────
-    addStep('vssBackupInfo', 'running');
-    try {
-      const info = await wallet.vssBackupInfo();
-      addStep('vssBackupInfo', 'success', {
-        backupExists: info.backupExists,
-        serverVersion: info.serverVersion,
-        backupRequired: info.backupRequired,
-      });
-    } catch (e: any) {
-      addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 12: Dispose wallet ──────────────────────────────────────────────
-    addStep('disposeWallet', 'running');
-    await wallet.dispose();
-    wallet = null;
-    addStep('disposeWallet', 'success');
-
-    // ── Step 13: Delete local state ──────────────────────────────────────────
-    addStep('deleteState', 'running');
-    try {
-      // Always delete then recreate so rgb-lib gets a clean target directory.
-      // On subsequent runs the fingerprint subdirectory would already exist,
-      // causing the native restoreFromVss to fail with "path already exists".
-      await FileSystem.deleteAsync(restoreDir, { idempotent: true });
-      await FileSystem.makeDirectoryAsync(restoreDir, { intermediates: true });
-      addStep('deleteState', 'success', { restoreDir });
-    } catch (e: any) {
-      addStep('deleteState', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 14: Restore from VSS ────────────────────────────────────────────
-    addStep('restoreFromVss', 'running');
-    let restorePaths: { layer1Path: string; utexoPath: string } | null = null;
-    try {
-      const targetDir = restoreDir.replace('file://', '');
-      restorePaths = await (UTEXOWallet as any).restoreFromVss(
-        UTEXO_TEST_MNEMONIC,
-        targetDir,
-        vssConfig ?? undefined
-      );
-      addStep('restoreFromVss', 'success', {
-        utexoPath: restorePaths!.utexoPath,
-        layer1Path: restorePaths!.layer1Path,
-      });
-    } catch (e: any) {
-      addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 15: Verify restored wallet ─────────────────────────────────────
-    addStep('verifyRestoredWallet', 'running');
-    let restoredWallet: any = null;
-    try {
-      restoredWallet = new (UTEXOWallet as any)(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
-      await restoredWallet.initialize();
-
-      const [btcBalance, assets, transactions] = await Promise.all([
-        restoredWallet.getBtcBalance(),
-        restoredWallet.listAssets(),
-        restoredWallet.listTransactions(),
-      ]);
-
-      const restoredAssetBalance = issuedAssetId
-        ? await restoredWallet.getAssetBalance(issuedAssetId).catch(() => null)
-        : null;
-
-      const niaCount = assets.nia?.length ?? 0;
-      const assetRestored =
-        issuedAssetId != null &&
-        (assets.nia ?? []).some((a: any) => a.assetId === issuedAssetId);
-
-      addStep('verifyRestoredWallet', 'success', {
-        btcSettled: btcBalance?.vanilla?.settled ?? 0,
-        btcMatchesPreBackup:
-          preBtcBalance == null ||
-          btcBalance?.vanilla?.settled === preBtcBalance?.vanilla?.settled,
-        niaCount,
-        assetRestored,
-        restoredAssetBalance: restoredAssetBalance
-          ? {
-              settled: restoredAssetBalance.settled,
-              spendable: restoredAssetBalance.spendable,
-              matchesPreBackup:
-                preAssetBalance == null ||
-                restoredAssetBalance.settled === preAssetBalance.settled,
-            }
-          : null,
-        transactionCount: transactions.length,
-      });
-    } catch (e: any) {
-      addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 16: Cleanup ─────────────────────────────────────────────────────
-    addStep('cleanup', 'running');
-    try {
-      if (restoredWallet) {
-        await restoredWallet.dispose();
-        restoredWallet = null;
-      }
-      addStep('cleanup', 'success');
-    } catch (e: any) {
-      addStep('cleanup', 'error', undefined, e?.message ?? String(e));
-    }
-
-    results.success = true;
-    return results;
-  } catch (error: any) {
-    console.error('Error in UTEXO VSS flow:', error);
-    if (wallet) {
-      try { await wallet.dispose(); } catch { /* ignore */ }
-    }
-    results.success = false;
-    results.error = { message: error.message || 'Unknown error' };
-    return results;
-  } finally {
-    endExclusiveFlow(flowName);
-  }
-}
 
 // SDK usage example — direct API calls, no internal helpers.
 // Shows the minimal sequence to create a node with a native external signer,
@@ -3830,6 +2834,10 @@ export async function runRlnExternalSignerChannelPaymentFlow() {
       await rlnA.rlnConnectPeer(peerUriB);
       console.log(`[extChan] connected to ${peerUriB}`);
     } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('extChanConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
       console.warn(`[extChan] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
     addStep('extChanConnectPeers', 'success', { peerUriB });
@@ -4115,6 +3123,10 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
       await nodeA.connectPeer(peerUriB);
       console.log(`[wChan] connected to ${peerUriB}`);
     } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wChanConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
       console.warn(`[wChan] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
     addStep('wChanConnectPeers', 'success', { peerUriB });
@@ -4381,11 +3393,16 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     // 11 — connect peers nodeA → nodeB
     addStep('wAsExtConnectPeers', 'running');
     const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    const peerUriA = `${pubkeyA}@127.0.0.1:${basePortA + 1}`;
     console.log(`[wAsExt] connecting nodeA → ${peerUriB}`);
     try {
       await nodeA.connectPeer(peerUriB);
       console.log(`[wAsExt] connected to ${peerUriB}`);
     } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wAsExtConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
       console.warn(`[wAsExt] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
     addStep('wAsExtConnectPeers', 'success', { peerUriB });
@@ -4397,7 +3414,7 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     await nodeA.openChannel({
       peerPubkeyAndOptAddr: peerUriB,
       capacitySat: 100000,
-      pushMsat: 0,
+      pushMsat: 3_500_000,
       public: false,
       withAnchors: true,
       assetId,
@@ -4505,6 +3522,225 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
       await sleep(2000);
     }
     addStep('wAsExtPayment2', 'success', { paymentHash: hash2, assetAmount: 50 });
+
+    // 16 — cooperative close channel nodeA → nodeB
+    // After payments: nodeA channel=450, nodeB channel=150; nodeA off-chain=400
+    // Expected after close: nodeA=850 (400+450), nodeB=150
+    addStep('wAsExtCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(channelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wAsExtCloseChannel', 'success', { channelId });
+
+    // 17 — wait for on-chain balances to settle
+    addStep('wAsExtWaitBalances', 'running');
+    const balDeadline = Date.now() + 170000;
+    let lastSpendableA = -1;
+    let lastSpendableB = -1;
+    while (Date.now() < balDeadline) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableA = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] waitBal nodeA spendable=${lastSpendableA} expected=850`);
+      } catch (e: any) { console.warn(`[wAsExt] waitBal nodeA: ${e?.message}`); }
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableB = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] waitBal nodeB spendable=${lastSpendableB} expected=150`);
+      } catch (e: any) { console.warn(`[wAsExt] waitBal nodeB: ${e?.message}`); }
+      if (lastSpendableA === 850 && lastSpendableB === 150) break;
+      try { await nodeA.refreshWallet(); } catch {}
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(12000);
+    }
+    if (lastSpendableA !== 850) throw new Error(`nodeA balance did not reach 850, last=${lastSpendableA}`);
+    if (lastSpendableB !== 150) throw new Error(`nodeB balance did not reach 150, last=${lastSpendableB}`);
+    addStep('wAsExtWaitBalances', 'success', { expectedA: 850, expectedB: 150 });
+
+    // TODO iteration 2: nodeA → nodeB second channel (original direction)
+    // addStep('wAsExt2ConnectPeers', 'running');
+    // ...
+    // addStep('wAsExt2OpenChannel', 'running');  // nodeA opens 500-unit channel to nodeB
+    // ...
+    // addStep('wAsExt2Payment', 'running');       // nodeB creates invoice, nodeA pays 100 units
+    // ...
+    // addStep('wAsExt2CloseChannel', 'running');  // nodeA closes, expected A=750, B=250
+    // ...
+    // addStep('wAsExt2WaitBalances', 'running');
+    // ...
+
+    // 18 — reconnect peers for second channel (nodeB signer → nodeA password)
+    // NativeExternalRLNSigner (VLS) is the channel initiator here; this tests whether VLS
+    // can open a channel. FundingGenerationReady is known to loop without producing a funding
+    // tx when VLS is the funder — this step will time out if that Rust-layer bug is present.
+    addStep('wAsExtRevConnectPeers', 'running');
+    try {
+      await nodeB.connectPeer(peerUriA);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wAsExtRevConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[wAsExt] rev connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('wAsExtRevConnectPeers', 'success', { peerUriA });
+
+    // 19 — open second channel nodeB (VLS) → nodeA (100 units, 100k sat)
+    // nodeB off-chain=150; nodeB puts 100 units into channel (off-chain→50), pushMsat to nodeA.
+    // Channel after open: nodeB=100 units, nodeA=0 units.
+    addStep('wAsExtRevOpenChannel', 'running');
+    await nodeB.syncWallet();
+    await nodeB.openChannel({
+      peerPubkeyAndOptAddr: peerUriA,
+      capacitySat: 100000,
+      pushMsat: 3_500_000,
+      public: false,
+      withAnchors: true,
+      assetId,
+      assetAmount: 100,
+    });
+
+    let revFundingTxid = '';
+    let revChannelId = '';
+    const revFundDeadline = Date.now() + 120000;
+    // nodeB is the initiator, so assetId appears in nodeB.listChannels().
+    while (Date.now() < revFundDeadline) {
+      await nodeB.syncWallet();
+      const channels: any[] = (await nodeB.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) =>
+          (c.assetId ?? c.asset_id) === assetId &&
+          (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        revFundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        revChannelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!revFundingTxid) throw new Error('Timeout waiting for reverse funding tx');
+    console.log(`[wAsExt] rev channelId=${revChannelId} fundingTxid=${revFundingTxid}`);
+
+    // listChannels() returns fundingTxid as soon as FundingCreated is sent, but with
+    // NativeExternalRLNSigner the VLS signing on the initiator (nodeB) side takes several
+    // seconds, so the funding tx may not be broadcast yet. Mine in a retry loop.
+    await sleep(5000);
+    const revOpenDeadline = Date.now() + 120000;
+    let revOpenDone = false;
+    while (Date.now() < revOpenDeadline) {
+      await mine(6);
+      await sleep(3000);
+      let allUsable = true;
+      for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[wAsExt] rev open ${label} usableChannels=${usable}`);
+        if (usable < 1) allUsable = false;
+      }
+      if (allUsable) { revOpenDone = true; break; }
+      await sleep(5000);
+    }
+    if (!revOpenDone) throw new Error('Reverse channel never became usable within 120s');
+    await mine(6);
+    addStep('wAsExtRevOpenChannel', 'success', { channelId: revChannelId, fundingTxid: revFundingTxid, assetId });
+
+    // 20 — payment: nodeA creates invoice (50 units), nodeB (VLS initiator) pays
+    // Channel: nodeB=100, nodeA=0; after payment: nodeB=50, nodeA=50
+    addStep('wAsExtRevPayment', 'running');
+    const invRev = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoiceRev = String(invRev?.lnInvoice ?? '');
+    const sendRev = await nodeB.payLightningInvoice({ lnInvoice: invoiceRev });
+    const hashRev = String(sendRev?.txid ?? '');
+    console.log(`[wAsExt] rev payment hash=${hashRev}`);
+    const revPayDeadline = Date.now() + 60000;
+    while (Date.now() < revPayDeadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hashRev);
+      console.log(`[wAsExt] rev payment status=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Rev payment failed: ${hashRev}`);
+      await sleep(2000);
+    }
+    addStep('wAsExtRevPayment', 'success', { paymentHash: hashRev, assetAmount: 50 });
+
+    // 21 — cooperative close reverse channel (nodeA initiates)
+    // Expected after close: nodeA=850+50=900, nodeB=50+50=100
+    addStep('wAsExtRevCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(revChannelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wAsExtRevCloseChannel', 'success', { channelId: revChannelId });
+
+    // 22 — wait for settled balances: A=900, B=100
+    addStep('wAsExtRevWaitBalances', 'running');
+    const revBalDeadline = Date.now() + 300000;
+    let lastSpendableRevA = -1;
+    let lastSpendableRevB = -1;
+    while (Date.now() < revBalDeadline) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableRevA = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] rev waitBal nodeA spendable=${lastSpendableRevA} expected=900`);
+      } catch (e: any) { console.warn(`[wAsExt] rev waitBal nodeA: ${e?.message}`); }
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableRevB = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] rev waitBal nodeB spendable=${lastSpendableRevB} expected=100`);
+      } catch (e: any) { console.warn(`[wAsExt] rev waitBal nodeB: ${e?.message}`); }
+      if (lastSpendableRevA === 900 && lastSpendableRevB === 100) break;
+      try { await nodeA.refreshWallet(); } catch {}
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(12000);
+    }
+    if (lastSpendableRevA !== 900) throw new Error(`nodeA rev balance did not reach 900, last=${lastSpendableRevA}`);
+    if (lastSpendableRevB !== 100) throw new Error(`nodeB rev balance did not reach 100, last=${lastSpendableRevB}`);
+    addStep('wAsExtRevWaitBalances', 'success', { expectedA: 900, expectedB: 100 });
+
+    // TODO iteration 2: nodeB RGB on-chain sends 150 back to nodeA
+    // addStep('wAsExtRgbSendBtoA', 'running');
+    // const invA = await nodeA.blindReceive({ minConfirmations: 1 });
+    // await nodeB.send({ invoice: invA.invoice, assetId, amount: 150, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeA.syncWallet();
+    // await nodeA.refreshWallet();
+    // await nodeA.refreshWallet();
+    // await nodeB.refreshWallet();
+    // addStep('wAsExtRgbSendBtoA', 'success', { amount: 150, recipientId: invA.recipientId.substring(0, 20) + '...' });
+
+    // TODO iteration 2: final balances: A=1000, B=0
+    // addStep('wAsExtFinalBalances', 'running');
+    // const [finalA, finalB] = await Promise.all([
+    //   nodeA.getAssetBalance(assetId),
+    //   nodeB.getAssetBalance(assetId).catch(() => ({ spendable: 0 })),
+    // ]);
+    // addStep('wAsExtFinalBalances', 'success', {
+    //   spendableA: finalA?.spendable ?? null,
+    //   spendableB: finalB?.spendable ?? null,
+    // });
 
     results.success = true;
     return results;
@@ -4702,6 +3938,10 @@ export async function runRLNUtexoPaymentFlow() {
     try {
       await nodeA.connectPeer(peerUriB);
     } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wPayConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
       console.warn(`[wPay] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
     addStep('wPayConnectPeers', 'success', { peerUriB });
@@ -4907,6 +4147,429 @@ export async function runRLNUtexoPaymentFlow() {
       spendableB: finalB?.spendable ?? null,
       spendableC: finalC?.spendable ?? null,
     });
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeA) { try { await nodeA.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    if (nodeC) { try { await nodeC.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+// Same as runRLNUtexoPaymentFlow but nodeB uses NativeExternalRLNSigner.
+// pushMsat must be 0 — VLS rejects non-zero push on the acceptor side.
+// Balance math (pushMsat=0): open: A=600, B=0
+//   inv1(B→A 100): A=500, B=100  inv2(A→B 50): A=550, B=50
+//   inv3(B→A 50):  A=500, B=100  inv4(A→B 50): A=550, B=50
+//   after close: A=400+550=950, B=50
+//   rgb send A→C 925, B→C 25 → A=25, B=25, C=950
+export async function runRLNUtexoExternalPaymentFlow() {
+  const flowName = 'runRLNUtexoExternalPaymentFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let nodeA: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
+  let nodeC: UTEXOWallet | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const keysC = await createWallet(network);
+    const nodeAPassword = 'nodeApass';
+    const nodeCPassword = 'nodeCpass';
+
+    const basePortA = 22000 + Math.floor(Math.random() * 5000);
+    const basePortB = basePortA + 100;
+    const basePortC = basePortA + 200;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_xpay_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_xpay_b_${ts}`;
+    const storageDirUriC = `${documentDirectory ?? ''}rln_xpay_c_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriC, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+    const storageDirC = storageDirUriC.replace('file://', '');
+
+    nodeA = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePortA,
+        ldkPeerListeningPort: basePortA + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
+    );
+    // nodeB uses NativeExternalRLNSigner — VLS in-process transport
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePortB,
+        ldkPeerListeningPort: basePortB + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new NativeExternalRLNSigner(keysB.mnemonic, network),
+    );
+    nodeC = new UTEXOWallet(
+      {
+        storageDirPath: storageDirC,
+        daemonListeningPort: basePortC,
+        ldkPeerListeningPort: basePortC + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysC.accountXpubVanilla,
+        xpubCol: keysC.accountXpubColored,
+        masterFingerprint: keysC.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeCPassword, keysC.mnemonic),
+    );
+
+    addStep('xPayAInit', 'running');
+    await nodeA.init();
+    addStep('xPayAInit', 'success', { storageDirPath: storageDirA });
+
+    addStep('xPayAUnlock', 'running');
+    await nodeA.unlock(unlockParams);
+    addStep('xPayAUnlock', 'success', {});
+
+    addStep('xPayBInit', 'running');
+    await nodeB.init();
+    addStep('xPayBInit', 'success', { storageDirPath: storageDirB });
+
+    addStep('xPayBUnlock', 'running');
+    await nodeB.unlock(unlockParams);
+    addStep('xPayBUnlock', 'success', {});
+
+    addStep('xPayCInit', 'running');
+    await nodeC.init();
+    addStep('xPayCInit', 'success', { storageDirPath: storageDirC });
+
+    addStep('xPayCUnlock', 'running');
+    await nodeC.unlock(unlockParams);
+    addStep('xPayCUnlock', 'success', {});
+
+    addStep('xPayAFund', 'running');
+    const addrA = await nodeA.getAddress();
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeA.syncWallet();
+    const balA = await nodeA.getBtcBalance();
+    addStep('xPayAFund', 'success', { txid: txidA, address: addrA, balance: balA });
+
+    addStep('xPayACreateUtxos', 'running');
+    await nodeA.syncWallet();
+    await nodeA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeA.syncWallet();
+    addStep('xPayACreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayBFund', 'running');
+    const addrB = await nodeB.getAddress();
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeB.syncWallet();
+    const balB = await nodeB.getBtcBalance();
+    addStep('xPayBFund', 'success', { txid: txidB, address: addrB, balance: balB });
+
+    addStep('xPayBCreateUtxos', 'running');
+    await nodeB.syncWallet();
+    await nodeB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeB.syncWallet();
+    addStep('xPayBCreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayCFund', 'running');
+    const addrC = await nodeC.getAddress();
+    const txidC = await sendToAddress(addrC, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeC.syncWallet();
+    const balC = await nodeC.getBtcBalance();
+    addStep('xPayCFund', 'success', { txid: txidC, address: addrC, balance: balC });
+
+    addStep('xPayCCreateUtxos', 'running');
+    await nodeC.syncWallet();
+    await nodeC.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeC.syncWallet();
+    addStep('xPayCCreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayIssueAsset', 'running');
+    const issued = await nodeA.issueAssetNia({ ticker: 'USDT', name: 'Tether', precision: 0, amounts: [1000] });
+    const assetId = String(issued?.assetId ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('xPayIssueAsset', 'success', { assetId });
+
+    const infoA = await nodeA.getNodeInfo();
+    const infoB = await nodeB.getNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    addStep('xPayNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+    });
+
+    addStep('xPayConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    try {
+      await nodeA.connectPeer(peerUriB);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('xPayConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[xPay] connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('xPayConnectPeers', 'success', { peerUriB });
+
+    // nodeA opens asset channel to nodeB; pushMsat=0 required for external signer acceptor
+    let fundingTxid = '';
+    let channelId = '';
+    addStep('xPayOpenChannel', 'running');
+    try {
+    await nodeA.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 100000,
+      pushMsat: 0,
+      public: true,
+      withAnchors: true,
+      assetId,
+      assetAmount: 600,
+    });
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await nodeA.syncWallet();
+      const channels: any[] = (await nodeA.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) => (c.assetId ?? c.asset_id) === assetId && (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    console.log(`[xPay] channelId=${channelId} fundingTxid=${fundingTxid}`);
+
+    await mine(6);
+    await sleep(3000);
+    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[xPay] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    await mine(6);
+    addStep('xPayOpenChannel', 'success', { channelId, fundingTxid });
+    } catch (e: any) {
+      addStep('xPayOpenChannel', 'error', undefined, e?.message ?? String(e));
+      throw e;
+    }
+
+    addStep('xPayAssetBalanceA', 'running');
+    const bal0 = await nodeA.getAssetBalance(assetId);
+    addStep('xPayAssetBalanceA', 'success', { spendable: bal0?.spendable ?? null });
+
+    // inv1: B creates (100 asset units), A pays → A_chan=500, B_chan=100
+    // amountSats=5000 so nodeB gets 5000 sats; it will need 3000+1000(reserve)=4000 for inv2.
+    addStep('xPayInvoice1', 'running');
+    const inv1Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 100 } });
+    const invoice1 = String(inv1Resp?.lnInvoice ?? '');
+    const send1Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
+    const hash1 = String(send1Resp?.txid ?? '');
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash1);
+      console.log(`[xPay] inv1 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice1 payment failed: ${hash1}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice1', 'success', { paymentHash: hash1, assetAmount: 100 });
+
+    // inv2: A creates (50 asset units), B pays → A_chan=550, B_chan=50
+    // RGB invoices require amountSats>=3000 (RGB_MIN_HTLC_MSAT=3_000_000 msat). nodeB has 5000
+    // sats from inv1; pays 3000, keeps 2000 >= 1000 (channel reserve). Fine.
+    addStep('xPayInvoice2', 'running');
+    const inv2Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice2 = String(inv2Resp?.lnInvoice ?? '');
+    const send2Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice2 });
+    const hash2 = String(send2Resp?.txid ?? '');
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash2);
+      console.log(`[xPay] inv2 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice2 payment failed: ${hash2}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice2', 'success', { paymentHash: hash2, assetAmount: 50 });
+
+    // inv3: B creates (50 asset units), A pays → A_chan=500, B_chan=100
+    // amountSats=5000 again so nodeB can afford inv4 (3000 sats + reserve).
+    addStep('xPayInvoice3', 'running');
+    const inv3Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice3 = String(inv3Resp?.lnInvoice ?? '');
+    const send3Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice3 });
+    const hash3 = String(send3Resp?.txid ?? '');
+    const pay3Deadline = Date.now() + 60000;
+    while (Date.now() < pay3Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash3);
+      console.log(`[xPay] inv3 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice3 payment failed: ${hash3}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice3', 'success', { paymentHash: hash3, assetAmount: 50 });
+
+    // inv4: A creates (50 asset units), B pays → A_chan=550, B_chan=50
+    // nodeB has 2000(leftover)+5000(inv3)=7000 sats; pays 3000, keeps 4000 >= reserve. Fine.
+    addStep('xPayInvoice4', 'running');
+    const inv4Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice4 = String(inv4Resp?.lnInvoice ?? '');
+    const send4Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice4 });
+    const hash4 = String(send4Resp?.txid ?? '');
+    const pay4Deadline = Date.now() + 60000;
+    while (Date.now() < pay4Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash4);
+      console.log(`[xPay] inv4 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice4 payment failed: ${hash4}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice4', 'success', { paymentHash: hash4, assetAmount: 50 });
+
+    // Cooperative close: A=400(off-chain)+550(channel)=950, B=50
+    addStep('xPayCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(channelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('xPayCloseChannel', 'success', { channelId });
+
+    // Wait for settled balances: A=950, B=50
+    addStep('xPayWaitBalances', 'running');
+    const balDeadlineA = Date.now() + 70000;
+    let lastSpendableA = -1;
+    while (Date.now() < balDeadlineA) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableA = Number(b?.spendable ?? -1);
+        console.log(`[xPay] waitBal nodeA spendable=${lastSpendableA} expected=950`);
+        if (lastSpendableA === 950) break;
+      } catch (e: any) { console.warn(`[xPay] waitBal nodeA: ${e?.message}`); }
+      try { await nodeA.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableA !== 950) throw new Error(`nodeA balance did not reach 950, last=${lastSpendableA}`);
+
+    const balDeadlineB = Date.now() + 70000;
+    let lastSpendableB = -1;
+    while (Date.now() < balDeadlineB) {
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableB = Number(b?.spendable ?? -1);
+        console.log(`[xPay] waitBal nodeB spendable=${lastSpendableB} expected=50`);
+        if (lastSpendableB === 50) break;
+      } catch (e: any) { console.warn(`[xPay] waitBal nodeB: ${e?.message}`); }
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableB !== 50) throw new Error(`nodeB balance did not reach 50, last=${lastSpendableB}`);
+    addStep('xPayWaitBalances', 'success', { expectedA: 950, expectedB: 50 });
+
+    // TODO iteration 2: RGB on-chain sends to nodeC (A sends 925, B sends 25 → A=25, B=25, C=950)
+    // addStep('xPayRgbSendA', 'running');
+    // const invC1 = await nodeC.blindReceive({ minConfirmations: 1 });
+    // await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeC.syncWallet();
+    // await nodeC.refreshWallet();
+    // await nodeC.refreshWallet();
+    // await nodeA.refreshWallet();
+    // addStep('xPayRgbSendA', 'success', { amount: 925, recipientId: invC1.recipientId.substring(0, 20) + '...' });
+
+    // addStep('xPayRgbSendB', 'running');
+    // const invC2 = await nodeC.blindReceive({ minConfirmations: 1 });
+    // await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeC.syncWallet();
+    // await nodeC.refreshWallet();
+    // await nodeC.refreshWallet();
+    // await nodeB.refreshWallet();
+    // addStep('xPayRgbSendB', 'success', { amount: 25, recipientId: invC2.recipientId.substring(0, 20) + '...' });
+
+    // TODO iteration 2: Final balances: A=25, B=25, C=950
+    // addStep('xPayFinalBalances', 'running');
+    // const [finalA, finalB, finalC] = await Promise.all([
+    //   nodeA.getAssetBalance(assetId),
+    //   nodeB.getAssetBalance(assetId),
+    //   nodeC.getAssetBalance(assetId),
+    // ]);
+    // addStep('xPayFinalBalances', 'success', {
+    //   spendableA: finalA?.spendable ?? null,
+    //   spendableB: finalB?.spendable ?? null,
+    //   spendableC: finalC?.spendable ?? null,
+    // });
 
     results.success = true;
     return results;
