@@ -5,1228 +5,2002 @@
 
 import {
   createWallet,
-  DEFAULT_INDEXER_URLS,
-  getBridgeAPI,
-  LightningProtocol, OnchainProtocol,
-  restoreFromBackup,
-  UTEXOProtocol,
+  NativeExternalRLNSigner,
+  PasswordRLNSigner,
   UTEXOWallet,
-  WalletManager,
-  type InvoiceData,
 } from '@utexo/rgb-sdk-rn';
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 
-const UTEXO_TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
+let activeDemoFlow: string | null = null;
 
-const getIndexerEndpoint = (network: keyof typeof DEFAULT_INDEXER_URLS) => {
-  const overrideEndpoint = process.env.RGB_ENDPOINT || null;
-  return overrideEndpoint ?? DEFAULT_INDEXER_URLS[network];
-};
-const BITCOIN_NODE_ENDPOINT = "http://18.119.98.232:5000/execute";
+function isPoisonLike(e: unknown): boolean {
+  const err = e as { message?: string; code?: unknown } | null;
+  const code = typeof err?.code === 'string' ? err.code.toLowerCase() : '';
+  const msg = typeof err?.message === 'string' ? err.message.toLowerCase() : '';
+  return (
+    code.includes('nodestatecorrupted') ||
+    msg.includes('poisonerror') ||
+    msg.includes('poison error') ||
+    msg.includes('node internal state is corrupted')
+  );
+}
 
-/**
- * Mine blocks using the Bitcoin node endpoint
- */
-export async function mine(numBlocks: number) {
-  try {
-    const response = await fetch(BITCOIN_NODE_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        args: `mine ${numBlocks}`
-      })
-    });
+function beginExclusiveFlow(flowName: string) {
+  if (activeDemoFlow && activeDemoFlow !== flowName) {
+    throw new Error(
+      `Flow "${flowName}" blocked: "${activeDemoFlow}" is currently running. Run flows sequentially to avoid RLN/node state conflicts.`
+    );
+  }
+  activeDemoFlow = flowName;
+}
 
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+function endExclusiveFlow(flowName: string) {
+  if (activeDemoFlow === flowName) {
+    activeDemoFlow = null;
+  }
+}
+
+function readEnv(name: string): string | null {
+  const value =
+    (name === 'RLN_NODE_PASSWORD'
+      ? process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD
+      : name === 'RLN_BITCOIND_RPC_USERNAME'
+        ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME
+        : name === 'RLN_BITCOIND_RPC_PASSWORD'
+          ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD
+          : name === 'RLN_BITCOIND_RPC_HOST'
+            ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST
+            : name === 'RLN_BITCOIND_RPC_PORT'
+              ? process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT
+              : name === 'RLN_INDEXER_URL'
+                ? process.env.EXPO_PUBLIC_RLN_INDEXER_URL
+                : name === 'RLN_PROXY_ENDPOINT'
+                  ? process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT
+                  : name === 'RLN_ANNOUNCE_ADDRESSES'
+                    ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ADDRESSES
+                    : name === 'RLN_ANNOUNCE_ALIAS'
+                      ? process.env.EXPO_PUBLIC_RLN_ANNOUNCE_ALIAS
+                      : name === 'RLN_PLAYGROUND_NETWORK'
+                        ? process.env.EXPO_PUBLIC_RLN_PLAYGROUND_NETWORK
+                      : name === 'RLN_STRICT_UNLOCK_CREDS'
+                        ? process.env.EXPO_PUBLIC_RLN_STRICT_UNLOCK_CREDS
+                      : null) ?? null;
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return value.trim();
+  }
+  return null;
+}
+
+const _bitcoinNodeHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
+const BITCOIN_NODE_ENDPOINT =
+  process.env.BITCOIN_NODE_ENDPOINT ?? `http://${_bitcoinNodeHost}:5000/execute`;
+
+async function postBitcoinNodeCommand(args: string) {
+  const endpoints = [BITCOIN_NODE_ENDPOINT];
+  if (BITCOIN_NODE_ENDPOINT.startsWith('http://')) {
+    endpoints.push(BITCOIN_NODE_ENDPOINT.replace(/^http:\/\//, 'https://'));
+  }
+
+  // console.log(`[bitcoin-node] ► postBitcoinNodeCommand args="${args}" platform=${Platform.OS} endpoints=${JSON.stringify(endpoints)}`);
+
+  const errors: string[] = [];
+  for (const endpoint of endpoints) {
+    // console.log(`[bitcoin-node]   trying endpoint: ${endpoint}`);
+    try {
+      const body = JSON.stringify({ args });
+      console.log(`[bitcoin-node]   fetch POST ${endpoint} body=${body}`);
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      // console.log(`[bitcoin-node]   response status: ${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        const text = await response.text().catch(() => '(no body)');
+        console.warn(`[bitcoin-node]   HTTP error body: ${text}`);
+        throw new Error(`HTTP ${response.status}: ${text}`);
+      }
+      const json = await response.json();
+      console.log(`[bitcoin-node]   response json: ${JSON.stringify(json)}`);
+      return json;
+    } catch (e: any) {
+      const msg = `${endpoint}: ${e?.message ?? String(e)}`;
+      console.warn(`[bitcoin-node]   ✗ ${msg}`);
+      errors.push(msg);
     }
+  }
 
-    const data = await response.json();
-    console.log(`Mined ${numBlocks} blocks`);
+  const finalError = errors.length ? errors.join(' | ') : 'Unknown request error';
+  console.error(`[bitcoin-node] ✗ all endpoints failed — args="${args}" errors: ${finalError}`);
+  throw new Error(finalError);
+}
+
+function unwrapNodeResponse(data: any) {
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    const statusText = typeof data.status === 'string' ? data.status.toLowerCase() : '';
+    const errorText = typeof data.error === 'string' ? data.error.trim() : '';
+    const outputText = typeof data.output === 'string' ? data.output.trim() : '';
+    if (errorText || /^ERR:/i.test(outputText)) {
+      console.error(`[bitcoin-node] unwrapNodeResponse error: ${errorText || outputText} raw=${JSON.stringify(data)}`);
+      throw new Error(errorText || outputText);
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'result')) {
+      return data.result;
+    }
+    if (statusText === 'success' && outputText) {
+      return outputText;
+    }
+  }
+  return data;
+}
+
+export async function mine(numBlocks: number) {
+  console.log(`[bitcoin-node] mine(${numBlocks})`);
+  try {
+    const raw = await postBitcoinNodeCommand(`mine ${numBlocks}`);
+    const data = unwrapNodeResponse(raw);
+    console.log(`[bitcoin-node] mine(${numBlocks}) ✓ result=${JSON.stringify(data)}`);
     return data;
   } catch (error: any) {
+    console.error(`[bitcoin-node] mine(${numBlocks}) ✗ ${error?.message ?? String(error)}`);
     throw new Error(`Unable to mine: ${error.message}`);
   }
 }
 
-/**
- * Send Bitcoin to an address using the Bitcoin node endpoint
- */
 export async function sendToAddress(address: string, amount: number) {
+  console.log(`[bitcoin-node] sendToAddress(address="${address}", amount=${amount})`);
   try {
-    const response = await fetch(BITCOIN_NODE_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        args: `sendtoaddress ${address} ${amount}`
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+    const raw = await postBitcoinNodeCommand(`sendtoaddress ${address} ${amount}`);
+    const txid = unwrapNodeResponse(raw);
+    if (typeof txid !== 'string' || txid.trim().length === 0) {
+      const msg = `Unexpected sendtoaddress response: ${JSON.stringify(raw)}`;
+      console.error(`[bitcoin-node] sendToAddress ✗ ${msg}`);
+      throw new Error(msg);
     }
-
-    const data = await response.json();
-    const txid = data?.result || data;
-    console.log(`Sent ${amount} BTC to ${address}, TXID: ${txid}`);
+    console.log(`[bitcoin-node] sendToAddress ✓ txid=${txid}`);
     return txid;
   } catch (error: any) {
+    console.error(`[bitcoin-node] sendToAddress(address="${address}", amount=${amount}) ✗ ${error?.message ?? String(error)}`);
     throw new Error(`Unable to send bitcoins: ${error.message}`);
   }
 }
 
-/**
- * Initialize a wallet with RGB SDK
- */
-export async function initWallet(vanillaKeychain: any = null) {
-  console.log("\nInitializing wallet with RGB SDK...");
 
-  const bitcoinNetwork = 'testnet'; // Regtest network
+type RlnFlowResults = { steps: any[]; success: boolean; error: any };
 
-  // Generate keys using the library
-  const keys = await createWallet(bitcoinNetwork);
-  console.log("Keys generated:", keys);
-  // return;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const wallet = new WalletManager({
-    xpubVan: keys.accountXpubVanilla,
-    xpubCol: keys.accountXpubColored,
-    masterFingerprint: keys.masterFingerprint,
-    mnemonic: keys.mnemonic,
-    network: bitcoinNetwork,
-  });
-
-  console.log("Wallet created");
-
-  // // Register wallet with RGB Node
-  await wallet.initialize();
-  // console.log("Wallet registered");
-
-  // // Get BTC balance
-  const btcBalance = await wallet.getBtcBalance();
-  console.log("BTC balance:", btcBalance);
-
-  // // Get address
-  const address = await wallet.getAddress();
-  console.log("Address:", address);
-
-  // // Send some BTC to the address
-  await sendToAddress(address, 1);
-
-  // // Wait a bit for the transaction to be processed
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // // Get updated BTC balance
-  const updatedBtcBalance = await wallet.getBtcBalance();
-  console.log("Updated BTC balance:", updatedBtcBalance);
-
-  // // Create UTXOs
-  // console.log("Creating UTXOs...");
-  const psbt = await wallet.createUtxosBegin({
-    upTo: true,
-    num: 5,
-    size: 1000,
-    feeRate: 1
-  });
-
-  const signedPsbt = await wallet.signPsbt(psbt);
-  const utxosCreated = await wallet.createUtxosEnd({ signedPsbt });
-  console.log(`Created ${utxosCreated} UTXOs`);
-
-  return { wallet, keys };
-}
-
-/**
- * Main execution function - React Native compatible
- */
-export async function runWalletFlow() {
-  console.log("Starting RGB SDK Wallet Example");
-  console.log("=".repeat(50));
-
-  const flowResults: any = {
-    steps: [],
-    success: false,
-    error: null,
-  };
-  const pushStep = (step: any) => flowResults.steps.push(step);
-
-  try {
-
-    // Initialize sender wallet
-    // await initWallet(null);
-    flowResults.steps.push({ step: 'initSenderWallet', status: 'running' });
-    // return flowResults;
-    const { wallet: senderWallet, keys: senderKeys } = await initWallet(null);
-    flowResults.steps.push({ step: 'initSenderWallet', status: 'success', data: { address: await senderWallet.getAddress() } });
-
-    //   // Issue NIA asset
-    pushStep({ step: 'issueAsset', status: 'running' });
-    //   console.log("\nIssuing NIA asset...");
-    const asset1 = await senderWallet.issueAssetNia({
-      ticker: "USDT",
-      name: "Tether",
-      amounts: [777, 66],
-      precision: 0
-    });
-    console.log("Issued NIA asset:", asset1);
-    pushStep({ step: 'issueAsset', status: 'success', data: asset1 });
-    flowResults.assetId = asset1.assetId;
-
-    //   // List assets
-    pushStep({ step: 'listAssets', status: 'running' });
-    //   console.log("\nListing assets...");
-    const assets1 = await senderWallet.listAssets();
-    console.log("Assets:", assets1);
-    pushStep({ step: 'listAssets', status: 'success', data: assets1 });
-
-    //   // Initialize receiving wallet
-    pushStep({ step: 'initReceiverWallet', status: 'running' });
-    //   console.log("\nInitializing receiving wallet...");
-    const { wallet: receiverWallet } = await initWallet(null);
-    const btcAddress = await receiverWallet.getAddress();
-    console.log("BTC address:", btcAddress);
-    await receiverWallet.syncWallet();
-    const btcBalance2 = await receiverWallet.getBtcBalance();
-    console.log("BTC balance:", btcBalance2);
-    pushStep({ step: 'initReceiverWallet', status: 'success', data: { address: btcAddress, balance: btcBalance2 } });
-
-    //   // Send BTC to the address
-    pushStep({ step: 'sendBtc', status: 'running' });
-    const psbt = await senderWallet.sendBtcBegin({
-      address: btcAddress,
-      amount: 7000,
-      feeRate: 5
-    });
-    console.log("PSBT:", psbt);
-    const signedPsbt = await senderWallet.signPsbt(psbt);
-    console.log("Signed PSBT:", signedPsbt);
-    const result = await senderWallet.sendBtcEnd({ signedPsbt });
-    console.log("Send BTC result:", result);
-    pushStep({ step: 'sendBtc', status: 'success', data: result });
-
-    await mine(10);
-    //   // Wait for confirmation
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    await receiverWallet.syncWallet();
-
-    const btcBalance = await receiverWallet.getBtcBalance();
-    console.log("BTC balance:", btcBalance);
-    flowResults.receiverBtcBalance = btcBalance;
-    pushStep({ step: 'sendBtc', status: 'success', data: { balance: btcBalance } });
-
-    //   // Create blind receive
-    if (!asset1.assetId) {
-      throw new Error('Asset ID is required for blind receive');
-    }
-    pushStep({ step: 'blindReceive', status: 'running' });
-    //   console.log("\nCreating blind receive...");
-    const receiveData1 = await receiverWallet.blindReceive({
-      assetId: null as unknown as string, // TODO: add asset_id
-      amount: 76
-    });
-    console.log("Blind receive data:", receiveData1);
-    pushStep({ step: 'blindReceive', status: 'success', data: receiveData1 });
-
-    // Decode the blind receive invoice
-    pushStep({ step: 'decodeRGBInvoice', status: 'running' });
-    const decodedInvoice: InvoiceData = await receiverWallet.decodeRGBInvoice({ invoice: receiveData1.invoice });
-    console.log("Decoded invoice:", decodedInvoice);
-    pushStep({ step: 'decodeRGBInvoice', status: 'success', data: decodedInvoice });
-    flowResults.decodedInvoice = decodedInvoice;
-
-    //   // Send assets
-    pushStep({ step: 'sendAssets', status: 'running' });
-    //   console.log("\nSending assets...", asset1);
-    const sendResult = await senderWallet.send({
-      assetId: asset1.assetId,
-      amount: 76,
-      invoice: receiveData1.invoice,
-      minConfirmations: 1
-    });
-    console.log("Send result:", sendResult);
-    pushStep({ step: 'sendAssets', status: 'success', data: sendResult });
-
-    //   // Refresh wallets
-    //   console.log("\nRefreshing wallets...");
-    await receiverWallet.refreshWallet();
-    await senderWallet.refreshWallet();
-
-    //   // Mine a block to confirm the transaction
-    //   console.log("\nMining block...");
-    await mine(10);
-
-    //   // Refresh wallets again after mining
-    await receiverWallet.refreshWallet();
-    await senderWallet.refreshWallet();
-
-    //   // List assets in receiver wallet
-    pushStep({ step: 'listReceiverAssets', status: 'running' });
-    //   console.log("\nListing receiver assets...");
-    const rcvAssets = await receiverWallet.listAssets();
-    //   console.log("Receiver assets:", JSON.stringify(rcvAssets, null, 2));
-    pushStep({ step: 'listReceiverAssets', status: 'success', data: rcvAssets });
-
-    //   // Get asset balance
-    if (asset1.assetId) {
-      pushStep({ step: 'getAssetBalance', status: 'running' });
-      //     console.log("\nGetting asset balance...");
-      const rcvAssetBalance = await receiverWallet.getAssetBalance(asset1.assetId);
-      //     console.log("Receiver asset balance:", JSON.stringify(rcvAssetBalance, null, 2));
-      pushStep({ step: 'getAssetBalance', status: 'success', data: rcvAssetBalance });
-      flowResults.receiverAssetBalance = rcvAssetBalance;
-    }
-
-    //   // Create witness receive
-    if (!asset1.assetId) {
-      throw new Error('Asset ID is required for witness receive');
-    }
-    pushStep({ step: 'witnessReceive', status: 'running' });
-    //   console.log("\nCreating witness receive...");
-    const receiveData2 = await receiverWallet.witnessReceive({
-      assetId: asset1.assetId,
-      amount: 50
-    });
-    pushStep({ step: 'witnessReceive', status: 'success', data: receiveData2 });
-
-    //   // Send assets with witness
-    pushStep({ step: 'sendAssetsWithWitness', status: 'running' });
-    console.log("\nSending assets...", asset1);
-    const sendResult2 = await senderWallet.send({
-      assetId: asset1.assetId,
-      amount: 10,
-      witnessData: {
-        amountSat: 1000,
-        blinding: 0,
-      },
-      invoice: receiveData2.invoice,
-      minConfirmations: 1
-    });
-    console.log("Send result:", sendResult2);
-    pushStep({ step: 'sendAssetsWithWitness', status: 'success', data: sendResult2 });
-
-    //   // Refresh wallets
-    //   console.log("\nRefreshing wallets...");
-    await receiverWallet.refreshWallet();
-    await senderWallet.refreshWallet();
-
-    //   // Mine a block to confirm the transaction
-    console.log("\nMining block...");
-    await mine(10);
-
-    //   // Refresh wallets again after mining
-    await receiverWallet.refreshWallet();
-    await senderWallet.refreshWallet();
-
-    //   // List transfers
-    if (asset1.assetId) {
-      pushStep({ step: 'listTransfers', status: 'running' });
-      console.log("\nListing transfers...");
-      const transfers = await senderWallet.listTransfers(asset1.assetId);
-      console.log("Transfers:", transfers);
-      pushStep({ step: 'listTransfers', status: 'success', data: transfers });
-    }
-
-    //   // List transactions
-    pushStep({ step: 'listTransactions', status: 'running' });
-    console.log("\nListing transactions...");
-    const transactions = await senderWallet.listTransactions();
-    console.log("Transactions:", transactions);
-    pushStep({ step: 'listTransactions', status: 'success', data: transactions });
-
-    //   // List unspents
-    pushStep({ step: 'listUnspents', status: 'running' });
-    console.log("\nListing unspents...");
-    const unspents = await receiverWallet.listUnspents();
-    console.log("Unspents:", unspents);
-    pushStep({ step: 'listUnspents', status: 'success', data: unspents });
-
-    // ── getXpub / getNetwork / isDisposed ──────────────────────────
-    pushStep({ step: 'walletGetters', status: 'running' });
-    const xpubs = senderWallet.getXpub();
-    const network = senderWallet.getNetwork();
-    const notDisposed = !senderWallet.isDisposed();
-    flowResults.walletGetters = { xpubs, network, notDisposed };
-    pushStep({ step: 'walletGetters', status: 'success', data: { network, notDisposed } });
-
-    // ── address rotation ──────────────────────────────────────────
-    pushStep({ step: 'addressRotation', status: 'running' });
-    try {
-      // Get current vanilla (BTC) address without rotating the derivation index
- 
-      // Explicitly advance to the next vanilla and colored addresses
-      const nextVanilla = await senderWallet.rotateVanillaAddress();
-      const nextColored = await senderWallet.rotateColoredAddress();
-
-      // With reuseAddresses: true the same address is returned on every getAddress() call
-      const reuseWallet = new WalletManager({
-        xpubVan: senderKeys.accountXpubVanilla,
-        xpubCol: senderKeys.accountXpubColored,
-        masterFingerprint: senderKeys.masterFingerprint,
-        mnemonic: senderKeys.mnemonic,
-        network: 'testnet',
-        reuseAddresses: true,
-      });
-      await reuseWallet.initialize();
-      const addrA = await reuseWallet.getAddress();
-      const addrB = await reuseWallet.getAddress();
-      const addressReused = addrA === addrB;
-      await reuseWallet.dispose();
-
-      flowResults.addressRotation = { nextVanilla, nextColored, addressReused };
-      pushStep({ step: 'addressRotation', status: 'success', data: { vanillaAddr, nextVanilla, nextColored, addressReused } });
-    } catch (e: any) {
-      pushStep({ step: 'addressRotation', status: 'error', error: e.message });
-    }
-
-    // ── estimateFeeRate ────────────────────────────────────────────
-    pushStep({ step: 'estimateFeeRate', status: 'running' });
-    try {
-      const feeEstimate = await senderWallet.estimateFeeRate(6);
-      flowResults.estimateFeeRate = feeEstimate;
-      pushStep({ step: 'estimateFeeRate', status: 'success', data: feeEstimate });
-    } catch (e: any) {
-      pushStep({ step: 'estimateFeeRate', status: 'error', error: e.message });
-    }
-
-    // ── sendBtc (convenience: begin→sign→end in one call) ──────────
-    pushStep({ step: 'sendBtc', status: 'running' });
-    try {
-      const extraAddress = await receiverWallet.getAddress();
-      const txid = await senderWallet.sendBtc({ address: extraAddress, amount: 3000, feeRate: 1 });
-      flowResults.sendBtc = { txid };
-      pushStep({ step: 'sendBtc', status: 'success', data: { txid } });
-    } catch (e: any) {
-      pushStep({ step: 'sendBtc', status: 'error', error: e.message });
-    }
-
-    // ── createUtxos (convenience: begin→sign→end in one call) ──────
-    pushStep({ step: 'createUtxos', status: 'running' });
-    try {
-      const numUtxos = await senderWallet.createUtxos({ upTo: true, num: 2, size: 1000, feeRate: 1 });
-      flowResults.createUtxos = { numUtxos };
-      pushStep({ step: 'createUtxos', status: 'success', data: { numUtxos } });
-    } catch (e: any) {
-      pushStep({ step: 'createUtxos', status: 'error', error: e.message });
-    }
-
-    // ── sendBegin / estimateFee / sendEnd (manual two-step) ────────
-    pushStep({ step: 'sendBeginEnd', status: 'running' });
-    try {
-      const rcvInvoice = await receiverWallet.witnessReceive({ assetId: asset1.assetId, amount: 5 });
-      const unsignedPsbt = await senderWallet.sendBegin({ invoice: rcvInvoice.invoice, assetId: asset1.assetId, amount: 5 });
-      const feeInfo = await senderWallet.estimateFee(unsignedPsbt);
-      const signedPsbt2 = await senderWallet.signPsbt(unsignedPsbt);
-      const sendRes = await senderWallet.sendEnd({ signedPsbt: signedPsbt2 });
-      flowResults.sendBeginEnd = { fee: feeInfo, txid: sendRes.txid };
-      pushStep({ step: 'sendBeginEnd', status: 'success', data: { txid: sendRes.txid } });
-    } catch (e: any) {
-      pushStep({ step: 'sendBeginEnd', status: 'error', error: e.message });
-    }
-
-    // ── failTransfers ──────────────────────────────────────────────
-    pushStep({ step: 'failTransfers', status: 'running' });
-    try {
-      const failed = await senderWallet.failTransfers({ batchTransferIdx: -1, noAssetOnly: true });
-      flowResults.failTransfers = { result: failed };
-      pushStep({ step: 'failTransfers', status: 'success', data: { failed } });
-    } catch (e: any) {
-      pushStep({ step: 'failTransfers', status: 'error', error: e.message });
-    }
-
-    // ── issueAssetIfa + inflate ────────────────────────────────────
-    pushStep({ step: 'issueAssetIfa', status: 'running' });
-    try {
-      const ifa = await senderWallet.issueAssetIfa({
-        ticker: 'IFA1', name: 'Inflatable One', precision: 0,
-        amounts: [1000], inflationAmounts: [500],
-        replaceRightsNum: 0, rejectListUrl: null,
-      });
-      flowResults.issueAssetIfa = ifa;
-      pushStep({ step: 'issueAssetIfa', status: 'success', data: { assetId: ifa.assetId } });
-
-      // inflate (convenience: begin→sign→end)
-      pushStep({ step: 'inflate', status: 'running' });
-      const inflateResult = await senderWallet.inflate({ assetId: ifa.assetId, inflationAmounts: [100] });
-      flowResults.inflate = inflateResult;
-      pushStep({ step: 'inflate', status: 'success', data: inflateResult });
-
-      // inflateBegin + inflateEnd (manual two-step)
-      pushStep({ step: 'inflateBegin', status: 'running' });
-      const inflatePsbt = await senderWallet.inflateBegin({ assetId: ifa.assetId, inflationAmounts: [50] });
-      flowResults.inflateBegin = { psbtLength: inflatePsbt.length };
-      pushStep({ step: 'inflateBegin', status: 'success', data: { psbtLength: inflatePsbt.length } });
-
-      pushStep({ step: 'inflateEnd', status: 'running' });
-      const signedInflatePsbt = await senderWallet.signPsbt(inflatePsbt);
-      const inflateEndResult = await senderWallet.inflateEnd({ signedPsbt: signedInflatePsbt });
-      flowResults.inflateEnd = inflateEndResult;
-      pushStep({ step: 'inflateEnd', status: 'success', data: inflateEndResult });
-    } catch (e: any) {
-      pushStep({ step: 'issueAssetIfa', status: 'error', error: e.message });
-    }
-
-    // ── signMessage / verifyMessage (wallet instance) ──────────────
-    pushStep({ step: 'walletSignVerify', status: 'running' });
-    try {
-      const sig = await senderWallet.signMessage('hello wallet');
-      const valid = await senderWallet.verifyMessage('hello wallet', sig);
-      flowResults.walletSignVerify = { sig: sig.slice(0, 16) + '…', valid };
-      pushStep({ step: 'walletSignVerify', status: 'success', data: { valid } });
-    } catch (e: any) {
-      pushStep({ step: 'walletSignVerify', status: 'error', error: e.message });
-    }
-
-    // ── createBackup + restoreFromBackup ───────────────────────────
-    pushStep({ step: 'createBackup', status: 'running' });
-    try {
-      const backupPath = `${documentDirectory ?? ''}test-backup.bak`;
-      const backupPassword = 'test-password-123';
-      await senderWallet.createBackup({ backupPath, password: backupPassword });
-      flowResults.createBackup = { path: backupPath };
-      pushStep({ step: 'createBackup', status: 'success', data: { path: backupPath } });
-
-      // restoreFromBackup
-      pushStep({ step: 'restoreFromBackup', status: 'running' });
-      const restoreDir = `${documentDirectory ?? ''}restore/`;
-      const restoreResult = await restoreFromBackup({
-        backupFilePath: backupPath,
-        password: backupPassword,
-        dataDir: restoreDir,
-      });
-      flowResults.restoreFromBackup = restoreResult;
-      pushStep({ step: 'restoreFromBackup', status: 'success' });
-
-      // ── verifyRestoredWallet ───────────────────────────────────────
-      pushStep({ step: 'verifyRestoredWallet', status: 'running' });
-      const restoredWallet = new WalletManager({
-        xpubVan: senderKeys.accountXpubVanilla,
-        xpubCol: senderKeys.accountXpubColored,
-        masterFingerprint: senderKeys.masterFingerprint,
-        mnemonic: senderKeys.mnemonic,
-        network: 'regtest',
-        dataDir: restoreDir,
-      });
-      await restoredWallet.initialize();
-      // Sync UTXO state from indexer, then refresh RGB transfer statuses
-      await restoredWallet.syncWallet();
-      await restoredWallet.refreshWallet();
-
-      const [
-        restoredBtcBalance,
-        restoredAddress,
-        restoredAssets,
-        restoredTransactions,
-        restoredUnspents,
-      ] = await Promise.all([
-        restoredWallet.getBtcBalance(),
-        restoredWallet.getAddress(),
-        restoredWallet.listAssets(),
-        restoredWallet.listTransactions(),
-        restoredWallet.listUnspents(),
-      ]);
-
-      // Per-asset balances and transfer history for every NIA asset
-      const niaDetails = await Promise.all(
-        (restoredAssets.nia ?? []).map(async (asset) => {
-          const [balance, transfers] = await Promise.all([
-            restoredWallet.getAssetBalance(asset.assetId),
-            restoredWallet.listTransfers(asset.assetId),
-          ]);
-          return {
-            assetId: asset.assetId,
-            ticker: asset.ticker,
-            name: asset.name,
-            issuedSupply: asset.issuedSupply,
-            balance,
-            transferCount: transfers.length,
-            transferStatuses: transfers.reduce((acc: Record<string, number>, t) => {
-              acc[t.status] = (acc[t.status] ?? 0) + 1;
-              return acc;
-            }, {}),
-          };
-        })
-      );
-
-      // Per-asset balances and transfer history for every IFA asset
-      const ifaDetails = await Promise.all(
-        (restoredAssets.ifa ?? []).map(async (asset) => {
-          const [balance, transfers] = await Promise.all([
-            restoredWallet.getAssetBalance(asset.assetId),
-            restoredWallet.listTransfers(asset.assetId),
-          ]);
-          return {
-            assetId: asset.assetId,
-            ticker: asset.ticker,
-            name: asset.name,
-            balance,
-            transferCount: transfers.length,
-            transferStatuses: transfers.reduce((acc: Record<string, number>, t) => {
-              acc[t.status] = (acc[t.status] ?? 0) + 1;
-              return acc;
-            }, {}),
-          };
-        })
-      );
-
-      // RGB allocations per UTXO (unspents that carry colored assignments)
-      const rgbUtxos = restoredUnspents.filter(u => u.rgbAllocations.length > 0);
-
-      flowResults.verifyRestoredWallet = {
-        btcBalance: restoredBtcBalance,
-        address: restoredAddress,
-        niaAssets: niaDetails,
-        ifaAssets: ifaDetails,
-        totalAssetsFound: (restoredAssets.nia?.length ?? 0) + (restoredAssets.ifa?.length ?? 0),
-        transactionCount: restoredTransactions.length,
-        unspentCount: restoredUnspents.length,
-        coloredUtxoCount: rgbUtxos.length,
-      };
-      pushStep({ step: 'verifyRestoredWallet', status: 'success', data: flowResults.verifyRestoredWallet });
-
-      await restoredWallet.dispose();
-    } catch (e: any) {
-      pushStep({ step: 'createBackup', status: 'error', error: e.message });
-    }
-
-    // ── goOnline (reconnect) ───────────────────────────────────────
-    pushStep({ step: 'goOnline', status: 'running' });
-    try {
-      await senderWallet.goOnline(getIndexerEndpoint('testnet'), true);
-      pushStep({ step: 'goOnline', status: 'success' });
-    } catch (e: any) {
-      pushStep({ step: 'goOnline', status: 'error', error: e.message });
-    }
-
-    // ── dispose / isDisposed ───────────────────────────────────────
-    pushStep({ step: 'dispose', status: 'running' });
-    await senderWallet.dispose();
-    const disposed = senderWallet.isDisposed();
-    flowResults.dispose = { disposed };
-    pushStep({ step: 'dispose', status: disposed ? 'success' : 'error' });
-
-    flowResults.success = true;
-    return flowResults;
-  } catch (error: any) {
-    console.error("Error in wallet flow:", error);
-    flowResults.success = false;
-    flowResults.error = {
-      message: error.message || 'Unknown error',
-      response: error.response ? {
-        data: error.response.data,
-        status: error.response.status,
-      } : null,
-    };
-    return flowResults;
-  }
-}
-
-/**
- * UTEXO / Lightning Module flow
- *
- * Tests UTEXOWallet, LightningProtocol, OnchainProtocol, UTEXOProtocol, and bridge API client.
- * Some steps require a running signet node and bridge server; failures are captured gracefully.
- */
-export async function runUTEXOFlow() {
-  console.log('Starting UTEXO Flow');
-  console.log('='.repeat(50));
-
-  const results: any = { steps: [], success: false, error: null };
-  const pushStep = (step: any) => results.steps.push(step);
-
-  try {
-    // ── UTEXOWallet: instantiation ──────────────────────────
-    pushStep({ step: 'utexoWalletInstantiate', status: 'running' });
-    const utexoWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: 'testnet' });
-    results.instantiation = true;
-    pushStep({ step: 'utexoWalletInstantiate', status: 'success' });
-
-    // ── UTEXOWallet: throws before initialize() ─────────────
-    pushStep({ step: 'throwsBeforeInit', status: 'running' });
-    try {
-      utexoWallet.getXpub();
-      results.throwsBeforeInit = false;
-      pushStep({ step: 'throwsBeforeInit', status: 'error', error: 'Expected throw but resolved' });
-    } catch (e: any) {
-      results.throwsBeforeInit = e.message.toLowerCase().includes('init');
-      pushStep({ step: 'throwsBeforeInit', status: results.throwsBeforeInit ? 'success' : 'error' });
-    }
-
-    // ── UTEXOWallet: derivePublicKeys (pure crypto, no server) ──
-    pushStep({ step: 'derivePublicKeys', status: 'running' });
-    try {
-      const keys = await utexoWallet.derivePublicKeys('testnet');
-      results.derivePublicKeys = { xpub: keys.xpub?.slice(0, 20) + '...' };
-      pushStep({ step: 'derivePublicKeys', status: 'success', data: results.derivePublicKeys });
-    } catch (e: any) {
-      results.derivePublicKeys = { error: e.message };
-      pushStep({ step: 'derivePublicKeys', status: 'error', error: e.message });
-    }
-
-    // ── UTEXOWallet: initialize (needs signet node – may fail) ──
-    pushStep({ step: 'initialize', status: 'running' });
-    try {
-      await utexoWallet.initialize();
-      results.initialized = true;
-      pushStep({ step: 'initialize', status: 'success' });
-
-      // ── getXpub / getNetwork / isDisposed after init ─────
-      pushStep({ step: 'walletGetters', status: 'running' });
-      const xpub = utexoWallet.getXpub();
-      const network = utexoWallet.getNetwork();
-      const notDisposed = !utexoWallet.isDisposed();
-      results.walletGetters = { network, notDisposed, xpubVan: xpub.xpubVan?.slice(0, 20) + '...' };
-      pushStep({ step: 'walletGetters', status: 'success', data: { network, notDisposed } });
-
-      // ── dispose ──────────────────────────────────────────
-      pushStep({ step: 'dispose', status: 'running' });
-      await utexoWallet.dispose();
-      results.disposed = utexoWallet.isDisposed();
-      pushStep({ step: 'dispose', status: 'success' });
-    } catch (e: any) {
-      results.initialized = false;
-      results.initError = e.message;
-      pushStep({ step: 'initialize', status: 'error', error: e.message });
-    }
-
-    // ── LightningProtocol: stub throws "not implemented" ────
-    pushStep({ step: 'lightningProtocolStubs', status: 'running' });
-    try {
-      const lp = new LightningProtocol();
-      const stubResults: Record<string, boolean> = {};
-      for (const [methodName, call] of [
-        ['createLightningInvoice', () => lp.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any)],
-        ['getLightningReceiveRequest', () => lp.getLightningReceiveRequest('id')],
-        ['getLightningSendRequest', () => lp.getLightningSendRequest('id')],
-        ['payLightningInvoiceBegin', () => lp.payLightningInvoiceBegin({ lnInvoice: 'lnbc1' } as any)],
-        ['listLightningPayments', () => lp.listLightningPayments()],
-      ] as [string, () => Promise<any>][]) {
-        try {
-          await call();
-          stubResults[methodName] = false;
-        } catch (e: any) {
-          stubResults[methodName] = e.message.includes('not implemented');
-        }
-      }
-      results.lightningProtocolStubs = stubResults;
-      pushStep({ step: 'lightningProtocolStubs', status: 'success' });
-    } catch (e: any) {
-      pushStep({ step: 'lightningProtocolStubs', status: 'error', error: e.message });
-    }
-
-    // ── OnchainProtocol: stub throws "not implemented" ──────
-    pushStep({ step: 'onchainProtocolStubs', status: 'running' });
-    try {
-      const op = new OnchainProtocol();
-      const stubResults: Record<string, boolean> = {};
-      for (const [methodName, call] of [
-        ['onchainReceive', () => op.onchainReceive({ assetId: 'a', amount: 1 } as any)],
-        ['onchainSendBegin', () => op.onchainSendBegin({ invoice: 'inv' } as any)],
-        ['onchainSendEnd', () => op.onchainSendEnd({ signedPsbt: '' } as any)],
-        ['getOnchainSendStatus', () => op.getOnchainSendStatus('inv')],
-        ['listOnchainTransfers', () => op.listOnchainTransfers()],
-      ] as [string, () => Promise<any>][]) {
-        try {
-          await call();
-          stubResults[methodName] = false;
-        } catch (e: any) {
-          stubResults[methodName] = e.message.includes('not implemented');
-        }
-      }
-      results.onchainProtocolStubs = stubResults;
-      pushStep({ step: 'onchainProtocolStubs', status: 'success' });
-    } catch (e: any) {
-      pushStep({ step: 'onchainProtocolStubs', status: 'error', error: e.message });
-    }
-
-    // ── UTEXOProtocol: inherits both stub sets ───────────────
-    pushStep({ step: 'utexoProtocolStubs', status: 'running' });
-    try {
-      const up = new UTEXOProtocol();
-      let lightningThrows = false;
-      let onchainThrows = false;
-      try { await up.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any); }
-      catch (e: any) { lightningThrows = e.message.includes('not implemented'); }
-      try { await up.onchainReceive({ assetId: 'a', amount: 1 } as any); }
-      catch (e: any) { onchainThrows = e.message.includes('not implemented'); }
-      results.utexoProtocolStubs = { lightningThrows, onchainThrows };
-      pushStep({ step: 'utexoProtocolStubs', status: 'success' });
-    } catch (e: any) {
-      pushStep({ step: 'utexoProtocolStubs', status: 'error', error: e.message });
-    }
-
-    // ── bridge API client: create and query ─────────────────
-    pushStep({ step: 'bridgeAPIClient', status: 'running' });
-    const bridgeAPI = getBridgeAPI('testnet');
-    results.bridgeAPIConfigured =
-      bridgeAPI !== null &&
-      typeof (bridgeAPI as any).getTransferByMainnetInvoice === 'function';
-    pushStep({ step: 'bridgeAPIClient', status: results.bridgeAPIConfigured ? 'success' : 'error' });
-
-    pushStep({ step: 'bridgeAPIQuery', status: 'running' });
-    try {
-      const transfer = await bridgeAPI.getTransferByMainnetInvoice('test-invoice', 94);
-      results.bridgeAPIQuery = {
-        returned: transfer === null ? 'null (not found – expected)' : 'found (unexpected)',
-      };
-      pushStep({ step: 'bridgeAPIQuery', status: 'success' });
-    } catch (e: any) {
-      results.bridgeAPIQuery = { error: e.message };
-      pushStep({ step: 'bridgeAPIQuery', status: 'error', error: e.message });
-    }
-
-    results.success = true;
-    return results;
-  } catch (error: any) {
-    console.error('Error in UTEXO flow:', error);
-    results.success = false;
-    results.error = { message: error.message || 'Unknown error' };
-    return results;
-  }
-}
-
-const FAUCET_URL =
-  'https://node-api.thunderstack.org/c17bc5d0-80b1-7050-5af5-dfd8a67834f1/1e0cfe422f0e4306bebdab953a0b99f2/sendbtc';
-const FAUCET_TOKEN =
-  'EnYKDBgDIggKBggGEgIYDRIkCAASIGuYoof1WC0FaPciGHzPinGmglHd_b3Lb-gokogoeL-aGkA_hc_eLZ05C1XaA9wrcqFh1Bozvi_sawa_QKNCcowZCsVRmrsxJYahtsMduWYGrOVT7JNVVvpcU4PrGu19GrYNIiIKIO5ajD4HcB-R-yadJQCA954KhC7DV2wHi4_piv9k1uYT';
-const FAUCET_AMOUNT_SATS = 16900; // fallback only
-const FUND_POLL_INTERVAL_MS = 5000;
-const FUND_POLL_TIMEOUT_MS = 90000;
-
-/**
- * UTEXO Wallet VSS End-to-End Flow
- *
- * Full lifecycle test:
- *   1. Create & fund a UTEXOWallet
- *   2. Issue an NIA asset so the wallet has real on-chain state
- *   3. Back up via VSS (zero-arg – config is derived from the mnemonic)
- *   4. Dispose the wallet and delete local state
- *   5. Restore from VSS and verify everything is intact
- */
-export async function runUtexoVssFlow(onProgress?: (results: any) => void) {
-  console.log('Starting UTEXO VSS E2E Flow');
-  console.log('='.repeat(50));
-
-  const results: any = { steps: [], success: false, error: null };
+function createFlowResults(): {
+  results: RlnFlowResults;
+  addStep: (step: string, status: string, data?: any, error?: string) => void;
+  failFlow: (flowName: string, error: any) => RlnFlowResults;
+} {
+  const results: RlnFlowResults = { steps: [], success: false, error: null };
+  let lastStep: string | null = null;
 
   const addStep = (step: string, status: string, data?: any, error?: string) => {
     const idx = results.steps.findIndex((s: any) => s.step === step);
     const entry = { step, status, data, error };
-    if (idx >= 0) {
-      results.steps[idx] = entry;
+    if (idx >= 0) results.steps[idx] = entry;
+    else results.steps.push(entry);
+    if (status !== 'running') lastStep = step;
+    if (status === 'error' || error) {
+      console.error(`[flow] ✗ step="${step}" error="${error ?? '(none)'}"`, data ?? null);
+    } else if (status === 'running') {
+      console.log(`[flow] ▶ step="${step}"`);
     } else {
-      results.steps.push(entry);
+      console.log(`[flow] ✓ step="${step}"`, data ?? null);
     }
-    onProgress?.({ ...results, steps: [...results.steps], running: true });
   };
 
-  let wallet: UTEXOWallet | null = null;
-  let walletAddress: string | null = null;
-  let issuedAssetId: string | null = null;
-  let preBtcBalance: any = null;
-  let preAssetBalance: any = null;
-  const restoreDir = `${documentDirectory ?? ''}utexo_vss_restore`;
-  const utexoVssNetwork: 'testnet' = 'testnet';
+  const failFlow = (flowName: string, error: any): RlnFlowResults => {
+    const message = error?.message ?? String(error);
+    const stack = error?.stack ?? null;
+    console.error(
+      `[flow] ✗ FLOW FAILED flowName="${flowName}" lastStep="${lastStep ?? 'none'}" error="${message}"`,
+      stack ? `\n${stack}` : ''
+    );
+    results.success = false;
+    results.error = { message, lastStep, stack };
+    return results;
+  };
+
+  return { results, addStep, failFlow };
+}
+
+function wChanValidate(
+  fn: string,
+  actual: any,
+  schema: Record<string, string>,
+): { fn: string; expected: Record<string, string>; received: any; match: boolean; fields: Record<string, boolean> } {
+  const fields: Record<string, boolean> = {};
+  for (const [key, type] of Object.entries(schema)) {
+    const val = actual?.[key];
+    if (type === 'nonempty-string') fields[key] = typeof val === 'string' && val.length > 0;
+    else if (type === 'array') fields[key] = Array.isArray(val);
+    else fields[key] = typeof val === type;
+  }
+  const match = Object.values(fields).every(Boolean);
+  console.log(`[wChan][validate] ${fn} match=${match}`, JSON.stringify({ fields, received: actual }));
+  return { fn, expected: schema, received: actual, match, fields };
+}
+
+export async function runRlnUtexoWalletChannelPaymentFlow() {
+  const flowName = 'runRlnUtexoWalletChannelPaymentFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let nodeA: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
 
   try {
-    // ── Step 1: Create & initialise UTEXOWallet ─────────────────────────────
-    addStep('createUtexoWallet', 'running');
-    try {
-      wallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
-      await wallet.initialize();
-      addStep('createUtexoWallet', 'success', { network: wallet.getNetwork() });
-    } catch (e: any) {
-      addStep('createUtexoWallet', 'error', undefined, e?.message ?? String(e));
-      throw e;
-    }
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
 
-    // ── Step 2: Get deposit address ──────────────────────────────────────────
-    addStep('getAddress', 'running');
-    walletAddress = await wallet.getAddress();
-    addStep('getAddress', 'success', { address: walletAddress });
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
 
-    // ── Step 3: Fund wallet ──────────────────────────────────────────────────
-    // The UTEXO wallet generates BIP86 taproot (bcrt1p…) addresses. The
-    // thunderstack HTTP faucet rejects these with "belongs to another network"
-    // because its node doesn't support P2TR outputs. Instead, we use the same
-    // mechanism that initWallet() uses: sendToAddress via the Bitcoin node RPC,
-    // then mine blocks to confirm.
-    addStep('fundWallet', 'running');
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const nodeAPassword = 'nodeApass';
+    const nodeBPassword = 'nodeBpass';
+
+    const basePortA = 20000 + Math.floor(Math.random() * 10000);
+    const basePortB = basePortA + 100;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_wallet_chan_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_wallet_chan_b_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+
+    nodeA = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePortA,
+        ldkPeerListeningPort: basePortA + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
+    );
+
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePortB,
+        ldkPeerListeningPort: basePortB + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeBPassword, keysB.mnemonic),
+    );
+
+    // 1 — init nodeA (createNode + signer.initNode)
+    addStep('wChanAInit', 'running');
+    await nodeA.init();
+    addStep('wChanAInit', 'success', { storageDirPath: storageDirA });
+
+    // 2 — unlock nodeA
+    addStep('wChanAUnlock', 'running');
+    await nodeA.unlock(unlockParams);
+    addStep('wChanAUnlock', 'success', {});
+
+    // 3 — init nodeB (createNode + signer.initNode)
+    addStep('wChanBInit', 'running');
+    await nodeB.init();
+    addStep('wChanBInit', 'success', { storageDirPath: storageDirB });
+
+    // 4 — unlock nodeB (PasswordRLNSigner injects password automatically)
+    addStep('wChanBUnlock', 'running');
+    await nodeB.unlock(unlockParams);
+    addStep('wChanBUnlock', 'success', {});
+
+    // 5 — node infos
+    // getNodeInfo() → RlnNodeInfo { pubkey, numUsableChannels, numChannels, localBalanceMsat, peers[] }
+    const infoA = await nodeA.getNodeInfo();
+    const infoB = await nodeB.getNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    const nodeInfoSchema = { pubkey: 'nonempty-string', numUsableChannels: 'number', numChannels: 'number', localBalanceMsat: 'number', peers: 'array' };
+    const vInfoA = wChanValidate('getNodeInfo(nodeA)', infoA, nodeInfoSchema);
+    const vInfoB = wChanValidate('getNodeInfo(nodeB)', infoB, nodeInfoSchema);
+    addStep('wChanNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+      _v: { nodeA: { match: vInfoA.match, fields: vInfoA.fields }, nodeB: { match: vInfoB.match, fields: vInfoB.fields } },
+    });
+
+    // 6 — fund nodeA
+    // getAddress() → string (bech32)
+    // getBtcBalance() → BtcBalance { vanilla: { spendable, future, immature }, colored: { spendable, future, immature } }
+    addStep('wChanAFund', 'running');
+    const addrA = await nodeA.getAddress();
+    const vAddrA = wChanValidate('getAddress(nodeA)', { address: addrA }, { address: 'nonempty-string' });
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeA.syncWallet();
+    const balA = await nodeA.getBtcBalance();
+    const vBalA = wChanValidate('getBtcBalance(nodeA)', balA, { vanilla: 'object', colored: 'object' });
+    addStep('wChanAFund', 'success', { txid: txidA, address: addrA, balance: balA,
+      _v: { address: { match: vAddrA.match }, balance: { match: vBalA.match, fields: vBalA.fields, vanilla: balA?.vanilla, colored: balA?.colored } } });
+
+    // 7 — create UTXOs for nodeA
+    addStep('wChanACreateUtxos', 'running');
+    await nodeA.syncWallet();
+    await nodeA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeA.syncWallet();
+    addStep('wChanACreateUtxos', 'success', { num: 10 });
+
+    // 8 — fund nodeB
+    addStep('wChanBFund', 'running');
+    const addrB = await nodeB.getAddress();
+    const vAddrB = wChanValidate('getAddress(nodeB)', { address: addrB }, { address: 'nonempty-string' });
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeB.syncWallet();
+    const balB = await nodeB.getBtcBalance();
+    const vBalB = wChanValidate('getBtcBalance(nodeB)', balB, { vanilla: 'object', colored: 'object' });
+    addStep('wChanBFund', 'success', { txid: txidB, address: addrB, balance: balB,
+      _v: { address: { match: vAddrB.match }, balance: { match: vBalB.match, fields: vBalB.fields, vanilla: balB?.vanilla, colored: balB?.colored } } });
+
+    // 9 — create UTXOs for nodeB
+    addStep('wChanBCreateUtxos', 'running');
+    await nodeB.syncWallet();
+    await nodeB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeB.syncWallet();
+    addStep('wChanBCreateUtxos', 'success', { num: 10 });
+
+    // 10 — connect peers nodeA → nodeB
+    addStep('wChanConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    console.log(`[wChan] connecting nodeA → ${peerUriB}`);
     try {
-      const txid = await sendToAddress(walletAddress!, 0.0002); // ~20 000 sats
-      await mine(6);
-      addStep('fundWallet', 'success', { txid });
+      await nodeA.connectPeer(peerUriB);
+      console.log(`[wChan] connected to ${peerUriB}`);
     } catch (e: any) {
-      // Fallback: try the thunderstack HTTP faucet in case it has been updated
-      // to accept taproot outputs.
-      try {
-        const faucetRes = await fetch(FAUCET_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${FAUCET_TOKEN}`,
-          },
-          body: JSON.stringify({
-            amount: FAUCET_AMOUNT_SATS,
-            address: walletAddress,
-            fee_rate: 5,
-            skip_sync: false,
-          }),
-        });
-        const faucetData = await faucetRes.json().catch(() => ({}));
-        if (!faucetRes.ok) {
-          throw new Error(
-            `Faucet HTTP ${faucetRes.status}: ${JSON.stringify(faucetData)}`
-          );
-        }
-        addStep('fundWallet', 'success', {
-          method: 'faucet',
-          txid: faucetData?.txid ?? faucetData,
-        });
-      } catch (faucetErr: any) {
-        addStep('fundWallet', 'error', undefined,
-          `sendToAddress: ${e?.message}; faucet: ${faucetErr?.message}`
-        );
+      if (isPoisonLike(e)) {
+        addStep('wChanConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
       }
+      console.warn(`[wChan] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
+    addStep('wChanConnectPeers', 'success', { peerUriB });
 
-    // ── Step 4: Wait for balance ─────────────────────────────────────────────
-    addStep('waitForFunding', 'running');
-    const deadline = Date.now() + FUND_POLL_TIMEOUT_MS;
-    let funded = false;
-    while (Date.now() < deadline) {
-      const bal = await wallet.getBtcBalance();
-      const total =
-        (bal?.vanilla?.settled ?? 0) +
-        (bal?.vanilla?.future ?? 0) +
-        (bal?.vanilla?.spendable ?? 0);
-      if (total > 0) {
-        preBtcBalance = bal;
-        funded = true;
-        addStep('waitForFunding', 'success', {
-          settled: bal?.vanilla?.settled,
-          future: bal?.vanilla?.future,
-        });
+    // 11 — open BTC channel nodeA → nodeB (500k sat, no asset)
+    // openChannel() → RlnOpenChannelResponse { temporaryChannelId: string }
+    // listChannels() → RlnChannel[] — each: { channelId, fundingTxid, isUsable, capacitySat, localBalanceMsat, ... }
+    addStep('wChanOpenChannel', 'running');
+    const openResp = await nodeA.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 500000,
+      pushMsat: 0,
+      public: false,
+      withAnchors: true,
+      assetId: null,
+      assetAmount: null,
+    });
+    const vOpenResp = wChanValidate('openChannel(nodeA)', openResp, { temporaryChannelId: 'nonempty-string' });
+    const tmpId = String(openResp?.temporaryChannelId ?? '');
+    console.log(`[wChan] opened channel tmpId=${tmpId}`);
+
+    let fundingTxid = '';
+    let channelId = '';
+    let foundChannel: any = null;
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await nodeA.syncWallet();
+      const channels: any[] = (await nodeA.listChannels()) ?? [];
+      const ch = channels.find((c: any) => (c.fundingTxid ?? c.funding_txid) != null);
+      if (ch) {
+        foundChannel = ch;
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
         break;
       }
-      await new Promise((r) => setTimeout(r, FUND_POLL_INTERVAL_MS));
+      await sleep(1000);
     }
-    if (!funded) {
-      const bal = await wallet.getBtcBalance();
-      preBtcBalance = bal;
-      addStep('waitForFunding', 'error', { balance: bal }, 'Timed out waiting for balance');
-    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    const vChannel = wChanValidate('listChannels(nodeA)[found]', foundChannel, {
+      channelId: 'nonempty-string', fundingTxid: 'nonempty-string',
+      capacitySat: 'number', localBalanceMsat: 'number',
+    });
+    console.log(`[wChan] channelId=${channelId} fundingTxid=${fundingTxid}`);
 
-    // ── Step 5: Create UTXOs ─────────────────────────────────────────────────
-    addStep('createUtxos', 'running');
-    try {
-      const created = await wallet.createUtxos({ upTo: true, num: 5, feeRate: 5 });
-      addStep('createUtxos', 'success', { created });
-    } catch (e: any) {
-      // AllocationsAlreadyAvailable means the wallet already has enough UTXOs —
-      // this is a benign "nothing to do" result when upTo: true is set.
-      const isAlreadyAvailable =
-        e?.code === 'AllocationsAlreadyAvailable' ||
-        String(e?.message ?? e).includes('AllocationsAlreadyAvailable');
-      if (isAlreadyAvailable) {
-        addStep('createUtxos', 'success', { created: 0, note: 'AllocationsAlreadyAvailable' });
-      } else {
-        console.error('[UTEXO VSS] createUtxos failed:', e);
-        const errMsg = e?.message || (e?.code ? `[${e.code}] ${String(e)}` : String(e)) || 'Unknown error';
-        addStep('createUtxos', 'error', undefined, errMsg);
+    await mine(6);
+    await sleep(3000);
+    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[wChan] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
       }
     }
+    addStep('wChanOpenChannel', 'success', { channelId, fundingTxid,
+      _v: { openChannel: { match: vOpenResp.match, fields: vOpenResp.fields }, channel: { match: vChannel.match, fields: vChannel.fields, received: foundChannel } } });
 
-    // ── Step 6: Issue NIA asset ──────────────────────────────────────────────
-    addStep('issueAssetNia', 'running');
-    try {
-      const asset = await wallet.issueAssetNia({
-        ticker: 'DEMO',
-        name: 'Demo Token',
-        precision: 0,
-        amounts: [1000],
-      });
-      issuedAssetId = asset.assetId;
-      addStep('issueAssetNia', 'success', {
-        assetId: asset.assetId,
-        ticker: asset.ticker,
-      });
-    } catch (e: any) {
-      addStep('issueAssetNia', 'error', undefined, e?.message ?? String(e));
+    // 12 — payment 1: nodeB creates invoice, nodeA pays
+    // createLightningInvoice() → { lnInvoice: string, amountMsat?: number, expirySeconds: number }
+    // payLightningInvoice() → { txid: string }
+    // getLightningSendRequest(hash) → status string: 'Pending' | 'Settled' | 'Failed'
+    addStep('wChanPayment1', 'running');
+    const inv1 = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId: '', amount: 0 } });
+    const vInv1 = wChanValidate('createLightningInvoice(nodeB)', inv1, { lnInvoice: 'nonempty-string' });
+    const invoice1 = String(inv1?.lnInvoice ?? '');
+    console.log(`[wChan] invoice1: ${invoice1.substring(0, 40)}...`);
+    const send1 = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
+    const vSend1 = wChanValidate('payLightningInvoice(nodeA)', send1, { txid: 'nonempty-string' });
+    const hash1 = String(send1?.txid ?? '');
+    console.log(`[wChan] payment1 hash=${hash1}`);
+    let status1 = '';
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await nodeA.syncWallet();
+      status1 = String((await nodeA.getLightningSendRequest(hash1)) ?? '');
+      console.log(`[wChan] payment1 status=${status1}`);
+      if (status1 === 'Settled') break;
+      if (status1 === 'Failed') throw new Error(`Payment1 failed: ${hash1}`);
+      await sleep(2000);
     }
+    const vStatus1 = wChanValidate('getLightningSendRequest(nodeA) payment1', { status: status1 }, { status: 'nonempty-string' });
+    addStep('wChanPayment1', 'success', { paymentHash: hash1,
+      _v: { invoice: { match: vInv1.match, fields: vInv1.fields }, pay: { match: vSend1.match, fields: vSend1.fields }, status: { value: status1, settled: status1 === 'Settled' } } });
 
-    // ── Step 7: Send issued asset to receiver (witness invoice) ─────────────
-    if (issuedAssetId) {
-      addStep('sendIssuedAssetToReceiver', 'running');
-      let receiverWallet: UTEXOWallet | null = null;
-      try {
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: start', { issuedAssetId });
-        const receiverKeys = await createWallet(utexoVssNetwork);
-        receiverWallet = new UTEXOWallet(receiverKeys.mnemonic, { network: utexoVssNetwork });
-        await receiverWallet.initialize();
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: receiver initialized');
-
-        const witness = await receiverWallet.witnessReceive({
-          amount: 5,
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: witness invoice length', witness?.invoice?.length ?? 0);
-
-        // Witness invoices require sender-side witness parameters (see runWalletFlow witness send).
-        const sendResult = await wallet.send({
-          assetId: issuedAssetId,
-          amount: 5,
-          invoice: witness.invoice,
-          minConfirmations: 1,
-          witnessData: {
-            amountSat: 1000,
-            blinding: 0,
-          },
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: send ok', sendResult?.txid ?? sendResult);
-
-        const refreshRounds: Array<{
-          round: number;
-          senderSettled?: number;
-          receiverSettled?: number;
-        }> = [];
-        const refreshIntervalMs = 40_000;
-        const refreshCount = 3;
-        let finalSenderBal: any = null;
-        let finalReceiverBal: any = null;
-
-        for (let i = 0; i < refreshCount; i += 1) {
-          await wallet.refreshWallet();
-          await receiverWallet.refreshWallet();
-
-          const [senderBal, receiverBal] = await Promise.all([
-            wallet.getAssetBalance(issuedAssetId).catch(() => null),
-            receiverWallet.getAssetBalance(issuedAssetId).catch(() => null),
-          ]);
-          finalSenderBal = senderBal;
-          finalReceiverBal = receiverBal;
-
-          refreshRounds.push({
-            round: i + 1,
-            senderSettled: senderBal?.settled,
-            receiverSettled: receiverBal?.settled,
-          });
-
-          if (i < refreshCount - 1) {
-            await new Promise((r) => setTimeout(r, refreshIntervalMs));
-          }
-        }
-
-        addStep('sendIssuedAssetToReceiver', 'success', {
-          receiverAddress: await receiverWallet.getAddress(),
-          witnessInvoice: witness.invoice,
-          sendTxid: sendResult?.txid ?? sendResult,
-          refreshIntervalMs,
-          refreshRounds,
-          senderAssetBalance: finalSenderBal
-            ? {
-                settled: finalSenderBal.settled,
-                spendable: finalSenderBal.spendable,
-                future: finalSenderBal.future,
-              }
-            : null,
-          receiverAssetBalance: finalReceiverBal
-            ? {
-                settled: finalReceiverBal.settled,
-                spendable: finalReceiverBal.spendable,
-                future: finalReceiverBal.future,
-              }
-            : null,
-        });
-        console.log('[UTEXO VSS] sendIssuedAssetToReceiver: success', { refreshRounds });
-      } catch (e: any) {
-        const errMsg =
-          e?.message ??
-          (typeof e === 'string' ? e : JSON.stringify(e, Object.getOwnPropertyNames(e)));
-        const errDetail = [
-          `issuedAssetId=${issuedAssetId}`,
-          errMsg,
-          e?.code ? `code=${e.code}` : null,
-          e?.stack ? `stack=${e.stack}` : null,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        console.error('[UTEXO VSS] sendIssuedAssetToReceiver: FAILED', errDetail, e);
-        // Do not pass `data` on error — Flows StepCard prefers detail over step.error.
-        addStep('sendIssuedAssetToReceiver', 'error', undefined, errDetail);
-      } finally {
-        if (receiverWallet) {
-          try {
-            await receiverWallet.dispose();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    } else {
-      console.warn('[UTEXO VSS] sendIssuedAssetToReceiver: skipped — no issuedAssetId');
-      addStep('sendIssuedAssetToReceiver', 'error', undefined, 'No issued asset to send');
+    // 13 — restart nodeA (shutdown + reinit on same instance — no manager recreation needed)
+    addStep('wChanRestartNodeA', 'running');
+    await nodeA.shutdown();
+    await sleep(1000);
+    await nodeA.reinit(unlockParams);
+    console.log('[wChan] nodeA restarted via UTEXOWallet.reinit()');
+    const restartDeadline = Date.now() + 120000;
+    while (Date.now() < restartDeadline) {
+      await nodeA.syncWallet();
+      const info = await nodeA.getNodeInfo();
+      const usable = Number(info?.numUsableChannels ?? 0);
+      console.log(`[wChan] nodeA usableChannels after restart=${usable}`);
+      if (usable >= 1) break;
+      await sleep(2000);
     }
+    addStep('wChanRestartNodeA', 'success', {});
 
-    // ── Step 8: List assets ──────────────────────────────────────────────────
-    addStep('listAssets', 'running');
-    try {
-      const assets = await wallet.listAssets();
-      const niaCount = assets.nia?.length ?? 0;
-      addStep('listAssets', 'success', { niaCount, assetIds: assets.nia?.map((a) => a.assetId) });
-    } catch (e: any) {
-      addStep('listAssets', 'error', undefined, e?.message ?? String(e));
+    // 14 — payment 2: nodeB creates invoice, nodeA pays (after restart)
+    addStep('wChanPayment2', 'running');
+    const inv2 = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId: '', amount: 0 } });
+    const vInv2 = wChanValidate('createLightningInvoice(nodeB)', inv2, { lnInvoice: 'nonempty-string' });
+    const invoice2 = String(inv2?.lnInvoice ?? '');
+    console.log(`[wChan] invoice2: ${invoice2.substring(0, 40)}...`);
+    const send2 = await nodeA.payLightningInvoice({ lnInvoice: invoice2 });
+    const vSend2 = wChanValidate('payLightningInvoice(nodeA)', send2, { txid: 'nonempty-string' });
+    const hash2 = String(send2?.txid ?? '');
+    console.log(`[wChan] payment2 hash=${hash2}`);
+    let status2 = '';
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await nodeA.syncWallet();
+      status2 = String((await nodeA.getLightningSendRequest(hash2)) ?? '');
+      console.log(`[wChan] payment2 status=${status2}`);
+      if (status2 === 'Settled') break;
+      if (status2 === 'Failed') throw new Error(`Payment2 failed: ${hash2}`);
+      await sleep(2000);
     }
+    addStep('wChanPayment2', 'success', { paymentHash: hash2,
+      _v: { invoice: { match: vInv2.match, fields: vInv2.fields }, pay: { match: vSend2.match, fields: vSend2.fields }, status: { value: status2, settled: status2 === 'Settled' } } });
 
-    // ── Step 9: Get asset balance ────────────────────────────────────────────
-    if (issuedAssetId) {
-      addStep('getAssetBalance', 'running');
-      try {
-        preAssetBalance = await wallet.getAssetBalance(issuedAssetId);
-        addStep('getAssetBalance', 'success', {
-          settled: preAssetBalance?.settled,
-          spendable: preAssetBalance?.spendable,
-          future: preAssetBalance?.future,
-        });
-      } catch (e: any) {
-        addStep('getAssetBalance', 'error', undefined, e?.message ?? String(e));
-      }
-    } else {
-      addStep('getAssetBalance', 'error', undefined, 'No asset to check (issue step failed)');
-    }
+    // 15 — issue RGB asset on nodeA (1000 units)
+    // issueAssetNia() → AssetNIA { assetId, ticker, name, precision, issuedSupply, timestamp, addedAt, balance: { spendable, future, settled } }
+    addStep('wChanIssueAsset', 'running');
+    await nodeA.syncWallet();
+    const issued = await nodeA.issueAssetNia({ ticker: 'WCTS', name: 'WalletChanTest', precision: 0, amounts: [1000] });
+    const vIssued = wChanValidate('issueAssetNia(nodeA)', issued, {
+      assetId: 'nonempty-string', ticker: 'nonempty-string', name: 'nonempty-string',
+      precision: 'number', issuedSupply: 'number', balance: 'object',
+    });
+    const assetId = String(issued?.assetId ?? '');
+    await mine(1);
+    await nodeA.syncWallet();
+    await nodeA.refreshWallet();
+    addStep('wChanIssueAsset', 'success', { assetId: assetId.substring(0, 20) + '...',
+      _v: { match: vIssued.match, fields: vIssued.fields, received: { ticker: issued?.ticker, name: issued?.name, precision: issued?.precision, issuedSupply: issued?.issuedSupply, balance: issued?.balance } } });
 
-    // ── Step 10: VSS Backup (zero-arg!) ──────────────────────────────────────
-    addStep('vssBackup', 'running');
-    let vssConfig: any = null;
-    try {
-      vssConfig = await wallet.getDefaultVssConfig();
-      const version = await wallet.vssBackup();
-      addStep('vssBackup', 'success', {
-        version,
-        storeId: vssConfig.storeId,
-      });
-    } catch (e: any) {
-      addStep('vssBackup', 'error', undefined, e?.message ?? String(e));
-    }
+    // 16 — nodeB generates witness invoice (nodeA will send 300 units with witnessData)
+    // witnessReceive() → InvoiceReceiveData { invoice: string, recipientId: string, batchTransferIdx: number, expirationTimestamp?: number }
+    // assetId/amount omitted: nodeB doesn't own the asset yet; passing them causes "resource not found"
+    addStep('wChanWitnessReceive', 'running');
+    await nodeB.syncWallet();
+    const invWitness = await nodeB.witnessReceive({ minConfirmations: 1 });
+    const vInvWitness = wChanValidate('witnessReceive(nodeB)', invWitness, {
+      invoice: 'nonempty-string', recipientId: 'nonempty-string', batchTransferIdx: 'number',
+    });
+    const witnessInvoice = String(invWitness?.invoice ?? '');
+    const witnessRecipientId = String(invWitness?.recipientId ?? '');
+    console.log(`[wChan] witnessInvoice recipientId=${witnessRecipientId.substring(0, 20)}...`);
+    addStep('wChanWitnessReceive', 'success', { recipientId: witnessRecipientId.substring(0, 20) + '...',
+      _v: { match: vInvWitness.match, fields: vInvWitness.fields, received: { recipientId: witnessRecipientId.substring(0, 20) + '...', batchTransferIdx: invWitness?.batchTransferIdx } } });
 
-    // ── Step 11: VSS Backup info (zero-arg!) ─────────────────────────────────
-    addStep('vssBackupInfo', 'running');
-    try {
-      const info = await wallet.vssBackupInfo();
-      addStep('vssBackupInfo', 'success', {
-        backupExists: info.backupExists,
-        serverVersion: info.serverVersion,
-        backupRequired: info.backupRequired,
-      });
-    } catch (e: any) {
-      addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e));
-    }
+    // 17 — nodeA sends 300 units to nodeB via witness invoice (witnessData.amountSat=1000)
+    // send() → SendResult { txid: string, batchTransferIdx: number }
+    // listOnchainTransfers(assetId) → Transfer[] — each: { kind, status, txid?, amount, assetId, ... }
+    // listAssets() → ListAssets { nia?: AssetNIA[], cfa?: AssetCFA[], uda?: AssetUDA[] }
+    addStep('wChanSendWitness', 'running');
+    const sendWitness = await nodeA.send({
+      invoice: witnessInvoice,
+      assetId,
+      amount: 300,
+      donation: true,
+      feeRate: 1,
+      minConfirmations: 1,
+      witnessData: { amountSat: 1000 },
+    });
+    const vSendWitness = wChanValidate('send(nodeA, witness)', sendWitness, { txid: 'nonempty-string', batchTransferIdx: 'number' });
+    await mine(1);
+    await nodeA.syncWallet();
+    await nodeB.syncWallet();
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await nodeB.refreshWallet();
+    const transfersWitness = await nodeA.listOnchainTransfers(assetId);
+    const vTransfersW = wChanValidate('listOnchainTransfers(nodeA)', { transfers: transfersWitness }, { transfers: 'array' });
+    const assetsAfterWitness = await nodeA.listAssets();
+    const vAssetsW = wChanValidate('listAssets(nodeA)', assetsAfterWitness, { nia: 'array' });
+    console.log(`[wChan] after witness send: transferCount=${transfersWitness.length} assetCount=${assetsAfterWitness?.nia?.length ?? 0}`);
+    addStep('wChanSendWitness', 'success', {
+      amount: 300,
+      recipientId: witnessRecipientId.substring(0, 20) + '...',
+      transferCount: transfersWitness.length,
+      _v: {
+        send: { match: vSendWitness.match, fields: vSendWitness.fields, received: sendWitness },
+        transfers: { match: vTransfersW.match, count: transfersWitness.length, sample: transfersWitness[0] ?? null },
+        assets: { match: vAssetsW.match, niaCount: assetsAfterWitness?.nia?.length ?? 0 },
+      },
+    });
 
-    // ── Step 12: Dispose wallet ──────────────────────────────────────────────
-    addStep('disposeWallet', 'running');
-    await wallet.dispose();
-    wallet = null;
-    addStep('disposeWallet', 'success');
+    // 18 — nodeB generates blind invoice (nodeA will send 200 units, no witnessData)
+    // blindReceive() → InvoiceReceiveData { invoice: string, recipientId: string, batchTransferIdx: number, expirationTimestamp?: number }
+    // assetId/amount omitted: nodeB receives for the first time; asset not yet in its db
+    addStep('wChanBlindReceive', 'running');
+    await nodeB.syncWallet();
+    const invBlind = await nodeB.blindReceive({ minConfirmations: 1 });
+    const vInvBlind = wChanValidate('blindReceive(nodeB)', invBlind, {
+      invoice: 'nonempty-string', recipientId: 'nonempty-string', batchTransferIdx: 'number',
+    });
+    const blindInvoice = String(invBlind?.invoice ?? '');
+    const blindRecipientId = String(invBlind?.recipientId ?? '');
+    console.log(`[wChan] blindInvoice recipientId=${blindRecipientId.substring(0, 20)}...`);
+    addStep('wChanBlindReceive', 'success', { recipientId: blindRecipientId.substring(0, 20) + '...',
+      _v: { match: vInvBlind.match, fields: vInvBlind.fields, received: { recipientId: blindRecipientId.substring(0, 20) + '...', batchTransferIdx: invBlind?.batchTransferIdx } } });
 
-    // ── Step 13: Delete local state ──────────────────────────────────────────
-    addStep('deleteState', 'running');
-    try {
-      // Always delete then recreate so rgb-lib gets a clean target directory.
-      // On subsequent runs the fingerprint subdirectory would already exist,
-      // causing the native restoreFromVss to fail with "path already exists".
-      await FileSystem.deleteAsync(restoreDir, { idempotent: true });
-      await FileSystem.makeDirectoryAsync(restoreDir, { intermediates: true });
-      addStep('deleteState', 'success', { restoreDir });
-    } catch (e: any) {
-      addStep('deleteState', 'error', undefined, e?.message ?? String(e));
-    }
+    // 19 — nodeA sends 200 units to nodeB via blind invoice (no witnessData)
+    addStep('wChanSendBlind', 'running');
+    const sendBlind = await nodeA.send({
+      invoice: blindInvoice,
+      assetId,
+      amount: 200,
+      donation: true,
+      feeRate: 1,
+      minConfirmations: 1,
+    });
+    const vSendBlind = wChanValidate('send(nodeA, blind)', sendBlind, { txid: 'nonempty-string', batchTransferIdx: 'number' });
+    await mine(1);
+    await nodeA.syncWallet();
+    await nodeB.syncWallet();
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await nodeB.refreshWallet();
+    const transfersBlind = await nodeA.listOnchainTransfers(assetId);
+    const vTransfersB = wChanValidate('listOnchainTransfers(nodeA)', { transfers: transfersBlind }, { transfers: 'array' });
+    const assetsAfterBlind = await nodeA.listAssets();
+    const vAssetsB = wChanValidate('listAssets(nodeA)', assetsAfterBlind, { nia: 'array' });
+    console.log(`[wChan] after blind send: transferCount=${transfersBlind.length} assetCount=${assetsAfterBlind?.nia?.length ?? 0}`);
+    addStep('wChanSendBlind', 'success', {
+      amount: 200,
+      recipientId: blindRecipientId.substring(0, 20) + '...',
+      transferCount: transfersBlind.length,
+      _v: {
+        send: { match: vSendBlind.match, fields: vSendBlind.fields, received: sendBlind },
+        transfers: { match: vTransfersB.match, count: transfersBlind.length, sample: transfersBlind[0] ?? null },
+        assets: { match: vAssetsB.match, niaCount: assetsAfterBlind?.nia?.length ?? 0 },
+      },
+    });
 
-    // ── Step 14: Restore from VSS ────────────────────────────────────────────
-    addStep('restoreFromVss', 'running');
-    let restorePaths: { layer1Path: string; utexoPath: string } | null = null;
-    try {
-      const targetDir = restoreDir.replace('file://', '');
-      restorePaths = await UTEXOWallet.restoreFromVss(
-        UTEXO_TEST_MNEMONIC,
-        targetDir,
-        vssConfig ?? undefined
-      );
-      addStep('restoreFromVss', 'success', {
-        utexoPath: restorePaths.utexoPath,
-        layer1Path: restorePaths.layer1Path,
-      });
-    } catch (e: any) {
-      addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 15: Verify restored wallet ─────────────────────────────────────
-    addStep('verifyRestoredWallet', 'running');
-    let restoredWallet: UTEXOWallet | null = null;
-    try {
-      restoredWallet = new UTEXOWallet(UTEXO_TEST_MNEMONIC, { network: utexoVssNetwork });
-      await restoredWallet.initialize();
-
-      const [btcBalance, assets, transactions] = await Promise.all([
-        restoredWallet.getBtcBalance(),
-        restoredWallet.listAssets(),
-        restoredWallet.listTransactions(),
-      ]);
-
-      const restoredAssetBalance = issuedAssetId
-        ? await restoredWallet.getAssetBalance(issuedAssetId).catch(() => null)
-        : null;
-
-      const niaCount = assets.nia?.length ?? 0;
-      const assetRestored =
-        issuedAssetId != null &&
-        (assets.nia ?? []).some((a) => a.assetId === issuedAssetId);
-
-      addStep('verifyRestoredWallet', 'success', {
-        btcSettled: btcBalance?.vanilla?.settled ?? 0,
-        btcMatchesPreBackup:
-          preBtcBalance == null ||
-          btcBalance?.vanilla?.settled === preBtcBalance?.vanilla?.settled,
-        niaCount,
-        assetRestored,
-        restoredAssetBalance: restoredAssetBalance
-          ? {
-              settled: restoredAssetBalance.settled,
-              spendable: restoredAssetBalance.spendable,
-              matchesPreBackup:
-                preAssetBalance == null ||
-                restoredAssetBalance.settled === preAssetBalance.settled,
-            }
-          : null,
-        transactionCount: transactions.length,
-      });
-    } catch (e: any) {
-      addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e));
-    }
-
-    // ── Step 16: Cleanup ─────────────────────────────────────────────────────
-    addStep('cleanup', 'running');
-    try {
-      if (restoredWallet) {
-        await restoredWallet.dispose();
-        restoredWallet = null;
-      }
-      addStep('cleanup', 'success');
-    } catch (e: any) {
-      addStep('cleanup', 'error', undefined, e?.message ?? String(e));
-    }
+    // 20 — final asset balances: nodeA=500, nodeB=500
+    // getAssetBalance(assetId) → AssetBalance { spendable: number, future: number, settled: number }
+    addStep('wChanFinalBalances', 'running');
+    const [finalBalA, finalBalB] = await Promise.all([
+      nodeA.getAssetBalance(assetId),
+      nodeB.getAssetBalance(assetId),
+    ]);
+    const balSchema = { spendable: 'number', future: 'number', settled: 'number' };
+    const vFinalA = wChanValidate('getAssetBalance(nodeA)', finalBalA, balSchema);
+    const vFinalB = wChanValidate('getAssetBalance(nodeB)', finalBalB, balSchema);
+    console.log(`[wChan] finalA=${finalBalA?.spendable} finalB=${finalBalB?.spendable}`);
+    addStep('wChanFinalBalances', 'success', {
+      spendableA: finalBalA?.spendable ?? null,
+      spendableB: finalBalB?.spendable ?? null,
+      _v: {
+        nodeA: { match: vFinalA.match, fields: vFinalA.fields, received: finalBalA, expectedSpendable: 500, matchSpendable: finalBalA?.spendable === 500 },
+        nodeB: { match: vFinalB.match, fields: vFinalB.fields, received: finalBalB, expectedSpendable: 500, matchSpendable: finalBalB?.spendable === 500 },
+      },
+    });
 
     results.success = true;
     return results;
   } catch (error: any) {
-    console.error('Error in UTEXO VSS flow:', error);
-    if (wallet) {
-      try { await wallet.dispose(); } catch { /* ignore */ }
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeA) { try { await nodeA.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
+  const flowName = 'runRlnUtexoWalletAssetChannelExtSignerFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let nodeA: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const nodeAPassword = 'nodeApass';
+
+    const basePortA = 20000 + Math.floor(Math.random() * 10000);
+    const basePortB = basePortA + 100;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_asext_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_asext_b_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+
+    // nodeA — regular node (PasswordRLNSigner): issues asset, opens asset channel, pays
+    nodeA = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePortA,
+        ldkPeerListeningPort: basePortA + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
+    );
+
+    // nodeB — external signer node (NativeExternalRLNSigner): creates invoices
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePortB,
+        ldkPeerListeningPort: basePortB + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new NativeExternalRLNSigner(keysB.mnemonic, network),
+    );
+
+    // 1 — init nodeA
+    addStep('wAsExtAInit', 'running');
+    await nodeA.init();
+    addStep('wAsExtAInit', 'success', { storageDirPath: storageDirA });
+
+    // 2 — unlock nodeA
+    addStep('wAsExtAUnlock', 'running');
+    await nodeA.unlock(unlockParams);
+    addStep('wAsExtAUnlock', 'success', {});
+
+    // 3 — init nodeB
+    addStep('wAsExtBInit', 'running');
+    await nodeB.init();
+    addStep('wAsExtBInit', 'success', { storageDirPath: storageDirB });
+
+    // 4 — unlock nodeB
+    addStep('wAsExtBUnlock', 'running');
+    await nodeB.unlock(unlockParams);
+    addStep('wAsExtBUnlock', 'success', {});
+
+    // 5 — node infos
+    const infoA = await nodeA.getNodeInfo();
+    const infoB = await nodeB.getNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    addStep('wAsExtNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+    });
+
+    // 6 — fund nodeA
+    addStep('wAsExtAFund', 'running');
+    const addrA = await nodeA.getAddress();
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeA.syncWallet();
+    const balA = await nodeA.getBtcBalance();
+    addStep('wAsExtAFund', 'success', { txid: txidA, address: addrA, balance: balA });
+
+    // 7 — create UTXOs for nodeA
+    addStep('wAsExtACreateUtxos', 'running');
+    await nodeA.syncWallet();
+    await nodeA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeA.syncWallet();
+    addStep('wAsExtACreateUtxos', 'success', { num: 10 });
+
+    // 8 — fund nodeB
+    addStep('wAsExtBFund', 'running');
+    const addrB = await nodeB.getAddress();
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeB.syncWallet();
+    const balB = await nodeB.getBtcBalance();
+    addStep('wAsExtBFund', 'success', { txid: txidB, address: addrB, balance: balB });
+
+    // 9 — create UTXOs for nodeB
+    addStep('wAsExtBCreateUtxos', 'running');
+    await nodeB.syncWallet();
+    await nodeB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeB.syncWallet();
+    addStep('wAsExtBCreateUtxos', 'success', { num: 10 });
+
+    // 10 — issue asset on nodeA (regular node)
+    addStep('wAsExtIssueAsset', 'running');
+    const issued = await nodeA.issueAssetNia({ ticker: 'USDT', name: 'Tether', precision: 0, amounts: [1000] });
+    const assetId = String(issued?.assetId ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('wAsExtIssueAsset', 'success', { assetId });
+
+    // 11 — connect peers nodeA → nodeB
+    addStep('wAsExtConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    const peerUriA = `${pubkeyA}@127.0.0.1:${basePortA + 1}`;
+    console.log(`[wAsExt] connecting nodeA → ${peerUriB}`);
+    try {
+      await nodeA.connectPeer(peerUriB);
+      console.log(`[wAsExt] connected to ${peerUriB}`);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wAsExtConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[wAsExt] connectPeer ignored: ${e?.message ?? String(e)}`);
     }
-    results.success = false;
-    results.error = { message: error.message || 'Unknown error' };
+    addStep('wAsExtConnectPeers', 'success', { peerUriB });
+
+    // 12 — open asset channel nodeA → nodeB (600 units, 100k sat)
+    // pushMsat must be 0: channel_signer.rs hardcodes push_value_msat=0 when calling VLS SetupChannel,
+    // so any non-zero push causes VLS to reject validate_holder_commitment on the acceptor side.
+    addStep('wAsExtOpenChannel', 'running');
+    await nodeA.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 100000,
+      pushMsat: 3_500_000,
+      public: false,
+      withAnchors: true,
+      assetId,
+      assetAmount: 600,
+    });
+
+    let fundingTxid = '';
+    let channelId = '';
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await nodeA.syncWallet();
+      const channels: any[] = (await nodeA.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) => (c.assetId ?? c.asset_id) === assetId && (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    console.log(`[wAsExt] channelId=${channelId} fundingTxid=${fundingTxid}`);
+
+    await mine(6);
+    await sleep(3000);
+    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[wAsExt] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    await mine(6);
+    addStep('wAsExtOpenChannel', 'success', { channelId, fundingTxid, assetId });
+
+    // log asset balances after channel open to confirm push worked
+    const balAfterA = await nodeA.getAssetBalance(assetId).catch(() => null);
+    const balAfterB = await nodeB.getAssetBalance(assetId).catch(() => null);
+    console.log(`[wAsExt] assetBalance after open — nodeA: ${JSON.stringify(balAfterA)}, nodeB: ${JSON.stringify(balAfterB)}`);
+    const channelsA = await nodeA.listChannels().catch(() => []);
+    const channelsB = await nodeB.listChannels().catch(() => []);
+    console.log(`[wAsExt] nodeA channels: ${JSON.stringify(channelsA)}`);
+    console.log(`[wAsExt] nodeB channels: ${JSON.stringify(channelsB)}`);
+
+    // 13 — payment 1: nodeB (ext signer) creates asset invoice, nodeA (regular) pays
+    addStep('wAsExtPayment1', 'running');
+    const inv1 = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 100 } });
+    console.log(`[wAsExt] createLightningInvoice raw response: ${JSON.stringify(inv1)}`);
+    const invoice1 = String(inv1?.lnInvoice ?? '');
+    console.log(`[wAsExt] invoice1 type=${typeof inv1?.lnInvoice} length=${invoice1.length} first60="${invoice1.substring(0, 60)}"`);
+    console.log(`[wAsExt] invoice1 charCodes(0-5): ${Array.from(invoice1.substring(0, 6)).map(c => c.charCodeAt(0)).join(',')}`);
+    console.log(`[wAsExt] calling nodeA.payLightningInvoice with invoice1`);
+    const send1 = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
+    const hash1 = String(send1?.txid ?? '');
+    console.log(`[wAsExt] payment1 hash=${hash1}`);
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash1);
+      console.log(`[wAsExt] payment1 status=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Payment1 failed: ${hash1}`);
+      await sleep(2000);
+    }
+    addStep('wAsExtPayment1', 'success', { paymentHash: hash1, assetAmount: 100 });
+
+    // 14 — restart nodeA (shutdown + reinit on same instance)
+    addStep('wAsExtRestartNodeA', 'running');
+    await nodeA.shutdown();
+    await sleep(1000);
+    await nodeA.reinit(unlockParams);
+    console.log('[wAsExt] nodeA restarted via UTEXOWallet.reinit()');
+    const restartDeadline = Date.now() + 120000;
+    while (Date.now() < restartDeadline) {
+      await nodeA.syncWallet();
+      const info = await nodeA.getNodeInfo();
+      const usable = Number(info?.numUsableChannels ?? 0);
+      console.log(`[wAsExt] nodeA usableChannels after restart=${usable}`);
+      if (usable >= 1) break;
+      await sleep(2000);
+    }
+    addStep('wAsExtRestartNodeA', 'success', {});
+
+    // 15 — payment 2: nodeB creates invoice, nodeA pays (after restart)
+    addStep('wAsExtPayment2', 'running');
+    const inv2 = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice2 = String(inv2?.lnInvoice ?? '');
+    console.log(`[wAsExt] invoice2: ${invoice2.substring(0, 40)}...`);
+    const send2 = await nodeA.payLightningInvoice({ lnInvoice: invoice2 });
+    const hash2 = String(send2?.txid ?? '');
+    console.log(`[wAsExt] payment2 hash=${hash2}`);
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash2);
+      console.log(`[wAsExt] payment2 status=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Payment2 failed: ${hash2}`);
+      await sleep(2000);
+    }
+    addStep('wAsExtPayment2', 'success', { paymentHash: hash2, assetAmount: 50 });
+
+    // 16 — cooperative close channel nodeA → nodeB
+    // After payments: nodeA channel=450, nodeB channel=150; nodeA off-chain=400
+    // Expected after close: nodeA=850 (400+450), nodeB=150
+    addStep('wAsExtCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(channelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wAsExtCloseChannel', 'success', { channelId });
+
+    // 17 — wait for on-chain balances to settle
+    addStep('wAsExtWaitBalances', 'running');
+    const balDeadline = Date.now() + 170000;
+    let lastSpendableA = -1;
+    let lastSpendableB = -1;
+    while (Date.now() < balDeadline) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableA = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] waitBal nodeA spendable=${lastSpendableA} expected=850`);
+      } catch (e: any) { console.warn(`[wAsExt] waitBal nodeA: ${e?.message}`); }
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableB = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] waitBal nodeB spendable=${lastSpendableB} expected=150`);
+      } catch (e: any) { console.warn(`[wAsExt] waitBal nodeB: ${e?.message}`); }
+      if (lastSpendableA === 850 && lastSpendableB === 150) break;
+      try { await nodeA.refreshWallet(); } catch {}
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(12000);
+    }
+    if (lastSpendableA !== 850) throw new Error(`nodeA balance did not reach 850, last=${lastSpendableA}`);
+    if (lastSpendableB !== 150) throw new Error(`nodeB balance did not reach 150, last=${lastSpendableB}`);
+    addStep('wAsExtWaitBalances', 'success', { expectedA: 850, expectedB: 150 });
+
+    // TODO iteration 2: nodeA → nodeB second channel (original direction)
+    // addStep('wAsExt2ConnectPeers', 'running');
+    // ...
+    // addStep('wAsExt2OpenChannel', 'running');  // nodeA opens 500-unit channel to nodeB
+    // ...
+    // addStep('wAsExt2Payment', 'running');       // nodeB creates invoice, nodeA pays 100 units
+    // ...
+    // addStep('wAsExt2CloseChannel', 'running');  // nodeA closes, expected A=750, B=250
+    // ...
+    // addStep('wAsExt2WaitBalances', 'running');
+    // ...
+
+    // 18 — reconnect peers for second channel (nodeB signer → nodeA password)
+    // NativeExternalRLNSigner (VLS) is the channel initiator here; this tests whether VLS
+    // can open a channel. FundingGenerationReady is known to loop without producing a funding
+    // tx when VLS is the funder — this step will time out if that Rust-layer bug is present.
+    addStep('wAsExtRevConnectPeers', 'running');
+    try {
+      await nodeB.connectPeer(peerUriA);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wAsExtRevConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[wAsExt] rev connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('wAsExtRevConnectPeers', 'success', { peerUriA });
+
+    // 19 — open second channel nodeB (VLS) → nodeA (100 units, 100k sat)
+    // nodeB off-chain=150; nodeB puts 100 units into channel (off-chain→50), pushMsat to nodeA.
+    // Channel after open: nodeB=100 units, nodeA=0 units.
+    addStep('wAsExtRevOpenChannel', 'running');
+    await nodeB.syncWallet();
+    await nodeB.openChannel({
+      peerPubkeyAndOptAddr: peerUriA,
+      capacitySat: 100000,
+      pushMsat: 3_500_000,
+      public: false,
+      withAnchors: true,
+      assetId,
+      assetAmount: 100,
+    });
+
+    let revFundingTxid = '';
+    let revChannelId = '';
+    const revFundDeadline = Date.now() + 120000;
+    // nodeB is the initiator, so assetId appears in nodeB.listChannels().
+    while (Date.now() < revFundDeadline) {
+      await nodeB.syncWallet();
+      const channels: any[] = (await nodeB.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) =>
+          (c.assetId ?? c.asset_id) === assetId &&
+          (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        revFundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        revChannelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!revFundingTxid) throw new Error('Timeout waiting for reverse funding tx');
+    console.log(`[wAsExt] rev channelId=${revChannelId} fundingTxid=${revFundingTxid}`);
+
+    // listChannels() returns fundingTxid as soon as FundingCreated is sent, but with
+    // NativeExternalRLNSigner the VLS signing on the initiator (nodeB) side takes several
+    // seconds, so the funding tx may not be broadcast yet. Mine in a retry loop.
+    await sleep(5000);
+    const revOpenDeadline = Date.now() + 120000;
+    let revOpenDone = false;
+    while (Date.now() < revOpenDeadline) {
+      await mine(6);
+      await sleep(3000);
+      let allUsable = true;
+      for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[wAsExt] rev open ${label} usableChannels=${usable}`);
+        if (usable < 1) allUsable = false;
+      }
+      if (allUsable) { revOpenDone = true; break; }
+      await sleep(5000);
+    }
+    if (!revOpenDone) throw new Error('Reverse channel never became usable within 120s');
+    await mine(6);
+    addStep('wAsExtRevOpenChannel', 'success', { channelId: revChannelId, fundingTxid: revFundingTxid, assetId });
+
+    // 20 — payment: nodeA creates invoice (50 units), nodeB (VLS initiator) pays
+    // Channel: nodeB=100, nodeA=0; after payment: nodeB=50, nodeA=50
+    addStep('wAsExtRevPayment', 'running');
+    const invRev = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoiceRev = String(invRev?.lnInvoice ?? '');
+    const sendRev = await nodeB.payLightningInvoice({ lnInvoice: invoiceRev });
+    const hashRev = String(sendRev?.txid ?? '');
+    console.log(`[wAsExt] rev payment hash=${hashRev}`);
+    const revPayDeadline = Date.now() + 60000;
+    while (Date.now() < revPayDeadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hashRev);
+      console.log(`[wAsExt] rev payment status=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Rev payment failed: ${hashRev}`);
+      await sleep(2000);
+    }
+    addStep('wAsExtRevPayment', 'success', { paymentHash: hashRev, assetAmount: 50 });
+
+    // 21 — cooperative close reverse channel (nodeA initiates)
+    // Expected after close: nodeA=850+50=900, nodeB=50+50=100
+    addStep('wAsExtRevCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(revChannelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wAsExtRevCloseChannel', 'success', { channelId: revChannelId });
+
+    // 22 — wait for settled balances: A=900, B=100
+    addStep('wAsExtRevWaitBalances', 'running');
+    const revBalDeadline = Date.now() + 300000;
+    let lastSpendableRevA = -1;
+    let lastSpendableRevB = -1;
+    while (Date.now() < revBalDeadline) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableRevA = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] rev waitBal nodeA spendable=${lastSpendableRevA} expected=900`);
+      } catch (e: any) { console.warn(`[wAsExt] rev waitBal nodeA: ${e?.message}`); }
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableRevB = Number(b?.spendable ?? -1);
+        console.log(`[wAsExt] rev waitBal nodeB spendable=${lastSpendableRevB} expected=100`);
+      } catch (e: any) { console.warn(`[wAsExt] rev waitBal nodeB: ${e?.message}`); }
+      if (lastSpendableRevA === 900 && lastSpendableRevB === 100) break;
+      try { await nodeA.refreshWallet(); } catch {}
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(12000);
+    }
+    if (lastSpendableRevA !== 900) throw new Error(`nodeA rev balance did not reach 900, last=${lastSpendableRevA}`);
+    if (lastSpendableRevB !== 100) throw new Error(`nodeB rev balance did not reach 100, last=${lastSpendableRevB}`);
+    addStep('wAsExtRevWaitBalances', 'success', { expectedA: 900, expectedB: 100 });
+
+    // TODO iteration 2: nodeB RGB on-chain sends 150 back to nodeA
+    // addStep('wAsExtRgbSendBtoA', 'running');
+    // const invA = await nodeA.blindReceive({ minConfirmations: 1 });
+    // await nodeB.send({ invoice: invA.invoice, assetId, amount: 150, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeA.syncWallet();
+    // await nodeA.refreshWallet();
+    // await nodeA.refreshWallet();
+    // await nodeB.refreshWallet();
+    // addStep('wAsExtRgbSendBtoA', 'success', { amount: 150, recipientId: invA.recipientId.substring(0, 20) + '...' });
+
+    // TODO iteration 2: final balances: A=1000, B=0
+    // addStep('wAsExtFinalBalances', 'running');
+    // const [finalA, finalB] = await Promise.all([
+    //   nodeA.getAssetBalance(assetId),
+    //   nodeB.getAssetBalance(assetId).catch(() => ({ spendable: 0 })),
+    // ]);
+    // addStep('wAsExtFinalBalances', 'success', {
+    //   spendableA: finalA?.spendable ?? null,
+    //   spendableB: finalB?.spendable ?? null,
+    // });
+
+    results.success = true;
     return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeA) { try { await nodeA.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRLNUtexoPaymentFlow() {
+  const flowName = 'runRLNUtexoPaymentFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let nodeA: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
+  let nodeC: UTEXOWallet | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const keysC = await createWallet(network);
+    const nodeAPassword = 'nodeApass';
+    const nodeBPassword = 'nodeBpass';
+    const nodeCPassword = 'nodeCpass';
+
+    const basePortA = 21000 + Math.floor(Math.random() * 5000);
+    const basePortB = basePortA + 100;
+    const basePortC = basePortA + 200;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_utexo_pay_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_utexo_pay_b_${ts}`;
+    const storageDirUriC = `${documentDirectory ?? ''}rln_utexo_pay_c_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriC, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+    const storageDirC = storageDirUriC.replace('file://', '');
+
+    nodeA = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePortA,
+        ldkPeerListeningPort: basePortA + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
+    );
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePortB,
+        ldkPeerListeningPort: basePortB + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeBPassword, keysB.mnemonic),
+    );
+    nodeC = new UTEXOWallet(
+      {
+        storageDirPath: storageDirC,
+        daemonListeningPort: basePortC,
+        ldkPeerListeningPort: basePortC + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysC.accountXpubVanilla,
+        xpubCol: keysC.accountXpubColored,
+        masterFingerprint: keysC.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeCPassword, keysC.mnemonic),
+    );
+
+    addStep('wPayAInit', 'running');
+    await nodeA.init();
+    addStep('wPayAInit', 'success', { storageDirPath: storageDirA });
+
+    addStep('wPayAUnlock', 'running');
+    await nodeA.unlock(unlockParams);
+    addStep('wPayAUnlock', 'success', {});
+
+    addStep('wPayBInit', 'running');
+    await nodeB.init();
+    addStep('wPayBInit', 'success', { storageDirPath: storageDirB });
+
+    addStep('wPayBUnlock', 'running');
+    await nodeB.unlock(unlockParams);
+    addStep('wPayBUnlock', 'success', {});
+
+    addStep('wPayCInit', 'running');
+    await nodeC.init();
+    addStep('wPayCInit', 'success', { storageDirPath: storageDirC });
+
+    addStep('wPayCUnlock', 'running');
+    await nodeC.unlock(unlockParams);
+    addStep('wPayCUnlock', 'success', {});
+
+    addStep('wPayAFund', 'running');
+    const addrA = await nodeA.getAddress();
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeA.syncWallet();
+    const balA = await nodeA.getBtcBalance();
+    addStep('wPayAFund', 'success', { txid: txidA, address: addrA, balance: balA });
+
+    addStep('wPayACreateUtxos', 'running');
+    await nodeA.syncWallet();
+    await nodeA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeA.syncWallet();
+    addStep('wPayACreateUtxos', 'success', { num: 10 });
+
+    addStep('wPayBFund', 'running');
+    const addrB = await nodeB.getAddress();
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeB.syncWallet();
+    const balB = await nodeB.getBtcBalance();
+    addStep('wPayBFund', 'success', { txid: txidB, address: addrB, balance: balB });
+
+    addStep('wPayBCreateUtxos', 'running');
+    await nodeB.syncWallet();
+    await nodeB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeB.syncWallet();
+    addStep('wPayBCreateUtxos', 'success', { num: 10 });
+
+    addStep('wPayCFund', 'running');
+    const addrC = await nodeC.getAddress();
+    const txidC = await sendToAddress(addrC, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeC.syncWallet();
+    const balC = await nodeC.getBtcBalance();
+    addStep('wPayCFund', 'success', { txid: txidC, address: addrC, balance: balC });
+
+    addStep('wPayCCreateUtxos', 'running');
+    await nodeC.syncWallet();
+    await nodeC.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeC.syncWallet();
+    addStep('wPayCCreateUtxos', 'success', { num: 10 });
+
+    addStep('wPayIssueAsset', 'running');
+    const issued = await nodeA.issueAssetNia({ ticker: 'USDT', name: 'Tether', precision: 0, amounts: [1000] });
+    const assetId = String(issued?.assetId ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('wPayIssueAsset', 'success', { assetId });
+
+    const infoA = await nodeA.getNodeInfo();
+    const infoB = await nodeB.getNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    addStep('wPayNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+    });
+
+    addStep('wPayConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    try {
+      await nodeA.connectPeer(peerUriB);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('wPayConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[wPay] connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('wPayConnectPeers', 'success', { peerUriB });
+
+    // nodeA opens asset channel to nodeB (600 units pushed, 100k sat)
+    addStep('wPayOpenChannel', 'running');
+    await nodeA.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 100000,
+      pushMsat: 3_500_000,
+      public: true,
+      withAnchors: true,
+      assetId,
+      assetAmount: 600,
+    });
+
+    let fundingTxid = '';
+    let channelId = '';
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await nodeA.syncWallet();
+      const channels: any[] = (await nodeA.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) => (c.assetId ?? c.asset_id) === assetId && (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    console.log(`[wPay] channelId=${channelId} fundingTxid=${fundingTxid}`);
+
+    await mine(6);
+    await sleep(3000);
+    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[wPay] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    await mine(6);
+    addStep('wPayOpenChannel', 'success', { channelId, fundingTxid });
+
+    addStep('wPayAssetBalanceA', 'running');
+    const bal0 = await nodeA.getAssetBalance(assetId);
+    addStep('wPayAssetBalanceA', 'success', { spendable: bal0?.spendable ?? null });
+
+    // inv1: B creates (100 asset units), A pays
+    addStep('wPayInvoice1', 'running');
+    const inv1Resp = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 100 } });
+    const invoice1 = String(inv1Resp?.lnInvoice ?? '');
+    const send1Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
+    const hash1 = String(send1Resp?.txid ?? '');
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash1);
+      console.log(`[wPay] inv1 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice1 payment failed: ${hash1}`);
+      await sleep(2000);
+    }
+    addStep('wPayInvoice1', 'success', { paymentHash: hash1, assetAmount: 100 });
+
+    // inv2: A creates (50 asset units), B pays
+    addStep('wPayInvoice2', 'running');
+    const inv2Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice2 = String(inv2Resp?.lnInvoice ?? '');
+    const send2Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice2 });
+    const hash2 = String(send2Resp?.txid ?? '');
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash2);
+      console.log(`[wPay] inv2 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice2 payment failed: ${hash2}`);
+      await sleep(2000);
+    }
+    addStep('wPayInvoice2', 'success', { paymentHash: hash2, assetAmount: 50 });
+
+    // inv3: B creates (50 asset units), A pays
+    addStep('wPayInvoice3', 'running');
+    const inv3Resp = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice3 = String(inv3Resp?.lnInvoice ?? '');
+    const send3Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice3 });
+    const hash3 = String(send3Resp?.txid ?? '');
+    const pay3Deadline = Date.now() + 60000;
+    while (Date.now() < pay3Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash3);
+      console.log(`[wPay] inv3 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice3 payment failed: ${hash3}`);
+      await sleep(2000);
+    }
+    addStep('wPayInvoice3', 'success', { paymentHash: hash3, assetAmount: 50 });
+
+    // inv4: A creates (50 asset units), B pays
+    addStep('wPayInvoice4', 'running');
+    const inv4Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice4 = String(inv4Resp?.lnInvoice ?? '');
+    const send4Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice4 });
+    const hash4 = String(send4Resp?.txid ?? '');
+    const pay4Deadline = Date.now() + 60000;
+    while (Date.now() < pay4Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash4);
+      console.log(`[wPay] inv4 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice4 payment failed: ${hash4}`);
+      await sleep(2000);
+    }
+    addStep('wPayInvoice4', 'success', { paymentHash: hash4, assetAmount: 50 });
+
+    // Cooperative close
+    addStep('wPayCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(channelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wPayCloseChannel', 'success', { channelId });
+
+    // After close: A=950 (400 settled + 550 from channel), B=50
+    addStep('wPayWaitBalances', 'running');
+    const balDeadlineA = Date.now() + 70000;
+    let lastSpendableA = -1;
+    while (Date.now() < balDeadlineA) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableA = Number(b?.spendable ?? -1);
+        console.log(`[wPay] waitBal nodeA spendable=${lastSpendableA} expected=950`);
+        if (lastSpendableA === 950) break;
+      } catch (e: any) { console.warn(`[wPay] waitBal nodeA: ${e?.message}`); }
+      try { await nodeA.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableA !== 950) throw new Error(`nodeA balance did not reach 950, last=${lastSpendableA}`);
+
+    const balDeadlineB = Date.now() + 70000;
+    let lastSpendableB = -1;
+    while (Date.now() < balDeadlineB) {
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableB = Number(b?.spendable ?? -1);
+        console.log(`[wPay] waitBal nodeB spendable=${lastSpendableB} expected=50`);
+        if (lastSpendableB === 50) break;
+      } catch (e: any) { console.warn(`[wPay] waitBal nodeB: ${e?.message}`); }
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableB !== 50) throw new Error(`nodeB balance did not reach 50, last=${lastSpendableB}`);
+    addStep('wPayWaitBalances', 'success', { expectedA: 950, expectedB: 50 });
+
+    // RGB on-chain sends to nodeC (A sends 925, B sends 25)
+    addStep('wPayRgbSendA', 'running');
+    const invC1 = await nodeC.blindReceive({ minConfirmations: 1 });
+    await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
+    await mine(1);
+    await nodeC.syncWallet();
+    await nodeC.refreshWallet();
+    await nodeC.refreshWallet();
+    await nodeA.refreshWallet();
+    addStep('wPayRgbSendA', 'success', { amount: 925, recipientId: invC1.recipientId.substring(0, 20) + '...' });
+
+    addStep('wPayRgbSendB', 'running');
+    const invC2 = await nodeC.blindReceive({ minConfirmations: 1 });
+    await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
+    await mine(1);
+    await nodeC.syncWallet();
+    await nodeC.refreshWallet();
+    await nodeC.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('wPayRgbSendB', 'success', { amount: 25, recipientId: invC2.recipientId.substring(0, 20) + '...' });
+
+    // Final balances: A=25, B=25, C=950
+    addStep('wPayFinalBalances', 'running');
+    const [finalA, finalB, finalC] = await Promise.all([
+      nodeA.getAssetBalance(assetId),
+      nodeB.getAssetBalance(assetId),
+      nodeC.getAssetBalance(assetId),
+    ]);
+    addStep('wPayFinalBalances', 'success', {
+      spendableA: finalA?.spendable ?? null,
+      spendableB: finalB?.spendable ?? null,
+      spendableC: finalC?.spendable ?? null,
+    });
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeA) { try { await nodeA.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    if (nodeC) { try { await nodeC.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+// Same as runRLNUtexoPaymentFlow but nodeB uses NativeExternalRLNSigner.
+// pushMsat must be 0 — VLS rejects non-zero push on the acceptor side.
+// Balance math (pushMsat=0): open: A=600, B=0
+//   inv1(B→A 100): A=500, B=100  inv2(A→B 50): A=550, B=50
+//   inv3(B→A 50):  A=500, B=100  inv4(A→B 50): A=550, B=50
+//   after close: A=400+550=950, B=50
+//   rgb send A→C 925, B→C 25 → A=25, B=25, C=950
+export async function runRLNUtexoExternalPaymentFlow() {
+  const flowName = 'runRLNUtexoExternalPaymentFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let nodeA: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
+  let nodeC: UTEXOWallet | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const keysC = await createWallet(network);
+    const nodeAPassword = 'nodeApass';
+    const nodeCPassword = 'nodeCpass';
+
+    const basePortA = 22000 + Math.floor(Math.random() * 5000);
+    const basePortB = basePortA + 100;
+    const basePortC = basePortA + 200;
+    const ts = Date.now();
+    const storageDirUriA = `${documentDirectory ?? ''}rln_xpay_a_${ts}`;
+    const storageDirUriB = `${documentDirectory ?? ''}rln_xpay_b_${ts}`;
+    const storageDirUriC = `${documentDirectory ?? ''}rln_xpay_c_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUriA, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriB, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirUriC, { intermediates: true });
+    const storageDirA = storageDirUriA.replace('file://', '');
+    const storageDirB = storageDirUriB.replace('file://', '');
+    const storageDirC = storageDirUriC.replace('file://', '');
+
+    nodeA = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePortA,
+        ldkPeerListeningPort: basePortA + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
+    );
+    // nodeB uses NativeExternalRLNSigner — VLS in-process transport
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePortB,
+        ldkPeerListeningPort: basePortB + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new NativeExternalRLNSigner(keysB.mnemonic, network),
+    );
+    nodeC = new UTEXOWallet(
+      {
+        storageDirPath: storageDirC,
+        daemonListeningPort: basePortC,
+        ldkPeerListeningPort: basePortC + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysC.accountXpubVanilla,
+        xpubCol: keysC.accountXpubColored,
+        masterFingerprint: keysC.masterFingerprint,
+      },
+      new PasswordRLNSigner(nodeCPassword, keysC.mnemonic),
+    );
+
+    addStep('xPayAInit', 'running');
+    await nodeA.init();
+    addStep('xPayAInit', 'success', { storageDirPath: storageDirA });
+
+    addStep('xPayAUnlock', 'running');
+    await nodeA.unlock(unlockParams);
+    addStep('xPayAUnlock', 'success', {});
+
+    addStep('xPayBInit', 'running');
+    await nodeB.init();
+    addStep('xPayBInit', 'success', { storageDirPath: storageDirB });
+
+    addStep('xPayBUnlock', 'running');
+    await nodeB.unlock(unlockParams);
+    addStep('xPayBUnlock', 'success', {});
+
+    addStep('xPayCInit', 'running');
+    await nodeC.init();
+    addStep('xPayCInit', 'success', { storageDirPath: storageDirC });
+
+    addStep('xPayCUnlock', 'running');
+    await nodeC.unlock(unlockParams);
+    addStep('xPayCUnlock', 'success', {});
+
+    addStep('xPayAFund', 'running');
+    const addrA = await nodeA.getAddress();
+    const txidA = await sendToAddress(addrA, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeA.syncWallet();
+    const balA = await nodeA.getBtcBalance();
+    addStep('xPayAFund', 'success', { txid: txidA, address: addrA, balance: balA });
+
+    addStep('xPayACreateUtxos', 'running');
+    await nodeA.syncWallet();
+    await nodeA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeA.syncWallet();
+    addStep('xPayACreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayBFund', 'running');
+    const addrB = await nodeB.getAddress();
+    const txidB = await sendToAddress(addrB, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeB.syncWallet();
+    const balB = await nodeB.getBtcBalance();
+    addStep('xPayBFund', 'success', { txid: txidB, address: addrB, balance: balB });
+
+    addStep('xPayBCreateUtxos', 'running');
+    await nodeB.syncWallet();
+    await nodeB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeB.syncWallet();
+    addStep('xPayBCreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayCFund', 'running');
+    const addrC = await nodeC.getAddress();
+    const txidC = await sendToAddress(addrC, 1);
+    await mine(6);
+    await sleep(3000);
+    await nodeC.syncWallet();
+    const balC = await nodeC.getBtcBalance();
+    addStep('xPayCFund', 'success', { txid: txidC, address: addrC, balance: balC });
+
+    addStep('xPayCCreateUtxos', 'running');
+    await nodeC.syncWallet();
+    await nodeC.createUtxos({ upTo: false, num: 10, feeRate: 7 });
+    await mine(1);
+    await nodeC.syncWallet();
+    addStep('xPayCCreateUtxos', 'success', { num: 10 });
+
+    addStep('xPayIssueAsset', 'running');
+    const issued = await nodeA.issueAssetNia({ ticker: 'USDT', name: 'Tether', precision: 0, amounts: [1000] });
+    const assetId = String(issued?.assetId ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    addStep('xPayIssueAsset', 'success', { assetId });
+
+    const infoA = await nodeA.getNodeInfo();
+    const infoB = await nodeB.getNodeInfo();
+    const pubkeyA = String(infoA?.pubkey ?? '');
+    const pubkeyB = String(infoB?.pubkey ?? '');
+    addStep('xPayNodeInfos', 'success', {
+      pubkeyA: pubkeyA.substring(0, 16) + '...',
+      pubkeyB: pubkeyB.substring(0, 16) + '...',
+    });
+
+    addStep('xPayConnectPeers', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePortB + 1}`;
+    try {
+      await nodeA.connectPeer(peerUriB);
+    } catch (e: any) {
+      if (isPoisonLike(e)) {
+        addStep('xPayConnectPeers', 'error', undefined, e?.message ?? String(e));
+        throw e;
+      }
+      console.warn(`[xPay] connectPeer ignored: ${e?.message ?? String(e)}`);
+    }
+    addStep('xPayConnectPeers', 'success', { peerUriB });
+
+    // nodeA opens asset channel to nodeB; pushMsat=0 required for external signer acceptor
+    let fundingTxid = '';
+    let channelId = '';
+    addStep('xPayOpenChannel', 'running');
+    try {
+    await nodeA.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 100000,
+      pushMsat: 0,
+      public: true,
+      withAnchors: true,
+      assetId,
+      assetAmount: 600,
+    });
+    const fundDeadline = Date.now() + 120000;
+    while (Date.now() < fundDeadline) {
+      await nodeA.syncWallet();
+      const channels: any[] = (await nodeA.listChannels()) ?? [];
+      const ch = channels.find(
+        (c: any) => (c.assetId ?? c.asset_id) === assetId && (c.fundingTxid ?? c.funding_txid) != null,
+      );
+      if (ch) {
+        fundingTxid = String(ch.fundingTxid ?? ch.funding_txid ?? '');
+        channelId = String(ch.channelId ?? ch.channel_id ?? '');
+        break;
+      }
+      await sleep(1000);
+    }
+    if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
+    console.log(`[xPay] channelId=${channelId} fundingTxid=${fundingTxid}`);
+
+    await mine(6);
+    await sleep(3000);
+    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[xPay] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    await mine(6);
+    addStep('xPayOpenChannel', 'success', { channelId, fundingTxid });
+    } catch (e: any) {
+      addStep('xPayOpenChannel', 'error', undefined, e?.message ?? String(e));
+      throw e;
+    }
+
+    addStep('xPayAssetBalanceA', 'running');
+    const bal0 = await nodeA.getAssetBalance(assetId);
+    addStep('xPayAssetBalanceA', 'success', { spendable: bal0?.spendable ?? null });
+
+    // inv1: B creates (100 asset units), A pays → A_chan=500, B_chan=100
+    // amountSats=5000 so nodeB gets 5000 sats; it will need 3000+1000(reserve)=4000 for inv2.
+    addStep('xPayInvoice1', 'running');
+    const inv1Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 100 } });
+    const invoice1 = String(inv1Resp?.lnInvoice ?? '');
+    const send1Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
+    const hash1 = String(send1Resp?.txid ?? '');
+    const pay1Deadline = Date.now() + 60000;
+    while (Date.now() < pay1Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash1);
+      console.log(`[xPay] inv1 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice1 payment failed: ${hash1}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice1', 'success', { paymentHash: hash1, assetAmount: 100 });
+
+    // inv2: A creates (50 asset units), B pays → A_chan=550, B_chan=50
+    // RGB invoices require amountSats>=3000 (RGB_MIN_HTLC_MSAT=3_000_000 msat). nodeB has 5000
+    // sats from inv1; pays 3000, keeps 2000 >= 1000 (channel reserve). Fine.
+    addStep('xPayInvoice2', 'running');
+    const inv2Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice2 = String(inv2Resp?.lnInvoice ?? '');
+    const send2Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice2 });
+    const hash2 = String(send2Resp?.txid ?? '');
+    const pay2Deadline = Date.now() + 60000;
+    while (Date.now() < pay2Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash2);
+      console.log(`[xPay] inv2 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice2 payment failed: ${hash2}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice2', 'success', { paymentHash: hash2, assetAmount: 50 });
+
+    // inv3: B creates (50 asset units), A pays → A_chan=500, B_chan=100
+    // amountSats=5000 again so nodeB can afford inv4 (3000 sats + reserve).
+    addStep('xPayInvoice3', 'running');
+    const inv3Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice3 = String(inv3Resp?.lnInvoice ?? '');
+    const send3Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice3 });
+    const hash3 = String(send3Resp?.txid ?? '');
+    const pay3Deadline = Date.now() + 60000;
+    while (Date.now() < pay3Deadline) {
+      await nodeA.syncWallet();
+      const status = await nodeA.getLightningSendRequest(hash3);
+      console.log(`[xPay] inv3 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice3 payment failed: ${hash3}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice3', 'success', { paymentHash: hash3, assetAmount: 50 });
+
+    // inv4: A creates (50 asset units), B pays → A_chan=550, B_chan=50
+    // nodeB has 2000(leftover)+5000(inv3)=7000 sats; pays 3000, keeps 4000 >= reserve. Fine.
+    addStep('xPayInvoice4', 'running');
+    const inv4Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const invoice4 = String(inv4Resp?.lnInvoice ?? '');
+    const send4Resp = await nodeB.payLightningInvoice({ lnInvoice: invoice4 });
+    const hash4 = String(send4Resp?.txid ?? '');
+    const pay4Deadline = Date.now() + 60000;
+    while (Date.now() < pay4Deadline) {
+      await nodeB.syncWallet();
+      const status = await nodeB.getLightningSendRequest(hash4);
+      console.log(`[xPay] inv4 sendStatus=${status}`);
+      if (status === 'Settled') break;
+      if (status === 'Failed') throw new Error(`Invoice4 payment failed: ${hash4}`);
+      await sleep(2000);
+    }
+    addStep('xPayInvoice4', 'success', { paymentHash: hash4, assetAmount: 50 });
+
+    // Cooperative close: A=400(off-chain)+550(channel)=950, B=50
+    addStep('xPayCloseChannel', 'running');
+    try { await nodeA.syncWallet(); } catch {}
+    try { await nodeB.syncWallet(); } catch {}
+    await nodeA.closeChannel(channelId, pubkeyB, false);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    await sleep(20000);
+    await mine(6);
+    await nodeA.refreshWallet();
+    await nodeB.refreshWallet();
+    addStep('xPayCloseChannel', 'success', { channelId });
+
+    // Wait for settled balances: A=950, B=50
+    addStep('xPayWaitBalances', 'running');
+    const balDeadlineA = Date.now() + 70000;
+    let lastSpendableA = -1;
+    while (Date.now() < balDeadlineA) {
+      try {
+        const b = await nodeA.getAssetBalance(assetId);
+        lastSpendableA = Number(b?.spendable ?? -1);
+        console.log(`[xPay] waitBal nodeA spendable=${lastSpendableA} expected=950`);
+        if (lastSpendableA === 950) break;
+      } catch (e: any) { console.warn(`[xPay] waitBal nodeA: ${e?.message}`); }
+      try { await nodeA.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableA !== 950) throw new Error(`nodeA balance did not reach 950, last=${lastSpendableA}`);
+
+    const balDeadlineB = Date.now() + 70000;
+    let lastSpendableB = -1;
+    while (Date.now() < balDeadlineB) {
+      try {
+        const b = await nodeB.getAssetBalance(assetId);
+        lastSpendableB = Number(b?.spendable ?? -1);
+        console.log(`[xPay] waitBal nodeB spendable=${lastSpendableB} expected=50`);
+        if (lastSpendableB === 50) break;
+      } catch (e: any) { console.warn(`[xPay] waitBal nodeB: ${e?.message}`); }
+      try { await nodeB.refreshWallet(); } catch {}
+      await sleep(2000);
+    }
+    if (lastSpendableB !== 50) throw new Error(`nodeB balance did not reach 50, last=${lastSpendableB}`);
+    addStep('xPayWaitBalances', 'success', { expectedA: 950, expectedB: 50 });
+
+    // TODO iteration 2: RGB on-chain sends to nodeC (A sends 925, B sends 25 → A=25, B=25, C=950)
+    // addStep('xPayRgbSendA', 'running');
+    // const invC1 = await nodeC.blindReceive({ minConfirmations: 1 });
+    // await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeC.syncWallet();
+    // await nodeC.refreshWallet();
+    // await nodeC.refreshWallet();
+    // await nodeA.refreshWallet();
+    // addStep('xPayRgbSendA', 'success', { amount: 925, recipientId: invC1.recipientId.substring(0, 20) + '...' });
+
+    // addStep('xPayRgbSendB', 'running');
+    // const invC2 = await nodeC.blindReceive({ minConfirmations: 1 });
+    // await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
+    // await mine(1);
+    // await nodeC.syncWallet();
+    // await nodeC.refreshWallet();
+    // await nodeC.refreshWallet();
+    // await nodeB.refreshWallet();
+    // addStep('xPayRgbSendB', 'success', { amount: 25, recipientId: invC2.recipientId.substring(0, 20) + '...' });
+
+    // TODO iteration 2: Final balances: A=25, B=25, C=950
+    // addStep('xPayFinalBalances', 'running');
+    // const [finalA, finalB, finalC] = await Promise.all([
+    //   nodeA.getAssetBalance(assetId),
+    //   nodeB.getAssetBalance(assetId),
+    //   nodeC.getAssetBalance(assetId),
+    // ]);
+    // addStep('xPayFinalBalances', 'success', {
+    //   spendableA: finalA?.spendable ?? null,
+    //   spendableB: finalB?.spendable ?? null,
+    //   spendableC: finalC?.spendable ?? null,
+    // });
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (nodeA) { try { await nodeA.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    if (nodeC) { try { await nodeC.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
   }
 }

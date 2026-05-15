@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -12,75 +12,37 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
-  accountXpubsFromMnemonic,
   BadRequestError,
-  BIP32_VERSIONS,
-  bridgeAPI,
-  COIN_BITCOIN_MAINNET,
-  COIN_BITCOIN_TESTNET,
-  COIN_RGB_MAINNET,
-  COIN_RGB_TESTNET,
   ConfigurationError,
-  configureLogging,
-  ConflictError,
-  createWalletManager,
   CryptoError,
   DEFAULT_INDEXER_URLS,
-  DEFAULT_API_TIMEOUT,
-  DEFAULT_LOG_LEVEL,
-  DEFAULT_MAX_RETRIES,
-  DEFAULT_NETWORK,
-  DERIVATION_ACCOUNT,
-  DERIVATION_PURPOSE,
   deriveKeysFromMnemonic,
-  deriveKeysFromMnemonicOrSeed,
-  deriveKeysFromSeed,
-  deriveKeysFromXpriv,
-  fromUnitsNumber,
-  generateKeys,
-  getDestinationAsset,
-  getXprivFromMnemonic,
-  getXpubFromXpriv,
-  KEYCHAIN_BTC,
-  KEYCHAIN_RGB,
   LightningProtocol,
-  logger,
-  LogLevel,
-  NETWORK_MAP,
   NetworkError,
   normalizeNetwork,
   NotFoundError,
   OnchainProtocol,
-  restoreFromVss,
-  restoreKeys,
-  RgbNodeError,
   SDKError,
   signMessage,
-  signPsbt,
-  signPsbtFromSeed,
-  signPsbtSync,
-  toUnitsNumber,
-  utexoNetworkIdMap,
-  utexoNetworkMap,
-  UTEXOProtocol,
   UTEXOWallet,
   validateBase64,
   validateHex,
   validateMnemonic,
   validateNetwork,
   validatePsbt,
-  validateRequired,
-  validateString,
   ValidationError,
   verifyMessage,
   VssBackupConfig,
-  wallet,
   WalletError,
-  WalletManager,
 } from '@utexo/rgb-sdk-rn';
 
-import { runUtexoVssFlow } from '@/utils/wallet-flow';
 import { AppColors } from '@/constants/theme';
+import {
+  runRlnUtexoWalletChannelPaymentFlow,
+  runRLNUtexoPaymentFlow,
+  runRlnUtexoWalletAssetChannelExtSignerFlow,
+  runRLNUtexoExternalPaymentFlow,
+} from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
 
@@ -127,6 +89,7 @@ function StepCard({
   desc,
   accentColor,
   isLast,
+  deferErrorDisplay = false,
 }: {
   idx: number;
   step: { status: string; data?: any; error?: string; result?: any };
@@ -134,10 +97,12 @@ function StepCard({
   desc: string;
   accentColor: string;
   isLast: boolean;
+  deferErrorDisplay?: boolean;
 }) {
   const isSuccess = step.status === 'success';
   const isRunning = step.status === 'running';
   const isError = step.status === 'error';
+  const showErrorState = isError && !deferErrorDisplay;
 
   const detail = step.data ?? step.result;
 
@@ -145,7 +110,7 @@ function StepCard({
     ? AppColors.success
     : isRunning
     ? accentColor
-    : isError
+    : showErrorState
     ? AppColors.error
     : AppColors.textTertiary;
 
@@ -153,7 +118,7 @@ function StepCard({
     ? AppColors.successBg
     : isRunning
     ? accentColor + '18'
-    : isError
+    : showErrorState
     ? AppColors.errorBg
     : AppColors.bgCardElevated;
 
@@ -166,7 +131,7 @@ function StepCard({
             <ActivityIndicator size={12} color={accentColor} />
           ) : isSuccess ? (
             <Text style={[sStyles.circleText, { color: AppColors.success }]}>✓</Text>
-          ) : isError ? (
+          ) : showErrorState ? (
             <Text style={[sStyles.circleText, { color: AppColors.error }]}>✗</Text>
           ) : (
             <Text style={[sStyles.circleText, { color: AppColors.textTertiary }]}>{idx + 1}</Text>
@@ -183,7 +148,7 @@ function StepCard({
           <Text style={[
             sStyles.stepLabel,
             isSuccess && { color: AppColors.textPrimary },
-            isError && { color: AppColors.error },
+            showErrorState && { color: AppColors.error },
             isRunning && { color: accentColor },
           ]}>
             {label}
@@ -193,7 +158,7 @@ function StepCard({
               <Text style={[sStyles.statusTagText, { color: accentColor }]}>running</Text>
             </View>
           )}
-          {isError && (
+          {showErrorState && (
             <View style={[sStyles.statusTag, { backgroundColor: AppColors.errorBg, borderColor: AppColors.errorBorder }]}>
               <Text style={[sStyles.statusTagText, { color: AppColors.error }]}>failed</Text>
             </View>
@@ -201,8 +166,8 @@ function StepCard({
         </View>
         <Text style={sStyles.stepDesc}>{desc}</Text>
         {(detail || step.error) && (
-          <View style={[sStyles.codeBox, isError && { borderColor: AppColors.errorBorder, backgroundColor: AppColors.errorBg }]}>
-            <Text style={[sStyles.codeText, isError && { color: '#FCA5A5' }]}>
+          <View style={[sStyles.codeBox, showErrorState && { borderColor: AppColors.errorBorder, backgroundColor: AppColors.errorBg }]}>
+            <Text style={[sStyles.codeText, showErrorState && { color: '#FCA5A5' }]}>
               {detail ? formatDetail(detail) : step.error}
             </Text>
           </View>
@@ -240,11 +205,19 @@ function FlowCard({
   const hasResults = results !== null;
   const success = results?.success;
   const steps = results?.steps ?? [];
+  const effectiveRunning = running || results?.running === true;
   const doneCount = steps.filter((s: any) => s.status === 'success').length;
   const total = totalSteps ?? steps.length;
+  const borderColor = !hasResults
+    ? AppColors.border
+    : effectiveRunning
+    ? AppColors.border
+    : success
+    ? AppColors.successBorder
+    : AppColors.errorBorder;
 
   return (
-    <View style={[fStyles.card, { borderColor: hasResults ? (success ? AppColors.successBorder : AppColors.errorBorder) : AppColors.border }]}>
+    <View style={[fStyles.card, { borderColor }]}>
       {/* Card header */}
       <View style={[fStyles.cardHeader, { borderBottomColor: AppColors.border }]}>
         <View style={[fStyles.cardAccentBar, { backgroundColor: accentColor }]} />
@@ -252,8 +225,8 @@ function FlowCard({
           <View style={fStyles.cardTitleRow}>
             <Text style={fStyles.cardTitle}>{title}</Text>
             {subtitle && <Text style={fStyles.cardSubtitle}>{subtitle}</Text>}
-            {running && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
-            {hasResults && !running && (
+            {effectiveRunning && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
+            {hasResults && !effectiveRunning && (
               <View style={[fStyles.statusPill, { backgroundColor: success ? AppColors.successBg : AppColors.errorBg, borderColor: success ? AppColors.successBorder : AppColors.errorBorder }]}>
                 <Text style={[fStyles.statusText, { color: success ? AppColors.success : AppColors.error }]}>
                   {success ? 'Passed' : 'Failed'}
@@ -264,6 +237,14 @@ function FlowCard({
           <Text style={fStyles.cardDesc}>{description}</Text>
         </View>
       </View>
+
+      {/* Flow-level error summary */}
+      {hasResults && !effectiveRunning && success === false && results?.error && (
+        <View style={fStyles.flowErrorBox}>
+          <Text style={fStyles.flowErrorTitle}>Failure reason</Text>
+          <Text style={fStyles.flowErrorText}>{formatDetail(results.error)}</Text>
+        </View>
+      )}
 
       {/* Progress dots */}
       {steps.length > 0 && total > 0 && (
@@ -277,7 +258,9 @@ function FlowCard({
               : s.status === 'running'
               ? accentColor
               : s.status === 'error'
-              ? AppColors.error
+              ? effectiveRunning
+                ? AppColors.border
+                : AppColors.error
               : AppColors.border;
             return (
               <View key={i} style={[fStyles.dot, { backgroundColor: dotColor }]}>
@@ -292,7 +275,7 @@ function FlowCard({
       )}
 
       {/* Idle state */}
-      {!hasResults && !running && (
+      {!hasResults && !effectiveRunning && (
         <View style={fStyles.idleBody}>
           <TouchableOpacity
             style={[fStyles.runBtn, { backgroundColor: accentColor }]}
@@ -314,7 +297,7 @@ function FlowCard({
       {extra}
 
       {/* Re-run button */}
-      {hasResults && !running && (
+      {hasResults && !effectiveRunning && (
         <TouchableOpacity
           style={[fStyles.rerunBtn, { borderColor: accentColor }]}
           onPress={onRun}
@@ -386,602 +369,455 @@ function TestSummaryCard({ results, loading }: { results: TestSuite | null; load
   );
 }
 
-// ─── Wallet flow step meta ────────────────────────────────────────────────────
-
-const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet' },
-  getAddress:           { label: 'Get Deposit Address',   desc: 'Derive a receive address' },
-  fundWallet:           { label: 'Fund via Faucet',       desc: 'Send sats from thunderstack faucet' },
-  waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
-  createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
-  issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
-  sendIssuedAssetToReceiver: { label: 'Witness Send to Receiver', desc: 'Init receiver, witness invoice, send asset, then timed refreshes' },
-  listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
-  getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
-  vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
-  vssBackupInfo:        { label: 'VSS Backup Info',       desc: 'Verify backup exists on server' },
-  disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet handles' },
-  deleteState:          { label: 'Delete Local State',    desc: 'Prepare restore directory' },
-  restoreFromVss:       { label: 'Restore from VSS',      desc: 'Download & decrypt backup' },
-  verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Check assets & balances match' },
-  cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
-};
-
-const TESTNET_WALLET_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:       { label: 'Generate Keys',          desc: 'deriveKeys for Bitcoin testnet' },
-  createWalletManager: { label: 'Create WalletManager',   desc: 'testnet + DEFAULT_INDEXER_URLS.testnet' },
-  initialize:         { label: 'Initialize (go online)', desc: 'Connect Electrum indexer; wallet syncs' },
-  syncWallet:         { label: 'Sync Wallet',            desc: 'syncWallet() — pull chain / indexer state' },
-  refreshWallet:      { label: 'Refresh Wallet',         desc: 'refreshWallet() — update RGB state' },
-  getAddress:         { label: 'Get Deposit Address',    desc: 'Fresh receive address' },
-  getBtcBalance:      { label: 'Get BTC Balance',        desc: 'Vanilla + colored settled sats' },
-  dispose:            { label: 'Dispose',                desc: 'Release native wallet handle' },
-};
-
-const REUSE_ADDRESS_FLOW_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:              { label: 'Generate Keys',              desc: 'deriveKeys for Bitcoin testnet' },
-  createWalletReuse:         { label: 'Create WalletManager',        desc: 'reuseAddresses: true + DEFAULT_INDEXER_URLS.testnet' },
-  initialize:                { label: 'Initialize (go online)',     desc: 'Connect Electrum indexer' },
-  syncWallet:                { label: 'Sync Wallet',                desc: 'syncWallet()' },
-  refreshWallet:             { label: 'Refresh Wallet',             desc: 'refreshWallet()' },
-  addressPairBeforeRotate:   { label: 'Two getAddress (before)',    desc: 'reuse mode: both calls must return the same address' },
-  rotateAddresses:           { label: 'Rotate vanilla + colored', desc: 'rotateVanillaAddress() then rotateColoredAddress()' },
-  addressPairAfterRotate:    { label: 'Two getAddress (after)',     desc: 'reuse mode: pair still matches; value may differ from before' },
-  dispose:                   { label: 'Dispose',                    desc: 'Release native wallet handle' },
-};
-
-const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
-  initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
-  vssBackup:            { label: 'Upload Backup',          desc: 'Encrypt & push to VSS server' },
-  vssBackupInfo:        { label: 'Check Backup Status',    desc: 'Query server for backup metadata' },
-  configureVssBackup:   { label: 'Configure Auto-backup',  desc: 'Enable background auto-backup' },
-  disableVssAutoBackup: { label: 'Disable Auto-backup',    desc: 'Stop background auto-backup' },
-  restoreFromVss:       { label: 'Restore from VSS',       desc: 'Download & decrypt wallet data' },
-  verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
+const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
+  rlnCreateNode: { label: 'Create Node', desc: 'Create RLN node with local storage and ports' },
+  rlnInitNode: { label: 'Init Node', desc: 'Initialize node with wallet mnemonic' },
+  rlnUnlockNode: { label: 'Unlock Node', desc: 'Unlock node with bitcoind/indexer/proxy settings' },
+  rlnNodeInfo: { label: 'Node Info', desc: 'Read node summary and balances' },
+  rlnNetworkInfo: { label: 'Network Info', desc: 'Read chain network and height' },
+  rlnListPeers: { label: 'List Peers', desc: 'Fetch currently known peers' },
+  rlnConnectPeer: { label: 'Connect Peer', desc: 'Connect to test peer endpoint' },
+  rlnDisconnectPeer: { label: 'Disconnect Peer', desc: 'Disconnect selected peer pubkey' },
+  rlnListChannels: { label: 'List Channels', desc: 'Fetch currently known channels' },
+  rlnOpenChannel: { label: 'Open Channel', desc: 'Try opening a test channel' },
+  rlnCloseChannel: { label: 'Close Channel', desc: 'Close opened channel when available' },
+  rlnListPayments: { label: 'List Payments', desc: 'Fetch payments history from RLN node' },
+  rlnAddress: { label: 'Address', desc: 'Request onchain receive address' },
+  fundAddress: { label: 'Fund Address', desc: 'Send BTC to node address and mine confirmation blocks' },
+  rlnBtcBalance: { label: 'BTC Balance', desc: 'Read BTC balances from RLN node' },
+  rlnAssetBalance: { label: 'Asset Balance', desc: 'Read RGB asset balance for provided assetId' },
+  rlnCheckIndexerUrl: { label: 'Check Indexer URL', desc: 'Validate indexer endpoint reachability' },
+  rlnCheckProxyEndpoint: { label: 'Check Proxy Endpoint', desc: 'Validate proxy endpoint reachability' },
+  rlnEstimateFee: { label: 'Estimate Fee', desc: 'Estimate fee rates for target blocks' },
+  rlnCreateUtxos: { label: 'Create UTXOs', desc: 'Request UTXO creation on RLN node wallet' },
+  rlnDecodeLnInvoice: { label: 'Decode LN Invoice', desc: 'Decode BOLT11 lightning invoice string' },
+  rlnDecodeRgbInvoice: { label: 'Decode RGB Invoice', desc: 'Decode RGB invoice string' },
+  rlnFailTransfers: { label: 'Fail Transfers', desc: 'Mark pending transfers as failed' },
+  rlnGetChannelId: { label: 'Get Channel ID', desc: 'Resolve channel id from temporary id' },
+  rlnGetPayment: { label: 'Get Payment', desc: 'Lookup payment by payment hash' },
+  rlnInvoiceStatus: { label: 'Invoice Status', desc: 'Read status for LN invoice' },
+  rlnKeysend: { label: 'Keysend', desc: 'Send keysend payment attempt' },
+  rlnListAssets: { label: 'List Assets', desc: 'List RGB assets tracked by RLN wallet' },
+  rlnListTransactions: { label: 'List Transactions', desc: 'List onchain transactions' },
+  rlnListTransfers: { label: 'List Transfers', desc: 'List RGB transfers for assetId' },
+  rlnListUnspents: { label: 'List Unspents', desc: 'List spendable unspent outputs' },
+  rlnLnInvoice: { label: 'Create LN Invoice', desc: 'Create lightning invoice request' },
+  rlnRefreshTransfers: { label: 'Refresh Transfers', desc: 'Refresh transfer statuses from network' },
+  rlnRgbInvoice: { label: 'Create RGB Invoice', desc: 'Create RGB receive invoice request' },
+  rlnSendBtc: { label: 'Send BTC', desc: 'Send onchain BTC transaction attempt' },
+  rlnSendPayment: { label: 'Send Payment', desc: 'Pay lightning invoice attempt' },
+  rlnSendRgb: { label: 'Send RGB', desc: 'Send RGB transfer attempt' },
+  rlnBackup: { label: 'Backup', desc: 'Trigger RLN wallet backup request' },
+  rlnSync: { label: 'Sync', desc: 'Sync RLN node wallet state' },
+  rlnLock: { label: 'Lock', desc: 'Not supported in current RLN bindings' },
+  rlnRestore: { label: 'Restore', desc: 'Wallet-level restore, not RLN node method' },
+  rlnShutdown: { label: 'Shutdown', desc: 'Shutdown RLN node process' },
+  rlnDestroyNode: { label: 'Destroy Node', desc: 'Destroy node handle and cleanup resources' },
+  rlnCreateNativeExternalSigner: { label: 'Create External Signer', desc: 'Create native external signer from BIP39 seed' },
+  rlnInitNodeWithNativeExternalSigner: { label: 'Init With External Signer', desc: 'Initialize node using native external signer instead of password' },
+  rlnUnlockNodeWithNativeExternalSigner: { label: 'Unlock With External Signer', desc: 'Unlock node using native external signer with bitcoind/indexer settings' },
+  rlnDestroyNativeExternalSigner: { label: 'Destroy External Signer', desc: 'Destroy native external signer handle' },
+  rlnSyncBeforeRestart: { label: 'Sync Before Restart', desc: 'Sync node before restart sequence' },
+  rlnShutdownForRestart: { label: 'Shutdown For Restart', desc: 'Shutdown node to validate restart lifecycle' },
+  rlnUnlockAfterRestart: { label: 'Unlock After Restart', desc: 'Unlock node again after shutdown' },
+  rlnNodeInfoAfterRestart: { label: 'Node Info After Restart', desc: 'Validate node information after restart' },
+  rlnOpenCloseCycle1: { label: 'Open/Close Cycle 1', desc: 'First open-close channel diagnostic cycle' },
+  rlnOpenCloseCycle2: { label: 'Open/Close Cycle 2', desc: 'Second open-close channel diagnostic cycle' },
+  // ── Payment flow steps ────────────────────────────────────────────────────
+  payACreateNode: { label: 'Pay Node A Create', desc: 'Create RLN node A for payment flow' },
+  payAInitNode: { label: 'Pay Node A Init', desc: 'Initialize payment node A' },
+  payAUnlockNode: { label: 'Pay Node A Unlock', desc: 'Unlock payment node A' },
+  payBCreateNode: { label: 'Pay Node B Create', desc: 'Create RLN node B for payment flow' },
+  payBInitNode: { label: 'Pay Node B Init', desc: 'Initialize payment node B' },
+  payBUnlockNode: { label: 'Pay Node B Unlock', desc: 'Unlock payment node B' },
+  payCCreateNode: { label: 'Pay Node C Create', desc: 'Create RLN node C for payment flow' },
+  payCInitNode: { label: 'Pay Node C Init', desc: 'Initialize payment node C' },
+  payCUnlockNode: { label: 'Pay Node C Unlock', desc: 'Unlock payment node C' },
+  payAFund: { label: 'Pay Node A Fund', desc: 'Fund payment node A with BTC' },
+  payACreateUtxos: { label: 'Pay Node A UTXOs', desc: 'Create UTXOs for payment node A' },
+  payBFund: { label: 'Pay Node B Fund', desc: 'Fund payment node B with BTC' },
+  payBCreateUtxos: { label: 'Pay Node B UTXOs', desc: 'Create UTXOs for payment node B' },
+  payCFund: { label: 'Pay Node C Fund', desc: 'Fund payment node C with BTC' },
+  payCCreateUtxos: { label: 'Pay Node C UTXOs', desc: 'Create UTXOs for payment node C' },
+  payNodeInfos: { label: 'Pay Node Infos', desc: 'Fetch pubkeys for payment nodes A and B' },
+  payConnectPeers: { label: 'Pay Connect Peers', desc: 'Connect B→A and C→B peers' },
+  payOpenChannel: { label: 'Pay Open Channel', desc: 'B opens channel to A; wait for funding confirmation' },
+  payCreateInvoices: { label: 'Pay Create Invoices', desc: 'A creates 4 invoices concurrently' },
+  paySendPayment1: { label: 'Pay Send Payment 1', desc: 'B sends first payment to A (10k msat)' },
+  payWaitInvoice1: { label: 'Pay Wait Invoice 1', desc: 'Wait for invoice 1 SUCCEEDED on A' },
+  payWaitSender1: { label: 'Pay Wait Sender 1', desc: 'Wait for payment 1 success on B' },
+  paySendPayment2: { label: 'Pay Send Payment 2', desc: 'B sends second payment to A (20k msat)' },
+  payWaitInvoice2: { label: 'Pay Wait Invoice 2', desc: 'Wait for invoice 2 SUCCEEDED on A' },
+  payWaitSender2: { label: 'Pay Wait Sender 2', desc: 'Wait for payment 2 success on B' },
+  paySendPayment3: { label: 'Pay Send Payment 3', desc: 'B sends third payment to A (30k msat)' },
+  payWaitInvoice3: { label: 'Pay Wait Invoice 3', desc: 'Wait for invoice 3 SUCCEEDED on A' },
+  payWaitSender3: { label: 'Pay Wait Sender 3', desc: 'Wait for payment 3 success on B' },
+  paySendPayment4: { label: 'Pay Send Payment 4', desc: 'B sends fourth payment to A (40k msat)' },
+  payWaitInvoice4: { label: 'Pay Wait Invoice 4', desc: 'Wait for invoice 4 SUCCEEDED on A' },
+  payWaitSender4: { label: 'Pay Wait Sender 4', desc: 'Wait for payment 4 success on B' },
+  payCloseChannel: { label: 'Pay Close Channel', desc: 'Force close channel and mine confirmation blocks' },
+  payFinalBalance: { label: 'Pay Final Balance', desc: 'Read final BTC balance on node A' },
+  // ── Restart flow steps ────────────────────────────────────────────────────
+  restartACreateNode: { label: 'Restart Node A Create', desc: 'Create RLN node A for restart flow' },
+  restartAInitNode: { label: 'Restart Node A Init', desc: 'Initialize restart node A' },
+  restartAUnlockNode: { label: 'Restart Node A Unlock', desc: 'Unlock restart node A' },
+  restartBCreateNode: { label: 'Restart Node B Create', desc: 'Create RLN node B for restart flow' },
+  restartBInitNode: { label: 'Restart Node B Init', desc: 'Initialize restart node B' },
+  restartBUnlockNode: { label: 'Restart Node B Unlock', desc: 'Unlock restart node B' },
+  restartCCreateNode: { label: 'Restart Node C Create', desc: 'Create RLN node C for restart flow' },
+  restartCInitNode: { label: 'Restart Node C Init', desc: 'Initialize restart node C' },
+  restartCUnlockNode: { label: 'Restart Node C Unlock', desc: 'Unlock restart node C' },
+  restartAFund: { label: 'Restart Node A Fund', desc: 'Fund restart node A with BTC' },
+  restartACreateUtxos: { label: 'Restart Node A UTXOs', desc: 'Create UTXOs for restart node A' },
+  restartBFund: { label: 'Restart Node B Fund', desc: 'Fund restart node B with BTC' },
+  restartBCreateUtxos: { label: 'Restart Node B UTXOs', desc: 'Create UTXOs for restart node B' },
+  restartCFund: { label: 'Restart Node C Fund', desc: 'Fund restart node C with BTC' },
+  restartCCreateUtxos: { label: 'Restart Node C UTXOs', desc: 'Create UTXOs for restart node C' },
+  restartNodeInfos: { label: 'Restart Node Infos', desc: 'Fetch pubkeys for restart nodes A and B' },
+  restartConnectPeer: { label: 'Restart Connect Peer', desc: 'Connect B→A peer' },
+  restartOpenChannel: { label: 'Restart Open Channel', desc: 'A opens channel to B; wait for funding' },
+  restartPreRestartPayment: { label: 'Restart Pre-Restart Payment', desc: 'A pays B before restart' },
+  restartShutdownA: { label: 'Restart Shutdown A', desc: 'Shutdown node A for restart' },
+  restartShutdownB: { label: 'Restart Shutdown B', desc: 'Shutdown node B for restart' },
+  restartShutdownC: { label: 'Restart Shutdown C', desc: 'Shutdown node C for restart' },
+  restartARecreateCreateNode: { label: 'Restart A Recreate Create', desc: 'Recreate node A after shutdown' },
+  restartARecreateInitNode: { label: 'Restart A Recreate Init', desc: 'Re-init node A after shutdown' },
+  restartARecreateUnlockNode: { label: 'Restart A Recreate Unlock', desc: 'Re-unlock node A after shutdown' },
+  restartBRecreateCreateNode: { label: 'Restart B Recreate Create', desc: 'Recreate node B after shutdown' },
+  restartBRecreateInitNode: { label: 'Restart B Recreate Init', desc: 'Re-init node B after shutdown' },
+  restartBRecreateUnlockNode: { label: 'Restart B Recreate Unlock', desc: 'Re-unlock node B after shutdown' },
+  restartCRecreateCreateNode: { label: 'Restart C Recreate Create', desc: 'Recreate node C after shutdown' },
+  restartCRecreateInitNode: { label: 'Restart C Recreate Init', desc: 'Re-init node C after shutdown' },
+  restartCRecreateUnlockNode: { label: 'Restart C Recreate Unlock', desc: 'Re-unlock node C after shutdown' },
+  restartWaitUsableChannel: { label: 'Restart Wait Usable Channel', desc: 'Wait for channel to become usable after restart' },
+  restartVerifyPayment: { label: 'Restart Verify Payment', desc: 'Confirm pre-restart payment survived' },
+  // ── Multi open/close flow steps ───────────────────────────────────────────
+  mocACreateNode: { label: 'MOC Node A Create', desc: 'Create RLN node A for multi open/close flow' },
+  mocAInitNode: { label: 'MOC Node A Init', desc: 'Initialize multi open/close node A' },
+  mocAUnlockNode: { label: 'MOC Node A Unlock', desc: 'Unlock multi open/close node A' },
+  mocBCreateNode: { label: 'MOC Node B Create', desc: 'Create RLN node B for multi open/close flow' },
+  mocBInitNode: { label: 'MOC Node B Init', desc: 'Initialize multi open/close node B' },
+  mocBUnlockNode: { label: 'MOC Node B Unlock', desc: 'Unlock multi open/close node B' },
+  mocCCreateNode: { label: 'MOC Node C Create', desc: 'Create RLN node C for multi open/close flow' },
+  mocCInitNode: { label: 'MOC Node C Init', desc: 'Initialize multi open/close node C' },
+  mocCUnlockNode: { label: 'MOC Node C Unlock', desc: 'Unlock multi open/close node C' },
+  mocAFund: { label: 'MOC Node A Fund', desc: 'Fund multi open/close node A' },
+  mocACreateUtxos: { label: 'MOC Node A UTXOs', desc: 'Create UTXOs for multi open/close node A' },
+  mocBFund: { label: 'MOC Node B Fund', desc: 'Fund multi open/close node B' },
+  mocBCreateUtxos: { label: 'MOC Node B UTXOs', desc: 'Create UTXOs for multi open/close node B' },
+  mocCFund: { label: 'MOC Node C Fund', desc: 'Fund multi open/close node C' },
+  mocCCreateUtxos: { label: 'MOC Node C UTXOs', desc: 'Create UTXOs for multi open/close node C' },
+  mocNodeInfos: { label: 'MOC Node Infos', desc: 'Fetch pubkeys for nodes A and B' },
+  mocConnectPeers: { label: 'MOC Connect Peers', desc: 'Connect B→A and C→B peers' },
+  mocOpenChannel1: { label: 'MOC Open Channel 1', desc: 'B opens channel to A — cycle 1' },
+  mocKeysend1: { label: 'MOC Keysend 1', desc: 'A keysends 1000 sat to B — cycle 1' },
+  mocBalanceCheck1: { label: 'MOC Balance Check 1', desc: 'Check BTC balances after keysend — cycle 1' },
+  mocCloseChannel1: { label: 'MOC Close Channel 1', desc: 'Cooperative close channel — cycle 1' },
+  mocOpenChannel2: { label: 'MOC Open Channel 2', desc: 'B opens channel to A — cycle 2' },
+  mocKeysend2: { label: 'MOC Keysend 2', desc: 'A keysends 1000 sat to B — cycle 2' },
+  mocBalanceCheck2: { label: 'MOC Balance Check 2', desc: 'Check BTC balances after keysend — cycle 2' },
+  mocCloseChannel2: { label: 'MOC Close Channel 2', desc: 'Cooperative close channel — cycle 2' },
+  // ── Concurrent BTC payments flow steps ───────────────────────────────────
+  cbpACreateNode: { label: 'CBP Node A Create', desc: 'Create RLN node A for concurrent payments flow' },
+  cbpAInitNode: { label: 'CBP Node A Init', desc: 'Initialize concurrent payments node A' },
+  cbpAUnlockNode: { label: 'CBP Node A Unlock', desc: 'Unlock concurrent payments node A' },
+  cbpBCreateNode: { label: 'CBP Node B Create', desc: 'Create RLN node B for concurrent payments flow' },
+  cbpBInitNode: { label: 'CBP Node B Init', desc: 'Initialize concurrent payments node B' },
+  cbpBUnlockNode: { label: 'CBP Node B Unlock', desc: 'Unlock concurrent payments node B' },
+  cbpCCreateNode: { label: 'CBP Node C Create', desc: 'Create RLN node C for concurrent payments flow' },
+  cbpCInitNode: { label: 'CBP Node C Init', desc: 'Initialize concurrent payments node C' },
+  cbpCUnlockNode: { label: 'CBP Node C Unlock', desc: 'Unlock concurrent payments node C' },
+  cbpDCreateNode: { label: 'CBP Node D Create', desc: 'Create RLN node D for concurrent payments flow' },
+  cbpDInitNode: { label: 'CBP Node D Init', desc: 'Initialize concurrent payments node D' },
+  cbpDUnlockNode: { label: 'CBP Node D Unlock', desc: 'Unlock concurrent payments node D' },
+  cbpAFund: { label: 'CBP Node A Fund', desc: 'Fund concurrent payments node A' },
+  cbpACreateUtxos: { label: 'CBP Node A UTXOs', desc: 'Create UTXOs for concurrent payments node A' },
+  cbpBFund: { label: 'CBP Node B Fund', desc: 'Fund concurrent payments node B' },
+  cbpBCreateUtxos: { label: 'CBP Node B UTXOs', desc: 'Create UTXOs for concurrent payments node B' },
+  cbpCFund: { label: 'CBP Node C Fund', desc: 'Fund concurrent payments node C' },
+  cbpCCreateUtxos: { label: 'CBP Node C UTXOs', desc: 'Create UTXOs for concurrent payments node C' },
+  cbpDFund: { label: 'CBP Node D Fund', desc: 'Fund concurrent payments node D' },
+  cbpDCreateUtxos: { label: 'CBP Node D UTXOs', desc: 'Create UTXOs for concurrent payments node D' },
+  cbpNodeInfos: { label: 'CBP Node Infos', desc: 'Fetch pubkeys for nodes A and B' },
+  cbpConnectPeers: { label: 'CBP Connect Peers', desc: 'Connect B→A, C→B, D→B peers' },
+  cbpOpenChannelBtoA: { label: 'CBP Open Channel B→A', desc: 'B opens channel to A (routing channel)' },
+  cbpOpenChannelCtoB: { label: 'CBP Open Channel C→B', desc: 'C opens channel to B' },
+  cbpOpenChannelDtoB: { label: 'CBP Open Channel D→B', desc: 'D opens channel to B' },
+  cbpCreateInvoices: { label: 'CBP Create Invoices', desc: 'A creates 2 invoices concurrently' },
+  cbpConcurrentSend: { label: 'CBP Concurrent Send', desc: 'C and D send payments to A concurrently' },
+  cbpWaitInvoice1: { label: 'CBP Wait Invoice 1', desc: 'Wait for invoice 1 SUCCEEDED on A' },
+  cbpWaitInvoice2: { label: 'CBP Wait Invoice 2', desc: 'Wait for invoice 2 SUCCEEDED on A' },
+  cbpWaitSenders: { label: 'CBP Wait Senders', desc: 'Wait for both C and D payments to succeed' },
+  cbpFinalBalance: { label: 'CBP Final Balance', desc: 'Read final BTC balance on node A' },
+  swapNodeACreateNode: { label: 'Swap Node A Create', desc: 'Create maker node A' },
+  swapNodeAInitNode: { label: 'Swap Node A Init', desc: 'Initialize maker node A' },
+  swapNodeAUnlockNode: { label: 'Swap Node A Unlock', desc: 'Unlock maker node A' },
+  swapNodeBCreateNode: { label: 'Swap Node B Create', desc: 'Create taker node B' },
+  swapNodeBInitNode: { label: 'Swap Node B Init', desc: 'Initialize taker node B' },
+  swapNodeBUnlockNode: { label: 'Swap Node B Unlock', desc: 'Unlock taker node B' },
+  swapNodeAFund: { label: 'Swap Node A Fund', desc: 'Fund node A with BTC' },
+  swapNodeBFund: { label: 'Swap Node B Fund', desc: 'Fund node B with BTC' },
+  swapNodeACreateUtxos: { label: 'Swap Node A UTXOs', desc: 'Create UTXOs for node A' },
+  swapNodeBCreateUtxos: { label: 'Swap Node B UTXOs', desc: 'Create UTXOs for node B' },
+  swapIssueAsset: { label: 'Swap Issue Asset', desc: 'Issue test asset for swap' },
+  swapOpenChannels: { label: 'Swap Open Channels', desc: 'Open asset and BTC channels between nodes' },
+  swapExecuteRoundtrip: { label: 'Swap Execute', desc: 'Run makerinit -> taker -> makerexecute sequence' },
+  swapPostChecks: { label: 'Swap Post Checks', desc: 'Validate swap and balances after execution' },
+  swapCloseChannels: { label: 'Swap Close Channels', desc: 'Close swap test channels' },
+  // ── External signer issue asset flow steps ────────────────────────────────
+  extIssueCreateNode: { label: 'Create Node', desc: 'Create RLN node with external signer' },
+  extIssueCreateExternalSigner: { label: 'Create External Signer', desc: 'Create native external signer from BIP39 seed' },
+  extIssueInitNode: { label: 'Init Node', desc: 'Initialize node using native external signer' },
+  extIssueUnlockNode: { label: 'Unlock Node', desc: 'Unlock node using native external signer' },
+  extIssueNodeInfoAfter: { label: 'Node Info (after unlock)', desc: 'Read node info after unlock' },
+  extIssueFund: { label: 'Fund Node', desc: 'Fund node with BTC and mine confirmation blocks' },
+  extIssueCreateUtxos: { label: 'Create UTXOs', desc: 'Create UTXOs for RGB asset operations' },
+  extIssueAsset: { label: 'Issue Asset', desc: 'Issue NIA asset using external signer node' },
+  // ── External signer channel payment flow steps ────────────────────────────
+  extChanACreateNode: { label: 'Node A Create', desc: 'Create nodeA with external signer' },
+  extChanACreateExternalSigner: { label: 'Node A Create Signer', desc: 'Create native external signer for nodeA' },
+  extChanAInitNode: { label: 'Node A Init', desc: 'Init nodeA with external signer' },
+  extChanAUnlockNode: { label: 'Node A Unlock', desc: 'Unlock nodeA with external signer' },
+  extChanBCreateNode: { label: 'Node B Create', desc: 'Create nodeB with password auth' },
+  extChanBInitNode: { label: 'Node B Init', desc: 'Init nodeB with password' },
+  extChanBUnlockNode: { label: 'Node B Unlock', desc: 'Unlock nodeB with password' },
+  extChanAFund: { label: 'Node A Fund', desc: 'Fund nodeA' },
+  extChanACreateUtxos: { label: 'Node A UTXOs', desc: 'Create UTXOs for nodeA' },
+  extChanBFund: { label: 'Node B Fund', desc: 'Fund nodeB' },
+  extChanBCreateUtxos: { label: 'Node B UTXOs', desc: 'Create UTXOs for nodeB' },
+  extChanNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys for both nodes' },
+  extChanConnectPeers: { label: 'Connect Peers', desc: 'NodeA connects to nodeB' },
+  extChanOpenChannel: { label: 'Open BTC Channel', desc: 'Open 500k sat BTC channel nodeA→nodeB' },
+  extChanPayment1: { label: 'Payment 1', desc: 'NodeB invoice, nodeA pays (3M msat)' },
+  extChanRestartNodeA: { label: 'Restart NodeA', desc: 'Shutdown and restart nodeA with same external signer' },
+  extChanPayment2: { label: 'Payment 2', desc: 'Second payment after nodeA restart' },
+  // ── UTEXOWallet channel payment flow steps ─────────────────────────────
+  wPayAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  wPayAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wPayBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  wPayBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wPayCInit: { label: 'Node C Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  wPayCUnlock: { label: 'Node C Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wPayAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  wPayACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wPayBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  wPayBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wPayCFund: { label: 'Fund Node C', desc: 'getAddress() + sendToAddress + mine 6' },
+  wPayCCreateUtxos: { label: 'Node C UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wPayIssueAsset: { label: 'Issue Asset', desc: 'nodeA.issueAssetNia() — 1000 USDT' },
+  wPayNodeInfos: { label: 'Node Infos', desc: 'getNodeInfo() on nodeA and nodeB' },
+  wPayConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  wPayOpenChannel: { label: 'Open Asset Channel', desc: 'openChannel() 600 asset units, 100k sat nodeA→nodeB' },
+  wPayAssetBalanceA: { label: 'Asset Balance A', desc: 'getAssetBalance() — nodeA spendable after open (≈400)' },
+  wPayInvoice1: { label: 'Payment 1 (B→A)', desc: 'nodeB.createLightningInvoice(100 units), nodeA.payLightningInvoice()' },
+  wPayInvoice2: { label: 'Payment 2 (A→B)', desc: 'nodeA.createLightningInvoice(50 units), nodeB.payLightningInvoice()' },
+  wPayInvoice3: { label: 'Payment 3 (B→A)', desc: 'nodeB.createLightningInvoice(50 units), nodeA.payLightningInvoice()' },
+  wPayInvoice4: { label: 'Payment 4 (A→B)', desc: 'nodeA.createLightningInvoice(50 units), nodeB.payLightningInvoice()' },
+  wPayCloseChannel: { label: 'Close Channel', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet x3' },
+  wPayWaitBalances: { label: 'Wait Balances A+B', desc: 'Poll getAssetBalance() until A=950, B=50' },
+  wPayRgbSendA: { label: 'RGB Send A→C', desc: 'nodeC.blindReceive(), nodeA.send() 925 units on-chain' },
+  wPayRgbSendB: { label: 'RGB Send B→C', desc: 'nodeC.blindReceive(), nodeB.send() 25 units on-chain' },
+  wPayFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on all 3 nodes — A=25, B=25, C=950' },
+  wChanAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + external signer setup' },
+  wChanAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner' },
+  wChanBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + password signer setup' },
+  wChanBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wChanNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys via getNodeInfo()' },
+  wChanAFund: { label: 'Node A Fund', desc: 'Fund nodeA via getAddress() + sendToAddress + mine' },
+  wChanACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() for nodeA' },
+  wChanBFund: { label: 'Node B Fund', desc: 'Fund nodeB via getAddress() + sendToAddress + mine' },
+  wChanBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() for nodeB' },
+  wChanConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  wChanOpenChannel: { label: 'Open BTC Channel', desc: 'openChannel() 500k sat nodeA→nodeB' },
+  wChanPayment1: { label: 'Payment 1', desc: 'nodeB.createLightningInvoice(), nodeA.payLightningInvoice()' },
+  wChanRestartNodeA: { label: 'Restart NodeA', desc: 'nodeA.shutdown() + nodeA.reinit() — same instance, no manager swap' },
+  wChanPayment2: { label: 'Payment 2', desc: 'Second payment after nodeA restart' },
+  wAsExtAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner (regular)' },
+  wAsExtAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner injects password' },
+  wAsExtBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + NativeExternalRLNSigner' },
+  wAsExtBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner' },
+  wAsExtNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys via getNodeInfo() on both nodes' },
+  wAsExtAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  wAsExtACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wAsExtBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  wAsExtBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  wAsExtIssueAsset: { label: 'Issue Asset', desc: 'nodeA (regular).issueAssetNia() — 1000 USDT' },
+  wAsExtConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  wAsExtOpenChannel: { label: 'Open Asset Channel', desc: 'nodeA.openChannel() 600 asset units, 100k sat, private nodeA→nodeB' },
+  wAsExtPayment1: { label: 'Payment 1', desc: 'nodeB (ext signer).createLightningInvoice(100 units), nodeA.payLightningInvoice()' },
+  wAsExtRestartNodeA: { label: 'Restart NodeA', desc: 'nodeA.shutdown() + nodeA.reinit() — same instance, no manager swap' },
+  wAsExtPayment2: { label: 'Payment 2', desc: 'nodeB (ext signer).createLightningInvoice(50 units), nodeA pays after restart' },
+  wAsExtCloseChannel: { label: 'Close Channel', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  wAsExtWaitBalances: { label: 'Wait Balances A+B', desc: 'Poll getAssetBalance() until A=850, B=150' },
+  wAsExtRevConnectPeers: { label: 'Reconnect Peers Rev', desc: 'nodeB (signer).connectPeer(nodeA) before reverse channel' },
+  wAsExtRevOpenChannel: { label: 'Open Channel Rev', desc: 'nodeB (signer).openChannel() 100 asset units to nodeA — nodeB off-chain=50' },
+  wAsExtRevPayment: { label: 'Payment Rev', desc: 'nodeA.createLightningInvoice(50 units), nodeB (signer).payLightningInvoice()' },
+  wAsExtRevCloseChannel: { label: 'Close Channel Rev', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  wAsExtRevWaitBalances: { label: 'Wait Balances Rev', desc: 'Poll getAssetBalance() until A=900, B=100' },
+  wAsExtRgbSendBtoA: { label: 'RGB Send B→A', desc: 'nodeA.blindReceive(), nodeB.send() 150 units on-chain back to nodeA' },
+  wAsExtFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on both nodes — A=1000, B=0' },
+  xPayAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  xPayAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner' },
+  xPayBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — createNode + NativeExternalRLNSigner' },
+  xPayBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner (VLS in-process)' },
+  xPayCInit: { label: 'Node C Init', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner' },
+  xPayCUnlock: { label: 'Node C Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner' },
+  xPayAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayCFund: { label: 'Fund Node C', desc: 'getAddress() + sendToAddress + mine 6' },
+  xPayCCreateUtxos: { label: 'Node C UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  xPayIssueAsset: { label: 'Issue Asset', desc: 'nodeA.issueAssetNia() — 1000 USDT' },
+  xPayNodeInfos: { label: 'Node Infos', desc: 'Fetch pubkeys via getNodeInfo() on nodeA + nodeB' },
+  xPayConnectPeers: { label: 'Connect Peers', desc: 'nodeA.connectPeer(nodeB)' },
+  xPayOpenChannel: { label: 'Open Asset Channel', desc: 'nodeA.openChannel() 600 units, 100k sat, pushMsat=0 (ext signer acceptor)' },
+  xPayAssetBalanceA: { label: 'Asset Balance A', desc: 'getAssetBalance() — nodeA spendable after open (≈400)' },
+  xPayInvoice1: { label: 'Payment 1 (B→A)', desc: 'nodeB (ext).createLightningInvoice(100 units, 5000 sat), nodeA pays — 5000 sat so B has reserve headroom for inv2' },
+  xPayInvoice2: { label: 'Payment 2 (A→B)', desc: 'nodeA.createLightningInvoice(50 units, 3000 sat), nodeB (ext) pays — RGB min 3000 sat; B has 5000−3000=2000 ≥ 1000 reserve' },
+  xPayInvoice3: { label: 'Payment 3 (B→A)', desc: 'nodeB (ext).createLightningInvoice(50 units, 5000 sat), nodeA pays — refills B sats for inv4' },
+  xPayInvoice4: { label: 'Payment 4 (A→B)', desc: 'nodeA.createLightningInvoice(50 units, 3000 sat), nodeB (ext) pays — B has 7000 sats, comfortably above reserve' },
+  xPayCloseChannel: { label: 'Close Channel', desc: 'nodeA.closeChannel() cooperative — mine + refreshWallet ×3' },
+  xPayWaitBalances: { label: 'Wait Balances A+B', desc: 'Poll getAssetBalance() until A=950, B=50 (5-min deadline for force-close sweep)' },
+  xPayRgbSendA: { label: 'RGB Send A→C', desc: 'nodeC.blindReceive(), nodeA.send() 925 units on-chain' },
+  xPayRgbSendB: { label: 'RGB Send B→C', desc: 'nodeC.blindReceive(), nodeB (ext).send() 25 units on-chain' },
+  xPayFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on all 3 nodes — A=25, B=25, C=950' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
+  const RLN_ONLY_MODE = true;
   const [testResults, setTestResults] = useState<TestSuite | null>(null);
   const [testLoading, setTestLoading] = useState(true);
 
-  const [utexoVssFlowResults, setUtexoVssFlowResults] = useState<FlowResults>(null);
-  const [runningUtexoVssFlow, setRunningUtexoVssFlow] = useState(false);
+  const [rlnWalletChanPayResults, setRlnWalletChanPayResults] = useState<FlowResults>(null);
+  const [runningRlnWalletChanPayFlow, setRunningRlnWalletChanPayFlow] = useState(false);
+  const rlnWalletChanPayInFlightRef = useRef(false);
+  const [rlnUtexoPayResults, setRlnUtexoPayResults] = useState<FlowResults>(null);
+  const [runningRlnUtexoPayFlow, setRunningRlnUtexoPayFlow] = useState(false);
+  const rlnUtexoPayInFlightRef = useRef(false);
+  const [rlnAssetExtResults, setRlnAssetExtResults] = useState<FlowResults>(null);
+  const [runningRlnAssetExtFlow, setRunningRlnAssetExtFlow] = useState(false);
+  const rlnAssetExtInFlightRef = useRef(false);
+  const [rlnExtPayResults, setRlnExtPayResults] = useState<FlowResults>(null);
+  const [runningRlnExtPayFlow, setRunningRlnExtPayFlow] = useState(false);
+  const rlnExtPayInFlightRef = useRef(false);
+  const effectiveRpcHost =
+    process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
+    (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+  const effectiveUnlockRequestFromConfig = {
+    password: process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD ?? 'password',
+    bitcoindRpcUsername: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME ?? 'user',
+    bitcoindRpcPassword: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD ?? 'password',
+    bitcoindRpcHost: effectiveRpcHost,
+    bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT ?? '18443'),
+    indexerUrl: process.env.EXPO_PUBLIC_RLN_INDEXER_URL ?? `${effectiveRpcHost}:50001`,
+    proxyEndpoint:
+      process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT ?? `rpc://${effectiveRpcHost}:3000/json-rpc`,
+  };
+  const rlnUnlockStep = [...(rlnWalletChanPayResults?.steps ?? [])]
+    .reverse()
+    .find((step: any) => String(step?.step ?? '').endsWith('UnlockNode'));
+  const rlnUnlockRequest =
+    rlnUnlockStep?.data?.request ??
+    rlnUnlockStep?.result?.request ??
+    effectiveUnlockRequestFromConfig;
+  const rlnEffectiveUnlockConfig = [
+    ['password', rlnUnlockRequest?.password ?? '(unset)'],
+    ['bitcoindRpcUsername', rlnUnlockRequest?.bitcoindRpcUsername ?? '(unset)'],
+    ['bitcoindRpcPassword', rlnUnlockRequest?.bitcoindRpcPassword ?? '(unset)'],
+    ['bitcoindRpcHost', rlnUnlockRequest?.bitcoindRpcHost ?? '(unset)'],
+    ['bitcoindRpcPort', String(rlnUnlockRequest?.bitcoindRpcPort ?? '(unset)')],
+    ['indexerUrl', rlnUnlockRequest?.indexerUrl ?? '(unset)'],
+    ['proxyEndpoint', rlnUnlockRequest?.proxyEndpoint ?? '(unset)'],
+  ] as const;
 
-  const [vssFlowResults, setVssFlowResults] = useState<FlowResults>(null);
-  const [runningVssFlow, setRunningVssFlow] = useState(false);
-
-  const [testnetWalletFlowResults, setTestnetWalletFlowResults] = useState<FlowResults>(null);
-  const [runningTestnetWalletFlow, setRunningTestnetWalletFlow] = useState(false);
-
-  const [reuseAddressFlowResults, setReuseAddressFlowResults] = useState<FlowResults>(null);
-  const [runningReuseAddressFlow, setRunningReuseAddressFlow] = useState(false);
-
-  // ── On-mount SDK tests ────────────────────────────────────────────────────
-
-  useEffect(() => {
-    async function runSdkTests() {
-      try {
-        setTestLoading(true);
-        const results: TestSuite = { summary: { total: 0, passed: 0, failed: 0 } };
-
-        const addResult = (key: string, obj: any, count: number) => {
-          results[key] = obj;
-          results.summary.total += count;
-          if (obj.success !== false && obj.tests) {
-            const vals = Object.values(obj.tests as Record<string, boolean>);
-            results.summary.passed += vals.filter(Boolean).length;
-            results.summary.failed += vals.filter(v => v === false).length;
-          } else if (obj.success === false) {
-            results.summary.failed += count;
-          }
-        };
-
-        // generateKeys
-        try {
-          const tk = await generateKeys('testnet');
-          const mk = await generateKeys('mainnet');
-          const rk = await generateKeys('regtest');
-          addResult('generateKeys', {
-            success: true,
-            tests: {
-              testnetValid: tk.xpub.startsWith('tpub') && tk.mnemonic.split(' ').length === 12,
-              mainnetValid: mk.xpub.startsWith('xpub'),
-              regtestValid: rk.xpub.startsWith('tpub'),
-              unique: tk.mnemonic !== mk.mnemonic,
-            },
-          }, 4);
-        } catch (e: any) { addResult('generateKeys', { success: false, error: e.message }, 4); }
-
-        // deriveKeysFromMnemonic
-        try {
-          const k = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
-          addResult('deriveKeysFromMnemonic', {
-            success: true,
-            tests: {
-              xpub: k.xpub === EXPECTED_KEYS.xpub,
-              accountXpubVanilla: k.accountXpubVanilla === EXPECTED_KEYS.accountXpubVanilla,
-              masterFingerprint: k.masterFingerprint?.toLowerCase() === EXPECTED_KEYS.masterFingerprint,
-              deterministic: (await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC)).xpub === k.xpub,
-            },
-          }, 4);
-        } catch (e: any) { addResult('deriveKeysFromMnemonic', { success: false, error: e.message }, 4); }
-
-        // signPsbt
-        try {
-          const signed = await signPsbt(TEST_MNEMONIC, UTXO_UNSIGNED_PSBT, 'testnet');
-          addResult('signPsbt', {
-            success: true,
-            tests: { matchesExpected: signed === UTXO_SIGNED_PSBT },
-          }, 1);
-        } catch (e: any) { addResult('signPsbt', { success: false, error: e.message }, 1); }
-
-        // signPsbtSync
-        try {
-          const signed = await signPsbtSync(TEST_MNEMONIC, UTXO_UNSIGNED_PSBT, 'testnet');
-          addResult('signPsbtSync', {
-            success: true,
-            tests: { matchesAsync: signed === UTXO_SIGNED_PSBT },
-          }, 1);
-        } catch (e: any) { addResult('signPsbtSync', { success: false, error: e.message }, 1); }
-
-        // signPsbtFromSeed (should throw in RN)
-        try {
-          const { mnemonicToSeedSync } = require('@scure/bip39');
-          const seed = new Uint8Array(Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC)));
-          await signPsbtFromSeed(seed, UTXO_UNSIGNED_PSBT, 'testnet');
-          addResult('signPsbtFromSeed', { success: false, error: 'Expected throw, resolved' }, 1);
-        } catch (e: any) {
-          addResult('signPsbtFromSeed', {
-            success: true,
-            tests: { throwsNotSupported: (e.message as string).includes('not supported') },
-          }, 1);
-        }
-
-        // signMessage + verifyMessage
-        try {
-          const { mnemonicToSeedSync } = require('@scure/bip39');
-          const seed = Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC));
-          const keys = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
-          const sig = await signMessage({ message: 'hello rgb', seed, network: 'testnet' });
-          const valid = await verifyMessage({ message: 'hello rgb', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
-          const wrong = await verifyMessage({ message: 'wrong', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
-          addResult('signMessage+verifyMessage', {
-            success: true,
-            tests: { signatureProduced: sig.length > 0, validSig: valid === true, wrongMsgFails: wrong === false },
-          }, 3);
-        } catch (e: any) { addResult('signMessage+verifyMessage', { success: false, error: e.message }, 3); }
-
-        // createWalletManager
-        try {
-          const keys = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
-          const wm = createWalletManager({ xpubVan: keys.accountXpubVanilla, xpubCol: keys.accountXpubColored, masterFingerprint: keys.masterFingerprint, mnemonic: TEST_MNEMONIC, network: 'testnet' });
-          addResult('createWalletManager', {
-            success: true,
-            tests: {
-              returnsInstance: typeof wm.initialize === 'function',
-              notDisposed: wm.isDisposed() === false,
-              correctXpub: wm.getXpub().xpubVan === keys.accountXpubVanilla,
-              correctNetwork: wm.getNetwork() === 'testnet',
-            },
-          }, 4);
-        } catch (e: any) { addResult('createWalletManager', { success: false, error: e.message }, 4); }
-
-        // wallet singleton
-        try {
-          const isProxy = typeof wallet === 'object';
-          let throwsWhenUninitialized = false;
-          try { void (wallet as any).initialize; } catch (e: any) { throwsWhenUninitialized = e instanceof WalletError; }
-          addResult('walletSingleton', { success: true, tests: { isProxy, throwsWhenUninitialized } }, 2);
-        } catch (e: any) { addResult('walletSingleton', { success: false, error: e.message }, 2); }
-
-        // Error classes
-        try {
-          const sdkErr = new SDKError('msg', 'CODE');
-          const netErr = new NetworkError('msg', 503);
-          const walletErr = new WalletError('msg');
-          const cryptoErr = new CryptoError('msg');
-          const configErr = new ConfigurationError('msg');
-          const badReqErr = new BadRequestError('msg');
-          const notFoundErr = new NotFoundError('msg');
-          const conflictErr = new ConflictError('msg');
-          const rgbNodeErr = new RgbNodeError('msg', 500);
-          const valErr = new ValidationError('msg', 'field');
-          addResult('errorClasses', {
-            success: true,
-            tests: {
-              SDKError: sdkErr instanceof SDKError,
-              NetworkError: netErr.statusCode === 503,
-              WalletError: walletErr instanceof SDKError,
-              CryptoError: cryptoErr instanceof SDKError,
-              ConfigurationError: configErr instanceof SDKError,
-              BadRequestError: badReqErr.statusCode === 400,
-              NotFoundError: notFoundErr.statusCode === 404,
-              ConflictError: conflictErr.statusCode === 409,
-              RgbNodeError: rgbNodeErr instanceof SDKError,
-              ValidationError: valErr.field === 'field',
-            },
-          }, 10);
-        } catch (e: any) { addResult('errorClasses', { success: false, error: e.message }, 10); }
-
-        // Validation
-        try {
-          const t: Record<string, boolean> = {};
-          t.normalizeNetwork = normalizeNetwork('mainnet') === 'mainnet';
-          try { validateNetwork('bad'); t.validateNetworkThrows = false; } catch { t.validateNetworkThrows = true; }
-          try { validateMnemonic('not'); t.validateMnemonicThrows = false; } catch { t.validateMnemonicThrows = true; }
-          validatePsbt(UTXO_UNSIGNED_PSBT); t.validatePsbt = true;
-          validateBase64(UTXO_UNSIGNED_PSBT); t.validateBase64 = true;
-          try { validateHex('!!'); t.validateHexThrows = false; } catch { t.validateHexThrows = true; }
-          validateHex('deadbeef'); t.validateHex = true;
-          addResult('validation', { success: true, tests: t }, Object.keys(t).length);
-        } catch (e: any) { addResult('validation', { success: false, error: e.message }, 7); }
-
-        // UTEXO module
-        try {
-          const utexoWallet = new UTEXOWallet(TEST_MNEMONIC);
-          const pubKeys = await utexoWallet.derivePublicKeys('testnet');
-          let throwsBeforeInit = false;
-          try { utexoWallet.getXpub(); } catch (e: any) { throwsBeforeInit = e.message.toLowerCase().includes('init'); }
-          const lp = new LightningProtocol();
-          let lpThrows = false;
-          try { await lp.createLightningInvoice({ asset: { assetId: 'a', amount: 1 } } as any); } catch (e: any) { lpThrows = e.message.includes('not implemented'); }
-          const op = new OnchainProtocol();
-          let opThrows = false;
-          try { await op.onchainReceive({ assetId: 'a', amount: 1 } as any); } catch (e: any) { opThrows = e.message.includes('not implemented'); }
-          addResult('utexoModule', {
-            success: true,
-            tests: {
-              instantiated: typeof utexoWallet.initialize === 'function',
-              throwsBeforeInit,
-              derivePublicKeys: pubKeys.xpub?.startsWith('tpub') ?? false,
-              lightningStubThrows: lpThrows,
-              onchainStubThrows: opThrows,
-            },
-          }, 5);
-        } catch (e: any) { addResult('utexoModule', { success: false, error: e.message }, 5); }
-
-        setTestResults(results);
-      } finally {
-        setTestLoading(false);
-      }
-    }
-
-    runSdkTests();
-  }, []);
 
   // ── Flow handlers ─────────────────────────────────────────────────────────
 
-  async function handleUtexoVssFlow() {
+
+  async function handleRlnWalletChanPayFlow() {
+    if (rlnWalletChanPayInFlightRef.current) return;
+    rlnWalletChanPayInFlightRef.current = true;
     try {
-      setRunningUtexoVssFlow(true);
-      setUtexoVssFlowResults({ running: true, steps: [] });
-      const r = await runUtexoVssFlow((progress: any) => setUtexoVssFlowResults(progress));
-      setUtexoVssFlowResults({ ...r, running: false });
+      setRunningRlnWalletChanPayFlow(true);
+      setRlnWalletChanPayResults({ running: true, steps: [] });
+      const r = await runRlnUtexoWalletChannelPaymentFlow();
+      setRlnWalletChanPayResults({ ...r, running: false });
     } catch (e: any) {
-      setUtexoVssFlowResults((prev: any) => ({ ...(prev ?? {}), running: false, success: false, error: e.message }));
-    } finally {
-      setRunningUtexoVssFlow(false);
-    }
-  }
-
-  async function handleVssFlow() {
-    const VSS_SERVER_URL = 'https://vss-server.utexo.com/vss';
-    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
-
-    const addStep = (step: string, status: string, result?: any, error?: string) => {
-      const i = steps.findIndex(s => s.step === step);
-      const entry = { step, status, result, error };
-      if (i >= 0) steps[i] = entry; else steps.push(entry);
-      setVssFlowResults({ running: true, steps: [...steps] });
-    };
-
-    try {
-      setRunningVssFlow(true);
-      setVssFlowResults({ running: true, steps: [] });
-
-      addStep('generateKeys', 'running');
-      const keys = await generateKeys('testnet');
-      const fpHex = keys.masterFingerprint;
-      const signingKeyHex = (fpHex.repeat(8)).slice(0, 64);
-      const storeId = `demo_${keys.masterFingerprint}`;
-      addStep('generateKeys', 'success', { masterFingerprint: keys.masterFingerprint });
-
-      const vssConfig: VssBackupConfig = {
-        serverUrl: VSS_SERVER_URL,
-        storeId,
-        signingKey: signingKeyHex,
-        encryptionEnabled: true,
-        autoBackup: false,
-        backupMode: 'Async',
-      };
-
-      addStep('initializeWallet', 'running');
-      const wm = await createWalletManager({
-        network: 'testnet',
-        xpubVan: keys.accountXpubVanilla,
-        xpubCol: keys.accountXpubColored,
-        mnemonic: keys.mnemonic,
-        masterFingerprint: keys.masterFingerprint,
-      });
-      await wm.initialize();
-      addStep('initializeWallet', 'success');
-
-      addStep('vssBackup', 'running');
-      let backupVersion: number | null = null;
-      try {
-        backupVersion = await wm.vssBackup(vssConfig);
-        addStep('vssBackup', 'success', { version: backupVersion });
-      } catch (e: any) { addStep('vssBackup', 'error', undefined, e?.message ?? String(e)); }
-
-      addStep('vssBackupInfo', 'running');
-      try {
-        const info = await wm.vssBackupInfo(vssConfig);
-        addStep('vssBackupInfo', 'success', { backupExists: info.backupExists, serverVersion: info.serverVersion });
-      } catch (e: any) { addStep('vssBackupInfo', 'error', undefined, e?.message ?? String(e)); }
-
-      addStep('configureVssBackup', 'running');
-      try {
-        await wm.configureVssBackup({ ...vssConfig, autoBackup: true });
-        addStep('configureVssBackup', 'success');
-      } catch (e: any) { addStep('configureVssBackup', 'error', undefined, e?.message ?? String(e)); }
-
-      addStep('disableVssAutoBackup', 'running');
-      try {
-        await wm.disableVssAutoBackup();
-        addStep('disableVssAutoBackup', 'success');
-      } catch (e: any) { addStep('disableVssAutoBackup', 'error', undefined, e?.message ?? String(e)); }
-
-      addStep('restoreFromVss', 'running');
-      let restoredVssPath: string | null = null;
-      try {
-        const dir = `${FileSystem.documentDirectory}vss_restore_test`;
-        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-        restoredVssPath = await restoreFromVss(vssConfig, dir.replace('file://', ''));
-        addStep('restoreFromVss', 'success', { restoredPath: restoredVssPath });
-      } catch (e: any) { addStep('restoreFromVss', 'error', undefined, e?.message ?? String(e)); }
-
-      addStep('verifyRestoredWallet', 'running');
-      try {
-        if (!restoredVssPath) throw new Error('Restore did not succeed — skipping verification');
-        const restoredWm = new WalletManager({
-          network: 'testnet',
-          xpubVan: keys.accountXpubVanilla,
-          xpubCol: keys.accountXpubColored,
-          mnemonic: keys.mnemonic,
-          masterFingerprint: keys.masterFingerprint,
-          dataDir: restoredVssPath,
-        });
-        await restoredWm.initialize();
-        await restoredWm.syncWallet();
-        await restoredWm.refreshWallet();
-        const [bal, addr, assets, txs] = await Promise.all([
-          restoredWm.getBtcBalance(),
-          restoredWm.getAddress(),
-          restoredWm.listAssets(),
-          restoredWm.listTransactions(),
-        ]);
-        addStep('verifyRestoredWallet', 'success', {
-          address: addr,
-          btcSettled: bal?.vanilla?.settled ?? 0,
-          totalAssets: (assets.nia?.length ?? 0) + (assets.ifa?.length ?? 0),
-          transactionCount: txs.length,
-        });
-        await restoredWm.dispose();
-      } catch (e: any) { addStep('verifyRestoredWallet', 'error', undefined, e?.message ?? String(e)); }
-
-      setVssFlowResults({ running: false, success: true, steps, storeId, backupVersion });
-    } catch (e: any) {
-      setVssFlowResults({ running: false, success: false, error: e instanceof Error ? e.message : String(e), steps });
-    } finally {
-      setRunningVssFlow(false);
-    }
-  }
-
-  async function handleTestnetWalletFlow() {
-    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
-
-    const addStep = (step: string, status: string, result?: any, error?: string) => {
-      const i = steps.findIndex((s) => s.step === step);
-      const entry = { step, status, result, error };
-      if (i >= 0) steps[i] = entry;
-      else steps.push(entry);
-      setTestnetWalletFlowResults({ running: true, steps: [...steps] });
-    };
-
-    let wm: WalletManager | null = null;
-    try {
-      setRunningTestnetWalletFlow(true);
-      setTestnetWalletFlowResults({ running: true, steps: [] });
-
-      addStep('generateKeys', 'running');
-      const keys = await generateKeys('testnet');
-      addStep('generateKeys', 'success', {
-        masterFingerprint: keys.masterFingerprint,
-        xpubPrefix: keys.xpub.slice(0, 4),
-      });
-
-      addStep('createWalletManager', 'running');
-      const indexerUrl = DEFAULT_INDEXER_URLS['testnet'];
-      wm = createWalletManager({
-        network: 'testnet',
-        xpubVan: keys.accountXpubVanilla,
-        xpubCol: keys.accountXpubColored,
-        mnemonic: keys.mnemonic,
-        masterFingerprint: keys.masterFingerprint,
-        indexerUrl,
-      });
-      addStep('createWalletManager', 'success', {
-        network: wm.getNetwork(),
-        indexerUrl,
-      });
-
-      addStep('initialize', 'running');
-      await wm.initialize();
-      addStep('initialize', 'success', { online: true });
-
-      addStep('syncWallet', 'running');
-      await wm.syncWallet();
-      addStep('syncWallet', 'success');
-
-      addStep('refreshWallet', 'running');
-      await wm.refreshWallet();
-      addStep('refreshWallet', 'success');
-
-      addStep('getAddress', 'running');
-      const address = await wm.getAddress();
-      addStep('getAddress', 'success', { address });
-
-      addStep('getBtcBalance', 'running');
-      const balance = await wm.getBtcBalance();
-      addStep('getBtcBalance', 'success', {
-        vanillaSettled: balance.vanilla?.settled ?? 0,
-        vanillaSpendable: balance.vanilla?.spendable ?? 0,
-        coloredSettled: balance.colored?.settled ?? 0,
-        coloredSpendable: balance.colored?.spendable ?? 0,
-      });
-
-      addStep('dispose', 'running');
-      await wm.dispose();
-      wm = null;
-      addStep('dispose', 'success');
-
-      setTestnetWalletFlowResults({ running: false, success: true, steps });
-    } catch (e: any) {
-      if (wm) {
-        try {
-          await wm.dispose();
-        } catch {
-          /* ignore */
-        }
-      }
-      setTestnetWalletFlowResults({
+      setRlnWalletChanPayResults({
         running: false,
         success: false,
         error: e instanceof Error ? e.message : String(e),
-        steps,
+        steps: [],
       });
     } finally {
-      setRunningTestnetWalletFlow(false);
+      setRunningRlnWalletChanPayFlow(false);
+      rlnWalletChanPayInFlightRef.current = false;
     }
   }
 
-  async function handleReuseAddressFlow() {
-    const steps: { step: string; status: string; result?: any; error?: string }[] = [];
-
-    const addStep = (step: string, status: string, result?: any, error?: string) => {
-      const i = steps.findIndex((s) => s.step === step);
-      const entry = { step, status, result, error };
-      if (i >= 0) steps[i] = entry;
-      else steps.push(entry);
-      setReuseAddressFlowResults({ running: true, steps: [...steps] });
-    };
-
-    let wm: WalletManager | null = null;
-    let addressBeforeRotate: string | null = null;
+  async function handleRlnUtexoPayFlow() {
+    if (rlnUtexoPayInFlightRef.current) return;
+    rlnUtexoPayInFlightRef.current = true;
     try {
-      setRunningReuseAddressFlow(true);
-      setReuseAddressFlowResults({ running: true, steps: [] });
-
-      addStep('generateKeys', 'running');
-      const keys = await generateKeys('testnet');
-      addStep('generateKeys', 'success', {
-        masterFingerprint: keys.masterFingerprint,
-        xpubPrefix: keys.xpub.slice(0, 4),
-      });
-
-      addStep('createWalletReuse', 'running');
-      const indexerUrl = DEFAULT_INDEXER_URLS['testnet'];
-      wm = createWalletManager({
-        network: 'testnet',
-        xpubVan: keys.accountXpubVanilla,
-        xpubCol: keys.accountXpubColored,
-        mnemonic: keys.mnemonic,
-        masterFingerprint: keys.masterFingerprint,
-        indexerUrl,
-        reuseAddresses: true,
-      });
-      addStep('createWalletReuse', 'success', {
-        network: wm.getNetwork(),
-        reuseAddresses: true,
-        indexerUrl,
-      });
-
-      addStep('initialize', 'running');
-      await wm.initialize();
-      addStep('initialize', 'success', { online: true });
-
-      addStep('syncWallet', 'running');
-      await wm.syncWallet();
-      addStep('syncWallet', 'success');
-
-      addStep('refreshWallet', 'running');
-      await wm.refreshWallet();
-      addStep('refreshWallet', 'success');
-
-      addStep('addressPairBeforeRotate', 'running');
-      const b1 = await wm.getAddress();
-      const b2 = await wm.getAddress();
-      addressBeforeRotate = b1;
-      if (b1 !== b2) {
-        addStep(
-          'addressPairBeforeRotate',
-          'error',
-          { first: b1, second: b2, match: false },
-          'Expected identical addresses with reuseAddresses before rotation'
-        );
-      } else {
-        addStep('addressPairBeforeRotate', 'success', { address: b1, match: true });
-      }
-
-      addStep('rotateAddresses', 'running');
-      const nextVanilla = await wm.rotateVanillaAddress();
-      const nextColored = await wm.rotateColoredAddress();
-      addStep('rotateAddresses', 'success', { nextVanilla, nextColored });
-
-      addStep('addressPairAfterRotate', 'running');
-      const a1 = await wm.getAddress();
-      const a2 = await wm.getAddress();
-      if (a1 !== a2) {
-        addStep(
-          'addressPairAfterRotate',
-          'error',
-          { first: a1, second: a2, match: false },
-          'Expected identical addresses with reuseAddresses after rotation'
-        );
-      } else {
-        addStep('addressPairAfterRotate', 'success', {
-          address: a1,
-          match: true,
-          changedFromBefore: addressBeforeRotate != null && a1 !== addressBeforeRotate,
-        });
-      }
-
-      addStep('dispose', 'running');
-      await wm.dispose();
-      wm = null;
-      addStep('dispose', 'success');
-
-      const failed = steps.some((s) => s.status === 'error');
-      setReuseAddressFlowResults({ running: false, success: !failed, steps });
+      setRunningRlnUtexoPayFlow(true);
+      setRlnUtexoPayResults({ running: true, steps: [] });
+      const r = await runRLNUtexoPaymentFlow();
+      setRlnUtexoPayResults({ ...r, running: false });
     } catch (e: any) {
-      if (wm) {
-        try {
-          await wm.dispose();
-        } catch {
-          /* ignore */
-        }
-      }
-      setReuseAddressFlowResults({
+      setRlnUtexoPayResults({
         running: false,
         success: false,
         error: e instanceof Error ? e.message : String(e),
-        steps,
+        steps: [],
       });
     } finally {
-      setRunningReuseAddressFlow(false);
+      setRunningRlnUtexoPayFlow(false);
+      rlnUtexoPayInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnAssetExtFlow() {
+    if (rlnAssetExtInFlightRef.current) return;
+    rlnAssetExtInFlightRef.current = true;
+    try {
+      setRunningRlnAssetExtFlow(true);
+      setRlnAssetExtResults({ running: true, steps: [] });
+      const r = await runRlnUtexoWalletAssetChannelExtSignerFlow();
+      setRlnAssetExtResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnAssetExtResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnAssetExtFlow(false);
+      rlnAssetExtInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnExtPayFlow() {
+    if (rlnExtPayInFlightRef.current) return;
+    rlnExtPayInFlightRef.current = true;
+    try {
+      setRunningRlnExtPayFlow(true);
+      setRlnExtPayResults({ running: true, steps: [] });
+      const r = await runRLNUtexoExternalPaymentFlow();
+      setRlnExtPayResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnExtPayResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnExtPayFlow(false);
+      rlnExtPayInFlightRef.current = false;
     }
   }
 
@@ -1008,23 +844,33 @@ export default function FlowsScreen() {
               </Text>
             </View>
           </View>
+          <View style={styles.envCard}>
+            <Text style={styles.envTitle}>Effective RLN unlock payload sent to SDK</Text>
+            <Text style={styles.envSubtitle}>
+              {rlnUnlockStep
+                ? 'Captured from the latest `rlnUnlockNode` step.'
+                : 'Pre-run payload derived from current runtime config (same defaults used by flow).'}
+            </Text>
+            {rlnEffectiveUnlockConfig.map(([key, value]) => (
+              <View key={key} style={styles.envRow}>
+                <Text style={styles.envKey}>{key}</Text>
+                <Text style={styles.envValue}>{value}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
-        {/* SDK Tests */}
-        <TestSummaryCard results={testResults} loading={testLoading} />
-
-        {/* ── Testnet WalletManager (sync + address + balance) ─────────────── */}
         <FlowCard
-          title="Testnet Wallet"
-          subtitle="Iris Electrum · testnet"
-          description="Live path: generateKeys(testnet) → WalletManager(testnet + DEFAULT_INDEXER_URLS) → initialize → sync → refresh → address → BTC balance → dispose."
-          accentColor="#0D9488"
-          totalSteps={8}
-          results={testnetWalletFlowResults}
-          running={runningTestnetWalletFlow}
-          onRun={handleTestnetWalletFlow}>
-          {testnetWalletFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = TESTNET_WALLET_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          title="UTEXOWallet: Channel + Payment"
+          subtitle="nodeA (NativeExternalRLNSigner) + nodeB (PasswordRLNSigner) — 14 steps"
+          description="Same channel+payment scenario as above but using UTEXOWallet. Demonstrates init()/unlock()/reinit() lifecycle — nodeA restarts on the same instance with no manager swap."
+          accentColor="#1D3A8A"
+          totalSteps={14}
+          results={rlnWalletChanPayResults}
+          running={runningRlnWalletChanPayFlow}
+          onRun={handleRlnWalletChanPayFlow}>
+          {rlnWalletChanPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
               <StepCard
                 key={idx}
@@ -1032,25 +878,25 @@ export default function FlowsScreen() {
                 step={step}
                 label={meta.label}
                 desc={meta.desc}
-                accentColor="#0D9488"
+                accentColor="#1D3A8A"
                 isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnWalletChanPayFlow}
               />
             );
           })}
         </FlowCard>
 
-        {/* ── Testnet WalletManager: reuseAddresses + rotation ─────────────── */}
         <FlowCard
-          title="Reuse address + rotation"
-          subtitle="WalletManager · reuseAddresses"
-          description="Init with reuseAddresses: true → two getAddress() (must match) → rotateVanilla + rotateColored → two getAddress() again (must match; may differ from pre-rotate)."
-          accentColor="#0F766E"
-          totalSteps={9}
-          results={reuseAddressFlowResults}
-          running={runningReuseAddressFlow}
-          onRun={handleReuseAddressFlow}>
-          {reuseAddressFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = REUSE_ADDRESS_FLOW_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          title="UTEXOWallet: Asset Channel + Payments + RGB Sends"
+          subtitle="3 nodes (PasswordRLNSigner) — 26 steps"
+          description="Full payment flow using UTEXOWallet: issue 1000 USDT, open asset channel (600 units), 4 lightning payments alternating directions, cooperative close, RGB on-chain sends to nodeC. Final balances: A=25, B=25, C=950."
+          accentColor="#1A5C38"
+          totalSteps={26}
+          results={rlnUtexoPayResults}
+          running={runningRlnUtexoPayFlow}
+          onRun={handleRlnUtexoPayFlow}>
+          {rlnUtexoPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
               <StepCard
                 key={idx}
@@ -1058,51 +904,62 @@ export default function FlowsScreen() {
                 step={step}
                 label={meta.label}
                 desc={meta.desc}
-                accentColor="#0F766E"
+                accentColor="#1A5C38"
                 isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnUtexoPayFlow}
               />
             );
           })}
         </FlowCard>
 
-        {/* ── UTEXO VSS E2E Flow ────────────────────────────────────────── */}
         <FlowCard
-          title="UTEXO VSS E2E"
-          subtitle="Create → Backup → Restore"
-          description="Full lifecycle: create wallet → fund → issue NIA → VSS backup → destroy → restore → verify."
-          accentColor="#0891B2"
-          totalSteps={16}
-          results={utexoVssFlowResults}
-          running={runningUtexoVssFlow}
-          onRun={handleUtexoVssFlow}>
-          {utexoVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          title="UTEXOWallet: Regular Node Issues Asset + Ext Signer Invoices"
+          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) — 19 steps"
+          description="nodeA (regular) issues 1000 USDT, opens asset channel (600 units, 100k sat) to nodeB (ext signer). nodeB creates asset LN invoices; nodeA pays both. nodeA restarts between payments. Cooperative close, wait balances, nodeB RGB-sends 150 back to nodeA."
+          accentColor="#7B2D8A"
+          totalSteps={19}
+          results={rlnAssetExtResults}
+          running={runningRlnAssetExtFlow}
+          onRun={handleRlnAssetExtFlow}>
+          {rlnAssetExtResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#0891B2" isLast={idx === arr.length - 1} />
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#7B2D8A"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnAssetExtFlow}
+              />
             );
           })}
         </FlowCard>
 
-        {/* ── VSS Cloud Backup ─────────────────────────────────────────── */}
         <FlowCard
-          title="VSS Cloud Backup"
-          subtitle="vss-server.utexo.com"
-          description="End-to-end test against the live VSS server: generate keys → init wallet → backup → check status → configure → disable → restore → verify."
-          accentColor="#7C3AED"
-          totalSteps={8}
-          results={vssFlowResults}
-          running={runningVssFlow}
-          onRun={handleVssFlow}
-          extra={vssFlowResults?.storeId && !vssFlowResults.running ? (
-            <View style={styles.storeIdRow}>
-              <Text style={styles.storeIdLabel}>Store ID</Text>
-              <Text style={styles.storeIdValue} numberOfLines={1}>{vssFlowResults.storeId}</Text>
-            </View>
-          ) : undefined}>
-          {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+          title="UTEXOWallet: Ext Signer NodeB — Asset Channel + Payments + RGB Sends"
+          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) + nodeC — 26 steps"
+          description="Same as the 3-node payment flow but nodeB uses NativeExternalRLNSigner (VLS in-process). pushMsat=0 required (VLS rejects non-zero push on acceptor). 4 payments alternating directions, cooperative close, RGB on-chain sends to nodeC. Final: A=25, B=25, C=950."
+          accentColor="#8A3D1D"
+          totalSteps={26}
+          results={rlnExtPayResults}
+          running={runningRlnExtPayFlow}
+          onRun={handleRlnExtPayFlow}>
+          {rlnExtPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
             return (
-              <StepCard key={idx} idx={idx} step={step} label={meta.label} desc={meta.desc} accentColor="#7C3AED" isLast={idx === arr.length - 1} />
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#8A3D1D"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnExtPayFlow}
+              />
             );
           })}
         </FlowCard>
@@ -1125,6 +982,21 @@ const styles = StyleSheet.create({
   header: { paddingTop: 24, paddingBottom: 16, gap: 8 },
   headerTitle: { fontSize: 26, fontWeight: '800', color: AppColors.textPrimary, letterSpacing: 0.5 },
   headerSubtitle: { fontSize: 14, color: AppColors.textSecondary, lineHeight: 20 },
+  rlnOnlyBanner: {
+    marginTop: 4,
+    backgroundColor: '#1E3A8A1F',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#3B82F680',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  rlnOnlyBannerText: {
+    fontSize: 12,
+    color: '#BFDBFE',
+    lineHeight: 16,
+    fontWeight: '600',
+  },
   networkRow: { flexDirection: 'row', marginTop: 4 },
   networkBadge: {
     flexDirection: 'row',
@@ -1139,6 +1011,44 @@ const styles = StyleSheet.create({
   },
   networkDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: AppColors.success },
   networkText: { fontSize: 12, color: AppColors.textSecondary, fontFamily: MONO },
+  envCard: {
+    marginTop: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    backgroundColor: AppColors.bgCard,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  envTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: AppColors.textSecondary,
+  },
+  envSubtitle: {
+    fontSize: 11,
+    color: AppColors.textTertiary,
+  },
+  envRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  envKey: {
+    flex: 1,
+    fontSize: 11,
+    color: AppColors.textTertiary,
+    fontFamily: MONO,
+  },
+  envValue: {
+    flex: 1,
+    fontSize: 11,
+    color: AppColors.textSecondary,
+    textAlign: 'right',
+    fontFamily: MONO,
+  },
 
   storeIdRow: {
     flexDirection: 'row',
@@ -1270,6 +1180,30 @@ const fStyles = StyleSheet.create({
   },
   statusText: { fontSize: 11, fontWeight: '600' },
   cardDesc: { fontSize: 13, color: AppColors.textSecondary, lineHeight: 18 },
+  flowErrorBox: {
+    marginHorizontal: 14,
+    marginTop: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: AppColors.errorBorder,
+    backgroundColor: AppColors.errorBg,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
+  },
+  flowErrorTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: AppColors.error,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+  flowErrorText: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: '#FCA5A5',
+    fontFamily: MONO,
+  },
 
   progressRow: {
     flexDirection: 'row',
