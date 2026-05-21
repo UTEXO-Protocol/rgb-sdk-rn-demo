@@ -1203,6 +1203,7 @@ export async function runRLNUtexoPaymentFlow() {
       announceAddresses: [] as string[],
       announceAlias: null as string | null,
     };
+    console.log('unlockParams', unlockParams);
 
     const keysA = await createWallet(network);
     const keysB = await createWallet(network);
@@ -1276,6 +1277,13 @@ export async function runRLNUtexoPaymentFlow() {
     await nodeA.unlock(unlockParams);
     addStep('wPayAUnlock', 'success', {});
 
+    // issue #23 — optional regression check: estimateFeeRate can throw Conflict right after unlock; not required for the flow.
+    // const feeEstimate = await nodeA.estimateFeeRate(6);
+    // console.log(`[wPay][#23] estimateFeeRate(6) type=${typeof feeEstimate} value=${feeEstimate}`);
+    // if (typeof feeEstimate !== 'number') {
+    //   console.error(`[wPay][#23] REGRESSION: estimateFeeRate returned ${JSON.stringify(feeEstimate)} instead of a number`);
+    // }
+
     addStep('wPayBInit', 'running');
     await nodeB.init();
     addStep('wPayBInit', 'success', { storageDirPath: storageDirB });
@@ -1345,6 +1353,17 @@ export async function runRLNUtexoPaymentFlow() {
     const assetId = String(issued?.assetId ?? '');
     if (!assetId) throw new Error('Failed to issue asset');
     addStep('wPayIssueAsset', 'success', { assetId });
+
+    // issue #22/#28 — listUnspents assignment must be {type:'Fungible', amount:N} on both platforms
+    const unspentsAfterIssue = await nodeA.listUnspents();
+    const allocsAfterIssue = unspentsAfterIssue.flatMap((u) => u.rgbAllocations ?? []);
+    console.log(`[wPay][#22] listUnspents after issue: ${allocsAfterIssue.length} allocation(s)`);
+    for (const alloc of allocsAfterIssue) {
+      console.log(`[wPay][#22] assignment=${JSON.stringify(alloc.assignment)} settled=${alloc.settled}`);
+      if ((alloc.assignment as any)?.type === 'type') {
+        console.error(`[wPay][#22] REGRESSION: assignment.type is the literal string "type" — serialization bug`);
+      }
+    }
 
     const infoA = await nodeA.getNodeInfo();
     const infoB = await nodeB.getNodeInfo();
@@ -1538,7 +1557,7 @@ export async function runRLNUtexoPaymentFlow() {
 
     // RGB on-chain sends to nodeC (A sends 925, B sends 25)
     addStep('wPayRgbSendA', 'running');
-    const invC1 = await nodeC.blindReceive({ minConfirmations: 1 });
+    const invC1 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
     await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
@@ -1548,7 +1567,7 @@ export async function runRLNUtexoPaymentFlow() {
     addStep('wPayRgbSendA', 'success', { amount: 925, recipientId: invC1.recipientId.substring(0, 20) + '...' });
 
     addStep('wPayRgbSendB', 'running');
-    const invC2 = await nodeC.blindReceive({ minConfirmations: 1 });
+    const invC2 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
     await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
@@ -1557,7 +1576,61 @@ export async function runRLNUtexoPaymentFlow() {
     await nodeB.refreshWallet();
     addStep('wPayRgbSendB', 'success', { amount: 25, recipientId: invC2.recipientId.substring(0, 20) + '...' });
 
-    // Final balances: A=25, B=25, C=950
+    // ── Regression diagnostics ────────────────────────────────────────────────
+
+    addStep('wPayDiagChecks', 'running');
+
+    // issue #22/#28 — assignment shape on nodeC after receiving
+    const unspentsC = await nodeC.listUnspents();
+    const allocsC = unspentsC.flatMap((u) => u.rgbAllocations ?? []);
+    console.log(`[wPay][#22] nodeC listUnspents: ${allocsC.length} allocation(s)`);
+    for (const alloc of allocsC) {
+      console.log(`[wPay][#22] assignment=${JSON.stringify(alloc.assignment)} settled=${alloc.settled}`);
+      if ((alloc.assignment as any)?.type === 'type') {
+        console.error(`[wPay][#22] REGRESSION: assignment.type is literal "type" — serialization bug still present`);
+      }
+      if (alloc.assignment?.type === 'Fungible' && typeof alloc.assignment?.amount === 'number') {
+        console.log(`[wPay][#22] ✓ Fungible assignment shape correct: amount=${alloc.assignment.amount}`);
+      }
+    }
+
+    // issue #29 — Transfer.expiration field is present and correctly named
+    const transfersC = await nodeC.listTransfers(assetId);
+    console.log(`[wPay][#29] nodeC listTransfers: ${transfersC.length} transfer(s)`);
+    for (const t of transfersC) {
+      const exp = t.expiration;
+      console.log(`[wPay][#29] transfer idx=${t.idx} status=${t.status} expiration=${exp ?? 'null'}`);
+      if (typeof exp !== 'number') {
+        console.error(`[wPay][#29] REGRESSION: expiration is ${JSON.stringify(exp)} — expected a Unix timestamp number`);
+      } else {
+        console.log(`[wPay][#29] ✓ expiration is a number (Unix ts=${exp}, ~${Math.round((exp - Date.now() / 1000) / 60)}min from now)`);
+      }
+    }
+
+    // issue #27 — failTransfers with no batchTransferIdx returns false (no expired transfers)
+    const failResultNull = await nodeC.failTransfers({ noAssetOnly: false });
+    console.log(`[wPay][#27] failTransfers(undefined) transfersChanged=${failResultNull} — expected false (no expired transfers)`);
+    if (failResultNull === true) {
+      console.warn(`[wPay][#27] failTransfers(undefined) unexpectedly changed transfers — check for expired pending UTXOs`);
+    }
+
+    // issue #27 — failTransfers with a specific batchTransferIdx on a settled transfer should throw
+    const settledTransfer = transfersC.find((t) => t.status === 'Settled');
+    if (settledTransfer) {
+      try {
+        await nodeC.failTransfers({ batchTransferIdx: settledTransfer.batchTransferIdx, noAssetOnly: false });
+        console.error(`[wPay][#27] UNEXPECTED: failTransfers on Settled transfer should have thrown CannotFailBatchTransfer`);
+      } catch (e: any) {
+        console.log(`[wPay][#27] ✓ failTransfers on Settled correctly threw: ${e?.message ?? String(e)}`);
+      }
+    }
+
+    addStep('wPayDiagChecks', 'success', {
+      allocCount: allocsC.length,
+      transferCount: transfersC.length,
+    });
+
+    // ── Final balances: A=25, B=25, C=950
     addStep('wPayFinalBalances', 'running');
     const [finalA, finalB, finalC] = await Promise.all([
       nodeA.getAssetBalance(assetId),

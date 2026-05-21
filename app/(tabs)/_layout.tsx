@@ -38,6 +38,13 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={26} name="play.circle.fill" color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="utexo"
+        options={{
+          title: 'Signet',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="bitcoinsign.circle.fill" color={color} />,
+        }}
+      />
     </Tabs>
   );
 }

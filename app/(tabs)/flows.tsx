@@ -16,24 +16,24 @@ import {
   ConfigurationError,
   CryptoError,
   DEFAULT_INDEXER_URLS,
+  NotFoundError,
+  SDKError,
+  ValidationError,
+  VssBackupConfig,
+  WalletError,
   deriveKeysFromMnemonic,
-  LightningProtocol,
+  generateKeys,
   NetworkError,
   normalizeNetwork,
-  NotFoundError,
-  OnchainProtocol,
-  SDKError,
   signMessage,
-  UTEXOWallet,
+  signPsbt,
+  signPsbtFromSeed,
   validateBase64,
   validateHex,
   validateMnemonic,
   validateNetwork,
   validatePsbt,
-  ValidationError,
   verifyMessage,
-  VssBackupConfig,
-  WalletError,
 } from '@utexo/rgb-sdk-rn';
 
 import { AppColors } from '@/constants/theme';
@@ -224,7 +224,7 @@ function FlowCard({
         <View style={fStyles.cardTitleArea}>
           <View style={fStyles.cardTitleRow}>
             <Text style={fStyles.cardTitle}>{title}</Text>
-            {subtitle && <Text style={fStyles.cardSubtitle}>{subtitle}</Text>}
+            {subtitle ? <Text style={fStyles.cardSubtitle}>{subtitle}</Text> : null}
             {effectiveRunning && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
             {hasResults && !effectiveRunning && (
               <View style={[fStyles.statusPill, { backgroundColor: success ? AppColors.successBg : AppColors.errorBg, borderColor: success ? AppColors.successBorder : AppColors.errorBorder }]}>
@@ -268,9 +268,9 @@ function FlowCard({
               </View>
             );
           })}
-          {totalSteps && (
+          {typeof totalSteps === 'number' && totalSteps > 0 ? (
             <Text style={fStyles.progressLabel}>{doneCount}/{total}</Text>
-          )}
+          ) : null}
         </View>
       )}
 
@@ -357,7 +357,7 @@ function TestSummaryCard({ results, loading }: { results: TestSuite | null; load
                   <Text style={[tStyles.testName, { color: passed ? AppColors.textPrimary : AppColors.error }]}>
                     {key}
                   </Text>
-                  {!passed && value?.error && (
+                  {!passed && !!value?.error && (
                     <Text style={tStyles.testError} numberOfLines={1}>{value.error}</Text>
                   )}
                 </View>
@@ -684,6 +684,38 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   xPayFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on all 3 nodes — A=25, B=25, C=950' },
 };
 
+// ─── Wallet flow step meta ────────────────────────────────────────────────────
+
+const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
+  createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet' },
+  getAddress:           { label: 'Get Deposit Address',   desc: 'Derive a receive address' },
+  fundWallet:           { label: 'Fund via Faucet',       desc: 'Send sats from thunderstack faucet' },
+  waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
+  createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
+  issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
+  listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
+  getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
+  vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
+  vssBackupInfo:        { label: 'VSS Backup Info',       desc: 'Verify backup exists on server' },
+  disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet handles' },
+  deleteState:          { label: 'Delete Local State',    desc: 'Prepare restore directory' },
+  restoreFromVss:       { label: 'Restore from VSS',      desc: 'Download & decrypt backup' },
+  verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Check assets & balances match' },
+  cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
+};
+
+
+const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
+  generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
+  initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
+  vssBackup:            { label: 'Upload Backup',          desc: 'Encrypt & push to VSS server' },
+  vssBackupInfo:        { label: 'Check Backup Status',    desc: 'Query server for backup metadata' },
+  configureVssBackup:   { label: 'Configure Auto-backup',  desc: 'Enable background auto-backup' },
+  disableVssAutoBackup: { label: 'Disable Auto-backup',    desc: 'Stop background auto-backup' },
+  restoreFromVss:       { label: 'Restore from VSS',       desc: 'Download & decrypt wallet data' },
+  verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
+};
+
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
@@ -734,6 +766,141 @@ export default function FlowsScreen() {
   ] as const;
 
 
+  // ── On-mount SDK tests ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    async function runSdkTests() {
+      try {
+        setTestLoading(true);
+        const results: TestSuite = { summary: { total: 0, passed: 0, failed: 0 } };
+
+        const addResult = (key: string, obj: any, count: number) => {
+          results[key] = obj;
+          results.summary.total += count;
+          if (obj.success !== false && obj.tests) {
+            const vals = Object.values(obj.tests as Record<string, boolean>);
+            results.summary.passed += vals.filter(Boolean).length;
+            results.summary.failed += vals.filter(v => v === false).length;
+          } else if (obj.success === false) {
+            results.summary.failed += count;
+          }
+        };
+
+        // generateKeys
+        try {
+          const tk = await generateKeys('testnet');
+          const mk = await generateKeys('mainnet');
+          const rk = await generateKeys('regtest');
+          addResult('generateKeys', {
+            success: true,
+            tests: {
+              testnetValid: tk.xpub.startsWith('tpub') && tk.mnemonic.split(' ').length === 12,
+              mainnetValid: mk.xpub.startsWith('xpub'),
+              regtestValid: rk.xpub.startsWith('tpub'),
+              unique: tk.mnemonic !== mk.mnemonic,
+            },
+          }, 4);
+        } catch (e: any) { addResult('generateKeys', { success: false, error: e.message }, 4); }
+
+        // deriveKeysFromMnemonic
+        try {
+          const k = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
+          addResult('deriveKeysFromMnemonic', {
+            success: true,
+            tests: {
+              xpub: k.xpub === EXPECTED_KEYS.xpub,
+              accountXpubVanilla: k.accountXpubVanilla === EXPECTED_KEYS.accountXpubVanilla,
+              masterFingerprint: k.masterFingerprint?.toLowerCase() === EXPECTED_KEYS.masterFingerprint,
+              deterministic: (await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC)).xpub === k.xpub,
+            },
+          }, 4);
+        } catch (e: any) { addResult('deriveKeysFromMnemonic', { success: false, error: e.message }, 4); }
+
+        // signPsbt (stub throws without bdk-rn)
+        try {
+          await signPsbt(TEST_MNEMONIC, UTXO_UNSIGNED_PSBT, 'testnet');
+          addResult('signPsbt', { success: false, error: 'Expected throw, resolved' }, 1);
+        } catch (e: any) {
+          addResult('signPsbt', {
+            success: true,
+            tests: { throwsUnavailable: (e.message as string).toLowerCase().includes('unavailable') },
+          }, 1);
+        }
+
+        // signPsbtFromSeed (should throw in RN)
+        try {
+          const { mnemonicToSeedSync } = require('@scure/bip39');
+          const seed = new Uint8Array(Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC)));
+          await signPsbtFromSeed(seed, UTXO_UNSIGNED_PSBT, 'testnet');
+          addResult('signPsbtFromSeed', { success: false, error: 'Expected throw, resolved' }, 1);
+        } catch (e: any) {
+          addResult('signPsbtFromSeed', {
+            success: true,
+            tests: { throwsUnavailable: (e.message as string).toLowerCase().includes('unavailable') },
+          }, 1);
+        }
+
+        // signMessage + verifyMessage
+        try {
+          const { mnemonicToSeedSync } = require('@scure/bip39');
+          const seed = Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC));
+          const keys = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
+          const sig = await signMessage({ message: 'hello rgb', seed, network: 'testnet' });
+          const valid = await verifyMessage({ message: 'hello rgb', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
+          const wrong = await verifyMessage({ message: 'wrong', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
+          addResult('signMessage+verifyMessage', {
+            success: true,
+            tests: { signatureProduced: sig.length > 0, validSig: valid === true, wrongMsgFails: wrong === false },
+          }, 3);
+        } catch (e: any) { addResult('signMessage+verifyMessage', { success: false, error: e.message }, 3); }
+
+        // Error classes
+        try {
+          const sdkErr = new SDKError('msg', 'CODE');
+          const netErr = new NetworkError('msg', 503);
+          const walletErr = new WalletError('msg');
+          const cryptoErr = new CryptoError('msg');
+          const configErr = new ConfigurationError('msg');
+          const badReqErr = new BadRequestError('msg');
+          const notFoundErr = new NotFoundError('msg');
+          const valErr = new ValidationError('msg', 'field');
+          addResult('errorClasses', {
+            success: true,
+            tests: {
+              SDKError: sdkErr instanceof SDKError,
+              NetworkError: netErr.statusCode === 503,
+              WalletError: walletErr instanceof SDKError,
+              CryptoError: cryptoErr instanceof SDKError,
+              ConfigurationError: configErr instanceof SDKError,
+              BadRequestError: badReqErr.statusCode === 400,
+              NotFoundError: notFoundErr.statusCode === 404,
+              ValidationError: valErr.field === 'field',
+            },
+          }, 7);
+        } catch (e: any) { addResult('errorClasses', { success: false, error: e.message }, 7); }
+
+        // Validation
+        try {
+          const t: Record<string, boolean> = {};
+          t.normalizeNetwork = normalizeNetwork('mainnet') === 'mainnet';
+          try { validateNetwork('bad'); t.validateNetworkThrows = false; } catch { t.validateNetworkThrows = true; }
+          try { validateMnemonic('not'); t.validateMnemonicThrows = false; } catch { t.validateMnemonicThrows = true; }
+          validatePsbt(UTXO_UNSIGNED_PSBT); t.validatePsbt = true;
+          validateBase64(UTXO_UNSIGNED_PSBT); t.validateBase64 = true;
+          try { validateHex('!!'); t.validateHexThrows = false; } catch { t.validateHexThrows = true; }
+          validateHex('deadbeef'); t.validateHex = true;
+          addResult('validation', { success: true, tests: t }, Object.keys(t).length);
+        } catch (e: any) { addResult('validation', { success: false, error: e.message }, 7); }
+
+
+        setTestResults(results);
+      } finally {
+        setTestLoading(false);
+      }
+    }
+
+    runSdkTests();
+  }, []);
   // ── Flow handlers ─────────────────────────────────────────────────────────
 
 
@@ -859,6 +1026,9 @@ export default function FlowsScreen() {
             ))}
           </View>
         </View>
+
+        {/* SDK Tests */}
+        <TestSummaryCard results={testResults} loading={testLoading} />
 
         <FlowCard
           title="UTEXOWallet: Channel + Payment"

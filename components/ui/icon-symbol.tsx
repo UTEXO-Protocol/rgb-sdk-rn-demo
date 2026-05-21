@@ -20,6 +20,7 @@ const MAPPING = {
   'chevron.right': 'chevron-right',
   'book.fill': 'menu-book',
   'play.circle.fill': 'play-circle-filled',
+  'bitcoinsign.circle.fill': 'currency-bitcoin',
 } as IconMapping;
 
 /**
