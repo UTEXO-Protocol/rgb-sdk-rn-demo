@@ -42,6 +42,8 @@ import {
   runRLNUtexoPaymentFlow,
   runRlnUtexoWalletAssetChannelExtSignerFlow,
   runRLNUtexoExternalPaymentFlow,
+  runRlnUtexoVssFlow,
+  runRlnVssFlow,
 } from '@/utils/wallet-flow';
 
 // ─── Test data ────────────────────────────────────────────────────────────────
@@ -687,33 +689,34 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
 // ─── Wallet flow step meta ────────────────────────────────────────────────────
 
 const UTEXO_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet' },
+  createUtexoWallet:    { label: 'Create UTEXO Wallet',   desc: 'Instantiate & initialise UTEXOWallet with VSS' },
   getAddress:           { label: 'Get Deposit Address',   desc: 'Derive a receive address' },
   fundWallet:           { label: 'Fund via Faucet',       desc: 'Send sats from thunderstack faucet' },
   waitForFunding:       { label: 'Wait for Balance',      desc: 'Poll until balance > 0' },
   createUtxos:          { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations' },
-  issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue DEMO token on UTEXO layer' },
+  issueAssetNia:        { label: 'Issue NIA Asset',       desc: 'Issue VDMO token on UTEXO layer' },
   listAssets:           { label: 'List Assets',           desc: 'Confirm asset appears in list' },
-  getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-backup asset balance' },
-  vssBackup:            { label: 'VSS Backup',            desc: 'Upload encrypted backup (zero-arg)' },
-  vssBackupInfo:        { label: 'VSS Backup Info',       desc: 'Verify backup exists on server' },
-  disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet handles' },
-  deleteState:          { label: 'Delete Local State',    desc: 'Prepare restore directory' },
-  restoreFromVss:       { label: 'Restore from VSS',      desc: 'Download & decrypt backup' },
-  verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Check assets & balances match' },
+  getAssetBalance:      { label: 'Get Asset Balance',     desc: 'Record pre-wipe asset balance' },
+  disposeWallet:        { label: 'Dispose Wallet',        desc: 'Close wallet — VSS KV already replicated' },
+  deleteState:          { label: 'Delete Local State',    desc: 'Wipe storage, prepare restore directory' },
+  restoreFromVss:       { label: 'Restore from VSS',      desc: 'New wallet instance, same mnemonic — downloads LDK state' },
+  verifyRestoredWallet: { label: 'Verify Restored State', desc: 'Compare pubkey and asset balance' },
   cleanup:              { label: 'Cleanup',               desc: 'Dispose restored wallet' },
 };
 
-
-const VSS_STEP_META: Record<string, { label: string; desc: string }> = {
-  generateKeys:         { label: 'Generate Keys',          desc: 'Create fresh wallet keypairs' },
-  initializeWallet:     { label: 'Initialize Wallet',      desc: 'Setup wallet on testnet' },
-  vssBackup:            { label: 'Upload Backup',          desc: 'Encrypt & push to VSS server' },
-  vssBackupInfo:        { label: 'Check Backup Status',    desc: 'Query server for backup metadata' },
-  configureVssBackup:   { label: 'Configure Auto-backup',  desc: 'Enable background auto-backup' },
-  disableVssAutoBackup: { label: 'Disable Auto-backup',    desc: 'Stop background auto-backup' },
-  restoreFromVss:       { label: 'Restore from VSS',       desc: 'Download & decrypt wallet data' },
-  verifyRestoredWallet: { label: 'Verify Restored Wallet', desc: 'Confirm assets & transactions intact' },
+const RLN_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
+  vssCreateWallet:      { label: 'Create Wallet',         desc: 'Instantiate & unlock UTEXOWallet with VSS on regtest' },
+  vssGetAddress:        { label: 'Get Address',           desc: 'Derive a receive address' },
+  vssFundWallet:        { label: 'Fund Wallet',           desc: 'sendToAddress(1 BTC) + mine(6)' },
+  vssCreateUtxos:       { label: 'Create UTXOs',          desc: 'Allocate UTXOs for RGB operations + mine(1)' },
+  vssIssueAssetNia:     { label: 'Issue NIA Asset',       desc: 'Issue 500 VDMO tokens on regtest' },
+  vssListAssets:        { label: 'List Assets',           desc: 'Confirm asset appears in list' },
+  vssGetAssetBalance:   { label: 'Asset Balance',         desc: 'Record pre-wipe spendable balance' },
+  vssDisposeWallet:     { label: 'Dispose Wallet',        desc: 'Close wallet — VSS KV already replicated' },
+  vssDeleteState:       { label: 'Delete Local State',    desc: 'Wipe storage, prepare restore directory' },
+  vssRestoreFromVss:    { label: 'Restore from VSS',      desc: 'New wallet instance, same mnemonic — downloads LDK state' },
+  vssVerifyRestoredWallet: { label: 'Verify Restored',   desc: 'Compare pubkey and asset balance' },
+  vssCleanup:           { label: 'Cleanup',               desc: 'Dispose restored wallet' },
 };
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
@@ -735,6 +738,12 @@ export default function FlowsScreen() {
   const [rlnExtPayResults, setRlnExtPayResults] = useState<FlowResults>(null);
   const [runningRlnExtPayFlow, setRunningRlnExtPayFlow] = useState(false);
   const rlnExtPayInFlightRef = useRef(false);
+  const [vssFlowResults, setVssFlowResults] = useState<FlowResults>(null);
+  const [runningVssFlow, setRunningVssFlow] = useState(false);
+  const vssFlowInFlightRef = useRef(false);
+  const [rlnVssFlowResults, setRlnVssFlowResults] = useState<FlowResults>(null);
+  const [runningRlnVssFlow, setRunningRlnVssFlow] = useState(false);
+  const rlnVssFlowInFlightRef = useRef(false);
   const effectiveRpcHost =
     process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
     (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
@@ -988,6 +997,48 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleVssFlow() {
+    if (vssFlowInFlightRef.current) return;
+    vssFlowInFlightRef.current = true;
+    try {
+      setRunningVssFlow(true);
+      setVssFlowResults({ running: true, steps: [] });
+      const r = await runRlnUtexoVssFlow();
+      setVssFlowResults({ ...r, running: false });
+    } catch (e: any) {
+      setVssFlowResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningVssFlow(false);
+      vssFlowInFlightRef.current = false;
+    }
+  }
+
+  async function handleRlnVssFlow() {
+    if (rlnVssFlowInFlightRef.current) return;
+    rlnVssFlowInFlightRef.current = true;
+    try {
+      setRunningRlnVssFlow(true);
+      setRlnVssFlowResults({ running: true, steps: [] });
+      const r = await runRlnVssFlow();
+      setRlnVssFlowResults({ ...r, running: false });
+    } catch (e: any) {
+      setRlnVssFlowResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningRlnVssFlow(false);
+      rlnVssFlowInFlightRef.current = false;
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -1129,6 +1180,58 @@ export default function FlowsScreen() {
                 accentColor="#8A3D1D"
                 isLast={idx === arr.length - 1}
                 deferErrorDisplay={runningRlnExtPayFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="UTEXOWallet: VSS Backup & Restore"
+          subtitle="1 node (UTEXO testnet) — 13 steps"
+          description="Init a UTEXOWallet with VSS enabled on UTEXO testnet, optionally issue VDMO, wipe local state, then restore from VSS. Fence-conflict on restore is handled gracefully."
+          accentColor="#1D6B8A"
+          totalSteps={13}
+          results={vssFlowResults}
+          running={runningVssFlow}
+          onRun={handleVssFlow}>
+          {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#1D6B8A"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningVssFlow}
+              />
+            );
+          })}
+        </FlowCard>
+
+        <FlowCard
+          title="UTEXOWallet: VSS Backup & Restore (regtest)"
+          subtitle="1 node (regtest) — 12 steps"
+          description="Regtest VSS flow: init UTEXOWallet with VSS, fund via faucet, issue VDMO, wipe local state, restore from VSS. Fence-conflict on restore is handled gracefully."
+          accentColor="#6B3D1D"
+          totalSteps={12}
+          results={rlnVssFlowResults}
+          running={runningRlnVssFlow}
+          onRun={handleRlnVssFlow}>
+          {rlnVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+            const meta = RLN_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+            return (
+              <StepCard
+                key={idx}
+                idx={idx}
+                step={step}
+                label={meta.label}
+                desc={meta.desc}
+                accentColor="#6B3D1D"
+                isLast={idx === arr.length - 1}
+                deferErrorDisplay={runningRlnVssFlow}
               />
             );
           })}

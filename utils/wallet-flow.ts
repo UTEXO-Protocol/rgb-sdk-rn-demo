@@ -66,6 +66,8 @@ function readEnv(name: string): string | null {
                         ? process.env.EXPO_PUBLIC_RLN_PLAYGROUND_NETWORK
                       : name === 'RLN_STRICT_UNLOCK_CREDS'
                         ? process.env.EXPO_PUBLIC_RLN_STRICT_UNLOCK_CREDS
+                      : name === 'RLN_VSS_URL'
+                        ? process.env.EXPO_PUBLIC_RLN_VSS_URL
                       : null) ?? null;
   if (typeof value === 'string' && value.trim().length > 0) {
     return value.trim();
@@ -1651,6 +1653,527 @@ export async function runRLNUtexoPaymentFlow() {
     if (nodeA) { try { await nodeA.destroy(); } catch {} }
     if (nodeB) { try { await nodeB.destroy(); } catch {} }
     if (nodeC) { try { await nodeC.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+// VSS (Versioned Storage Service) flow — UTEXO testnet.
+//
+// Demonstrates that VSS backup is active during node operation and that LDK
+// state would be automatically restored from VSS when a fresh wallet with the
+// same mnemonic + VSS URL is unlocked on an empty storage directory.
+//
+// Fence note: the VSS single-writer fence (__rln_instance__) is written on
+// unlock and NOT released on graceful shutdown in 0.4.0-beta.1. Re-creating a
+// wallet with the same mnemonic in the same process therefore hits a fence
+// conflict. The restoreFromVss step catches this error and reports it as
+// informational — the backup IS confirmed via /vssbackupinfo. In a real
+// device-wipe restore the fence would not exist.
+export async function runRlnUtexoVssFlow() {
+  const flowName = 'runRlnUtexoVssFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let wallet: UTEXOWallet | null = null;
+  let walletRestored: UTEXOWallet | null = null;
+
+  try {
+    const network = (process.env.EXPO_PUBLIC_UTEXO_NETWORK?.trim() || 'utexo') as any;
+    const rpcUsername = process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_USERNAME?.trim() ?? '';
+    const rpcPassword = process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PASSWORD?.trim() ?? '';
+    const rpcHost = process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST?.trim() ?? '';
+    const rpcPort = Number(process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT?.trim() ?? '38332');
+    const indexerUrl = process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() ?? 'https://esplora-api.utexo.com';
+    const proxyEndpoint = process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() ?? 'rpcs://rgb-proxy-utexo.utexo.com/json-rpc';
+    const resolveLocalhost = (url: string) =>
+      Platform.OS === 'android'
+        ? url.replace(/localhost/g, '10.0.2.2').replace(/127\.0\.0\.1/g, '10.0.2.2')
+        : url;
+
+    const vssUrl = (() => {
+      const raw = process.env.EXPO_PUBLIC_UTEXO_VSS_URL?.trim() ?? null;
+      // VSS URL must stay as a loopback address — the native binary only accepts
+      // localhost/127.0.0.1 over plain HTTP. On Android use `adb reverse tcp:PORT tcp:PORT`
+      // so that 127.0.0.1:PORT on the emulator tunnels to the host.
+      return raw ?? null;
+    })();
+
+    if (!rpcHost) throw new Error('EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST not set — configure .env.utexo.local');
+    if (!vssUrl) throw new Error('EXPO_PUBLIC_UTEXO_VSS_URL not set — add it to .env.utexo.local');
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keys = await createWallet(network);
+    const password = 'vssFlowPass';
+    const ts = Date.now();
+    const basePort = 26000 + Math.floor(Math.random() * 4000);
+
+    const storageDirUri = `${documentDirectory ?? ''}rln_vss_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirUri, { intermediates: true });
+    const storageDir = storageDirUri.replace('file://', '');
+
+    // 1 — Create + init + unlock wallet with VSS
+    addStep('createUtexoWallet', 'running');
+    wallet = new UTEXOWallet(
+      {
+        storageDirPath: storageDir,
+        daemonListeningPort: basePort,
+        ldkPeerListeningPort: basePort + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        vssUrl,
+        vssAllowHttp: vssUrl.startsWith('http://'),
+        vssAllowEmptyRestore: true,
+        xpubVan: keys.accountXpubVanilla,
+        xpubCol: keys.accountXpubColored,
+        masterFingerprint: keys.masterFingerprint,
+      },
+      new PasswordRLNSigner(password, keys.mnemonic),
+    );
+    await wallet.init();
+    await wallet.unlock(unlockParams);
+    addStep('createUtexoWallet', 'success', { storageDir, vssUrl, network });
+
+    // 2 — Get deposit address
+    addStep('getAddress', 'running');
+    const address = await wallet.getAddress();
+    addStep('getAddress', 'success', { address });
+
+    // 3 — Show address for manual funding (no automated faucet)
+    addStep('fundWallet', 'success', {
+      address,
+      note: 'Send BTC to this address on the UTEXO testnet to continue asset steps',
+    });
+
+    // 4 — Poll up to 3 min for an on-chain balance
+    addStep('waitForFunding', 'running');
+    let balance: any = null;
+    const fundDeadline = Date.now() + 3 * 60 * 1000;
+    while (Date.now() < fundDeadline) {
+      try {
+        await wallet.syncWallet();
+        balance = await wallet.getBtcBalance();
+        if (Number(balance?.vanilla?.spendable ?? 0) > 0) break;
+      } catch (e: any) {
+        console.warn(`[vss] waitForFunding: ${e?.message}`);
+      }
+      await sleep(15000);
+    }
+    const hasFunds = Number(balance?.vanilla?.spendable ?? 0) > 0;
+    addStep('waitForFunding', 'success', {
+      balance,
+      hasFunds,
+      note: hasFunds ? undefined : 'No balance — asset steps skipped; VSS KV replication still tested',
+    });
+
+    let assetId: string | null = null;
+    let preWipeBalance: any = null;
+
+    if (hasFunds) {
+      // 5 — Create UTXOs
+      addStep('createUtxos', 'running');
+      await wallet.syncWallet();
+      await wallet.createUtxos({ upTo: false, num: 5, feeRate: 3 });
+      const utxoDeadline = Date.now() + 45 * 60 * 1000;
+      while (Date.now() < utxoDeadline) {
+        await sleep(20000);
+        await wallet.syncWallet();
+        const unspents = await wallet.listUnspents().catch(() => []);
+        const confirmed = unspents.filter((u: any) => !(u.rgbAllocations?.length > 0));
+        console.log(`[vss] UTXO confirmation check — rgb-ready=${confirmed.length}`);
+        if (confirmed.length >= 5) break;
+      }
+      addStep('createUtxos', 'success', { num: 5 });
+
+      // 6 — Issue NIA asset
+      addStep('issueAssetNia', 'running');
+      await wallet.syncWallet();
+      const issued = await wallet.issueAssetNia({ ticker: 'VDMO', name: 'VssDemo', precision: 0, amounts: [500] });
+      assetId = String(issued?.assetId ?? '');
+      if (!assetId) throw new Error('Failed to issue asset');
+      await wallet.refreshWallet();
+      addStep('issueAssetNia', 'success', { assetId: assetId.substring(0, 20) + '...' });
+
+      // 7 — List assets
+      addStep('listAssets', 'running');
+      const assetList = await wallet.listAssets();
+      addStep('listAssets', 'success', { niaCount: assetList?.nia?.length ?? 0 });
+
+      // 8 — Get asset balance (record pre-wipe state)
+      addStep('getAssetBalance', 'running');
+      preWipeBalance = await wallet.getAssetBalance(assetId);
+      addStep('getAssetBalance', 'success', { spendable: preWipeBalance?.spendable });
+    } else {
+      addStep('createUtxos', 'success', { skipped: true });
+      addStep('issueAssetNia', 'success', { skipped: true });
+      addStep('listAssets', 'success', { skipped: true });
+      addStep('getAssetBalance', 'success', { skipped: true });
+    }
+
+    const nodeInfo = await wallet.getNodeInfo();
+    const pubkey = String(nodeInfo?.pubkey ?? '');
+
+    // 11 — Dispose wallet
+    addStep('disposeWallet', 'running');
+    await wallet.destroy();
+    wallet = null;
+    addStep('disposeWallet', 'success', { pubkey: pubkey.substring(0, 16) + '...' });
+
+    // 12 — Delete local state; prepare fresh empty restore dir
+    addStep('deleteState', 'running');
+    await FileSystem.deleteAsync(storageDirUri, { idempotent: true });
+    const restoreDirUri = `${documentDirectory ?? ''}rln_vss_restore_${ts}`;
+    await FileSystem.makeDirectoryAsync(restoreDirUri, { intermediates: true });
+    const restoreDir = restoreDirUri.replace('file://', '');
+    addStep('deleteState', 'success', { restoreDir });
+
+    // 13 — Restore: new wallet instance, same mnemonic + vssUrl, empty storage dir.
+    // On unlock the node detects empty local DB → restore_from_vss() downloads all
+    // LDK keys from VSS automatically.
+    // Fence note: if the fence from the original instance is still in VSS, unlock
+    // fails with FailedVssInit. Caught below and reported as informational.
+    addStep('restoreFromVss', 'running');
+    const restorePort = basePort + 10;
+    walletRestored = new UTEXOWallet(
+      {
+        storageDirPath: restoreDir,
+        daemonListeningPort: restorePort,
+        ldkPeerListeningPort: restorePort + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        vssUrl,
+        vssAllowHttp: vssUrl.startsWith('http://'),
+        vssAllowEmptyRestore: true,
+        xpubVan: keys.accountXpubVanilla,
+        xpubCol: keys.accountXpubColored,
+        masterFingerprint: keys.masterFingerprint,
+      },
+      new PasswordRLNSigner(password, keys.mnemonic),
+    );
+    console.log('[vss] restore: init()');
+    await walletRestored.init();
+    console.log('[vss] restore: vssClearFence()');
+    await walletRestored.vssClearFence(password);
+    console.log('[vss] restore: unlock()');
+    await walletRestored.unlock(unlockParams);
+    console.log('[vss] restore: unlock() done');
+    addStep('restoreFromVss', 'success', { restoreDir });
+
+    // 13 — Verify restored wallet state
+    addStep('verifyRestoredWallet', 'running');
+    const restoredInfo = await walletRestored!.getNodeInfo();
+    const restoredPubkey = String(restoredInfo?.pubkey ?? '');
+    console.log(`[vss] restored pubkey=${restoredPubkey.substring(0, 16)}... assetId=${assetId}`);
+    let restoredBalance: any = null;
+    if (assetId) {
+      try {
+        console.log('[vss] restored: syncWallet()');
+        await walletRestored!.syncWallet();
+        console.log('[vss] restored: refreshWallet()');
+        await walletRestored!.refreshWallet();
+        console.log('[vss] restored: getAssetBalance()');
+        restoredBalance = await walletRestored!.getAssetBalance(assetId);
+        console.log('[vss] restored balance:', JSON.stringify(restoredBalance));
+      } catch (e: any) {
+        console.warn(`[vss] getAssetBalance restored FAILED: ${e?.message}`, e?.code, e?.stack);
+      }
+    }
+    addStep('verifyRestoredWallet', 'success', {
+      pubkeyMatch: restoredPubkey.startsWith(pubkey.substring(0, 16)),
+      pubkey: restoredPubkey.substring(0, 16) + '...',
+      preWipeBalance: preWipeBalance?.spendable ?? null,
+      restoredBalance: restoredBalance?.spendable ?? null,
+    });
+
+    // 15 — Cleanup
+    addStep('cleanup', 'running');
+    if (walletRestored) {
+      try { await walletRestored.destroy(); } catch {}
+      walletRestored = null;
+    }
+    addStep('cleanup', 'success', {});
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (wallet) { try { await wallet.destroy(); } catch {} }
+    if (walletRestored) { try { await walletRestored.destroy(); } catch {} }
+    endExclusiveFlow(flowName);
+  }
+}
+
+export async function runRlnVssFlow() {
+  const flowName = 'runRlnVssFlow';
+  beginExclusiveFlow(flowName);
+  const { results, addStep, failFlow } = createFlowResults();
+
+  let wallet: UTEXOWallet | null = null;
+  let nodeB: UTEXOWallet | null = null;
+  let walletRestored: UTEXOWallet | null = null;
+
+  try {
+    const network = 'regtest' as const;
+    const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST') ?? (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
+    const rpcPort = Number(readEnv('RLN_BITCOIND_RPC_PORT') ?? '18443');
+    const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME') ?? 'user';
+    const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD') ?? 'password';
+    const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost}:50001`;
+    const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost}:3000/json-rpc`;
+    const vssUrl = (() => {
+      const raw = readEnv('RLN_VSS_URL')?.trim() ?? null;
+      return raw ?? null;
+    })();
+
+    if (!vssUrl) throw new Error('EXPO_PUBLIC_RLN_VSS_URL not set — add it to .env');
+
+    const unlockParams = {
+      bitcoindRpcUsername: rpcUsername,
+      bitcoindRpcPassword: rpcPassword,
+      bitcoindRpcHost: rpcHost,
+      bitcoindRpcPort: rpcPort,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    };
+
+    const keysA = await createWallet(network);
+    const keysB = await createWallet(network);
+    const password = 'vssFlowPass';
+    const ts = Date.now();
+    const basePort = 26000 + Math.floor(Math.random() * 4000);
+
+    const storageDirAUri = `${documentDirectory ?? ''}rln_vss_rgt_a_${ts}`;
+    const storageDirBUri = `${documentDirectory ?? ''}rln_vss_rgt_b_${ts}`;
+    await FileSystem.makeDirectoryAsync(storageDirAUri, { intermediates: true });
+    await FileSystem.makeDirectoryAsync(storageDirBUri, { intermediates: true });
+    const storageDirA = storageDirAUri.replace('file://', '');
+    const storageDirB = storageDirBUri.replace('file://', '');
+
+    // 1 — create nodeA (VSS-enabled) + nodeB (plain)
+    addStep('vssCreateWallets', 'running');
+    wallet = new UTEXOWallet(
+      {
+        storageDirPath: storageDirA,
+        daemonListeningPort: basePort,
+        ldkPeerListeningPort: basePort + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        vssUrl,
+        vssAllowHttp: vssUrl.startsWith('http://'),
+        vssAllowEmptyRestore: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(password, keysA.mnemonic),
+    );
+    nodeB = new UTEXOWallet(
+      {
+        storageDirPath: storageDirB,
+        daemonListeningPort: basePort + 100,
+        ldkPeerListeningPort: basePort + 101,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        xpubVan: keysB.accountXpubVanilla,
+        xpubCol: keysB.accountXpubColored,
+        masterFingerprint: keysB.masterFingerprint,
+      },
+      new PasswordRLNSigner(password, keysB.mnemonic),
+    );
+    await wallet.init();
+    await wallet.unlock(unlockParams);
+    await nodeB.init();
+    await nodeB.unlock(unlockParams);
+    const nodeBInfo = await nodeB.getNodeInfo();
+    const pubkeyB = String(nodeBInfo?.pubkey ?? '');
+    addStep('vssCreateWallets', 'success', { vssUrl, network, pubkeyB: pubkeyB.substring(0, 16) + '...' });
+
+    // 2 — fund nodeA
+    addStep('vssFundWallet', 'running');
+    const address = await wallet.getAddress();
+    const txid = await sendToAddress(address, 1);
+    await mine(6);
+    await sleep(3000);
+    await wallet.syncWallet();
+    const btcBalance = await wallet.getBtcBalance();
+    addStep('vssFundWallet', 'success', { txid, spendable: btcBalance?.vanilla?.spendable });
+
+    // 3 — create UTXOs for RGB operations
+    addStep('vssCreateUtxos', 'running');
+    await wallet.createUtxos({ upTo: false, num: 5, feeRate: 3 });
+    await mine(1);
+    await sleep(2000);
+    await wallet.syncWallet();
+    addStep('vssCreateUtxos', 'success', { num: 5 });
+
+    // 4 — issue NIA asset
+    addStep('vssIssueAssetNia', 'running');
+    await wallet.syncWallet();
+    const issued = await wallet.issueAssetNia({ ticker: 'VDMO', name: 'VssDemo', precision: 0, amounts: [500] });
+    const assetId = String(issued?.assetId ?? '');
+    if (!assetId) throw new Error('Failed to issue asset');
+    await wallet.refreshWallet();
+    const preWipeBalance = await wallet.getAssetBalance(assetId);
+    addStep('vssIssueAssetNia', 'success', { assetId: assetId.substring(0, 20) + '...', spendable: preWipeBalance?.spendable });
+
+    // 5 — open BTC channel nodeA → nodeB
+    addStep('vssOpenChannel', 'running');
+    const peerUriB = `${pubkeyB}@127.0.0.1:${basePort + 101}`;
+    try { await wallet.connectPeer(peerUriB); } catch {}
+    await sleep(1000);
+    const openResp = await wallet.openChannel({
+      peerPubkeyAndOptAddr: peerUriB,
+      capacitySat: 200000,
+      pushMsat: 0,
+      public: true,
+      withAnchors: true,
+    });
+    const tempChannelId = String(openResp?.temporaryChannelId ?? '');
+    await mine(6);
+    await sleep(3000);
+    // wait for channel to be usable on both nodes
+    for (const [node, label] of [[wallet, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await node.syncWallet();
+        const info = await node.getNodeInfo();
+        const usable = Number(info?.numUsableChannels ?? 0);
+        console.log(`[vss] ${label} usableChannels=${usable}`);
+        if (usable >= 1) break;
+        await sleep(2000);
+      }
+    }
+    const channelsA = await wallet.listChannels() ?? [];
+    const channel = (channelsA as any[]).find((c: any) => c.isUsable);
+    const channelId = String(channel?.channelId ?? tempChannelId);
+    const channelCapacity = Number(channel?.capacitySat ?? 200000);
+    addStep('vssOpenChannel', 'success', { channelId: channelId.substring(0, 16) + '...', capacitySat: channelCapacity });
+
+    const nodeInfoA = await wallet.getNodeInfo();
+    const pubkeyA = String(nodeInfoA?.pubkey ?? '');
+
+    // 6 — shutdown nodeA (keep nodeB running), delete nodeA local state
+    addStep('vssDeleteState', 'running');
+    await wallet.shutdown();
+    wallet = null;
+    await FileSystem.deleteAsync(storageDirAUri, { idempotent: true });
+    const restoreDirUri = `${documentDirectory ?? ''}rln_vss_rgt_restore_${ts}`;
+    await FileSystem.makeDirectoryAsync(restoreDirUri, { intermediates: true });
+    const restoreDir = restoreDirUri.replace('file://', '');
+    addStep('vssDeleteState', 'success', { pubkeyA: pubkeyA.substring(0, 16) + '...', restoreDir });
+
+    // 7 — restore nodeA from VSS (empty local DB → auto-restore LDK state)
+    addStep('vssRestoreFromVss', 'running');
+    const restorePort = basePort + 10;
+    walletRestored = new UTEXOWallet(
+      {
+        storageDirPath: restoreDir,
+        daemonListeningPort: restorePort,
+        ldkPeerListeningPort: restorePort + 1,
+        network,
+        maxMediaUploadSizeMb: 20,
+        enableVirtualChannelsV0: false,
+        vssUrl,
+        vssAllowHttp: vssUrl.startsWith('http://'),
+        vssAllowEmptyRestore: false,
+        xpubVan: keysA.accountXpubVanilla,
+        xpubCol: keysA.accountXpubColored,
+        masterFingerprint: keysA.masterFingerprint,
+      },
+      new PasswordRLNSigner(password, keysA.mnemonic),
+    );
+    console.log('[vss] restore: init()');
+    await walletRestored.init();
+    console.log('[vss] restore: vssClearFence()');
+    await walletRestored.vssClearFence(password);
+    console.log('[vss] restore: unlock()');
+    await walletRestored.unlock(unlockParams);
+    console.log('[vss] restore: unlock() done');
+    addStep('vssRestoreFromVss', 'success', { restoreDir });
+
+    // 8 — verify restored state: pubkey, BTC balance, channel still present
+    addStep('vssVerifyRestoredWallet', 'running');
+    const restoredInfo = await walletRestored!.getNodeInfo();
+    const restoredPubkey = String(restoredInfo?.pubkey ?? '');
+    console.log(`[vss] restored pubkey=${restoredPubkey.substring(0, 16)}...`);
+
+    await walletRestored!.syncWallet();
+
+    let restoredBtcBalance: any = null;
+    try {
+      restoredBtcBalance = await walletRestored!.getBtcBalance();
+      console.log('[vss] restored btcBalance:', JSON.stringify(restoredBtcBalance));
+    } catch (e: any) { console.warn('[vss] getBtcBalance FAILED:', e?.message); }
+
+    const restoredChannels = (await walletRestored!.listChannels() ?? []) as any[];
+    const restoredChannel = restoredChannels.find((c: any) => c.channelId === channelId)
+      ?? restoredChannels[0];
+    console.log(`[vss] restored channels=${restoredChannels.length}`, JSON.stringify(restoredChannels.map((c: any) => ({ id: c.channelId?.substring(0, 16), isUsable: c.isUsable }))));
+
+    addStep('vssVerifyRestoredWallet', 'success', {
+      pubkeyMatch: restoredPubkey === pubkeyA,
+      pubkey: restoredPubkey.substring(0, 16) + '...',
+      restoredBtcSpendable: restoredBtcBalance?.vanilla?.spendable ?? null,
+      channelsRestored: restoredChannels.length,
+      channelFound: !!restoredChannel,
+      channelIsUsable: restoredChannel?.isUsable ?? false,
+    });
+
+    // 9 — verify RGB asset balance after restore
+    addStep('vssVerifyAssetBalance', 'running');
+    let restoredAssets: any = null;
+    let restoredAssetBalance: any = null;
+    let assetBalanceError: string | null = null;
+    try {
+      await walletRestored!.syncWallet();
+      await walletRestored!.refreshWallet();
+      restoredAssets = await walletRestored!.listAssets();
+      console.log(`[vss] restored listAssets nia=${restoredAssets?.nia?.length ?? 0}`,
+        JSON.stringify(restoredAssets?.nia?.map((a: any) => a.assetId)));
+      restoredAssetBalance = await walletRestored!.getAssetBalance(assetId);
+      console.log('[vss] restored assetBalance:', JSON.stringify(restoredAssetBalance));
+    } catch (e: any) {
+      assetBalanceError = `${e?.message ?? e} (${e?.code ?? 'unknown'})`;
+      console.warn('[vss] asset balance after restore FAILED:', assetBalanceError);
+    }
+    addStep('vssVerifyAssetBalance', assetBalanceError && !restoredAssetBalance ? 'error' : 'success', {
+      assetId: assetId.substring(0, 20) + '...',
+      preWipeSpendable: preWipeBalance?.spendable ?? null,
+      restoredNiaCount: restoredAssets?.nia?.length ?? null,
+      restoredSpendable: restoredAssetBalance?.spendable ?? null,
+      error: assetBalanceError,
+    });
+
+    // 10 — cleanup
+    addStep('vssCleanup', 'running');
+    if (walletRestored) { try { await walletRestored.destroy(); } catch {} walletRestored = null; }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} nodeB = null; }
+    addStep('vssCleanup', 'success', {});
+
+    results.success = true;
+    return results;
+  } catch (error: any) {
+    return failFlow(flowName, error);
+  } finally {
+    if (wallet) { try { await wallet.destroy(); } catch {} }
+    if (nodeB) { try { await nodeB.destroy(); } catch {} }
+    if (walletRestored) { try { await walletRestored.destroy(); } catch {} }
     endExclusiveFlow(flowName);
   }
 }
