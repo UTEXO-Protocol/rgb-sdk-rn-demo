@@ -8,7 +8,10 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
-
+.env.utexo.local
+.env.utexo
+.env.local
+.env
 # Native
 .kotlin/
 *.orig.*
