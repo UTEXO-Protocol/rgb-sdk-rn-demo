@@ -23,7 +23,7 @@ const UTEXO_UNLOCK = {
   bitcoindRpcHost: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST?.trim() || '',
   bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT?.trim() || '38332'),
   indexerUrl: process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() || 'https://esplora-api.utexo.com',
-  proxyEndpoint: process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy-utexo.utexo.com/json-rpc',
+  proxyEndpoint: process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy.utexo.com/json-rpc',
   announceAddresses: [] as string[],
   announceAlias: null as string | null,
 };
