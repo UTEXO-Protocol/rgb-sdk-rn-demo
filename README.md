@@ -1,31 +1,65 @@
 # rgb-sdk-rn Demo
 
-End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows against a local regtest stack to show developers exactly how to integrate the SDK into a React Native application.
+End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, plus a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet).
 
 ---
 
 ## What This Demo Shows
 
-The demo runs all flows inside the app process — two or three RLN nodes start simultaneously on the device/emulator, connect to your local Bitcoin/Electrum/Proxy stack, and execute real transactions. Everything visible in the Flows screen is produced by actual SDK calls, not mocks.
+The demo runs all flows inside the app process — two or three RLN nodes start simultaneously on the device/emulator, connect to Bitcoin/Electrum/Proxy (local regtest or UTEXO signet), and execute real transactions. Everything visible in the Flows and Utexo screens is produced by actual SDK calls, not mocks.
 
 ---
 
 ## Required Infrastructure
 
-All flows require a local regtest environment with four services running before you hit **Run**:
+### Recommended: `rgb-lightning-node` regtest stack
+
+For **Flows** (regtest) and **Utexo → Regtest**, start the full local stack from [UTEXO-Protocol/rgb-lightning-node](https://github.com/UTEXO-Protocol/rgb-lightning-node):
+
+```bash
+git clone https://github.com/UTEXO-Protocol/rgb-lightning-node.git
+cd rgb-lightning-node
+git submodule update --init --recursive
+./regtest.sh start
+```
+
+`./regtest.sh start` brings up **Bitcoin Core (regtest), Electrum, and RGB Proxy** only. It does **not** start the Bitcoin node helper.
+
+### Services
+
+**From `./regtest.sh start` (required for regtest flows):**
 
 | Service | Default host:port | Purpose |
 |---------|------------------|---------|
-| Bitcoin Core (regtest) | `127.0.0.1:18443` (RPC) | Block production, funding |
+| Bitcoin Core (regtest) | `127.0.0.1:18443` (RPC) | Chain + wallet RPC for node unlock |
 | Electrum indexer | `127.0.0.1:50001` | UTXO / transaction indexing |
 | RGB Proxy | `127.0.0.1:3000` | RGB invoice transport (JSON-RPC) |
-| Bitcoin node helper | `127.0.0.1:5000` | Test HTTP API — mine + sendtoaddress |
 
-On **Android emulator** replace `127.0.0.1` with `10.0.2.2` for every service.
+On **Android emulator** replace `127.0.0.1` with `10.0.2.2` for these hosts.
 
-### Bitcoin node helper
+**Bitcoin node helper (optional, dev only — required for auto-fund / auto-mine):**
 
-The flows need to fund wallets and mine confirmation blocks during the test. The SDK itself has no way to control your Bitcoin node — that is intentional, it is an app/infrastructure responsibility. The demo solves this with a small HTTP helper server that must run alongside Bitcoin Core:
+| Service | Default host:port | Purpose |
+|---------|------------------|---------|
+| Bitcoin node helper | `127.0.0.1:5000` | HTTP API — `mine` + `sendtoaddress` (used by demo, not part of upstream `regtest.sh`) |
+
+The **Flows** tab and **Utexo → Regtest** call `sendToAddress()` and `mine()` in `utils/wallet-flow.ts`, which POST to that helper. Without it you must fund addresses and mine blocks yourself (e.g. `bitcoin-cli`).
+
+### Bitcoin node helper (dev branch)
+
+The SDK has no built-in way to mine or send regtest BTC — that is intentional. For local testing, run the helper from the **dev fork** (not included in [UTEXO-Protocol/rgb-lightning-node](https://github.com/UTEXO-Protocol/rgb-lightning-node) `main`):
+
+```bash
+git clone -b feat/external-signer https://github.com/bandrivskiy/rgb-lightning-node.git
+cd rgb-lightning-node
+git submodule update --init --recursive
+./regtest.sh start          # Bitcoin + Electrum + proxy (upstream stack)
+node local-node-bridge.js   # optional helper on :5000 — mine / sendtoaddress
+```
+
+Use the UTEXO-Protocol repo for `./regtest.sh start` if you only need the core stack; use the dev branch when you need `local-node-bridge.js` for automated funding in this demo.
+
+Alternatively, run any HTTP server that wraps `bitcoin-cli` and exposes:
 
 ```
 POST http://127.0.0.1:5000/execute
@@ -77,7 +111,20 @@ EXPO_PUBLIC_RLN_PROXY_ENDPOINT=rpc://127.0.0.1:3000/json-rpc
 BITCOIN_NODE_ENDPOINT=http://127.0.0.1:5000/execute
 ```
 
-All values have sensible defaults so the flows will still attempt to connect with the defaults above if the file is missing.
+**UTEXO / signet (Utexo tab, UTEXO network):** add unlock credentials to `.env.local`
+
+```bash
+EXPO_PUBLIC_UTEXO_BITCOIND_RPC_USERNAME=
+EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PASSWORD=
+EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST=
+EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT=38332
+EXPO_PUBLIC_UTEXO_INDEXER_URL=https://esplora-api.utexo.com
+EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT=rpcs://rgb-proxy.utexo.com/json-rpc
+```
+
+See `.env.utexo` in the repo root for the full template.
+
+All values have sensible defaults so regtest flows will still attempt to connect with the defaults above if the file is missing. UTEXO mode requires real RPC credentials in `.env.local` (empty defaults will fail at unlock).
 
 ---
 
@@ -124,6 +171,7 @@ nodeC: basePortA+200, basePortA+201
 ```
 
 Ranges used per flow:
+
 - Flow 1 (Channel + Payment): 20000–30000
 - Flow 2 (3-node payment): 21000–26000
 - Flow 3 (Ext signer asset channel): 20000–30000
@@ -155,6 +203,7 @@ These directories are created by the demo using `expo-file-system` before the SD
 Two nodes, both using `PasswordRLNSigner`. Demonstrates the core `UTEXOWallet` lifecycle and the node restart pattern.
 
 **What the SDK does:**
+
 - `createWallet()` — derives xpubs and master fingerprint from a new mnemonic
 - `new UTEXOWallet(params, new PasswordRLNSigner(password, mnemonic))` — constructs wallet with password-based signer
 - `nodeA.init()` — creates the native node + writes key material to disk (first-time only)
@@ -182,6 +231,7 @@ Two nodes, both using `PasswordRLNSigner`. Demonstrates the core `UTEXOWallet` l
 - `nodeA.destroy()` / `nodeB.destroy()` — shutdown + destroyNode + signer cleanup
 
 **What the demo does (app side, not in SDK):**
+
 - `sendToAddress(address, 1)` — calls Bitcoin node helper to fund the address
 - `mine(6)` — calls Bitcoin node helper to mine confirmation blocks
 - Directory creation with `FileSystem.makeDirectoryAsync`
@@ -199,6 +249,7 @@ Two nodes, both using `PasswordRLNSigner`. Demonstrates the core `UTEXOWallet` l
 Three nodes, all `PasswordRLNSigner`. Full RGB Lightning lifecycle: issue asset, open asset channel, 4 alternating payments, close, on-chain transfers.
 
 **What the SDK does (in addition to Flow 1 basics):**
+
 - `nodeA.issueAssetNia({ ticker: 'USDT', name: 'Tether', precision: 0, amounts: [1000] })` — issue 1000 units
 - `nodeA.openChannel({ ..., assetId, assetAmount: 600 })` — open RGB asset channel placing 600 units
 - `nodeA.getAssetBalance(assetId)` — confirm off-chain balance (≈400 remaining after open)
@@ -211,6 +262,7 @@ Three nodes, all `PasswordRLNSigner`. Full RGB Lightning lifecycle: issue asset,
 - Final balance check: A=25, B=25, C=950
 
 **What the demo does (app side):**
+
 - Same as Flow 1: fund all 3 nodes, mine blocks, poll for channel usable state
 - Additional polling for cooperative close settlement (asset balances can take ~3 min after on-chain sweep)
 
@@ -223,6 +275,7 @@ Three nodes, all `PasswordRLNSigner`. Full RGB Lightning lifecycle: issue asset,
 Two nodes: nodeA uses `PasswordRLNSigner` (issues asset, opens channel, pays); nodeB uses `NativeExternalRLNSigner` (creates invoices, receives). Demonstrates mixed signer types and the reverse-channel pattern.
 
 **What the SDK does:**
+
 - nodeA: `new UTEXOWallet(params, new PasswordRLNSigner(password, mnemonic))`
 - nodeB: `new UTEXOWallet(params, new NativeExternalRLNSigner(mnemonic, network))`
   - `NativeExternalRLNSigner` converts the mnemonic to a 32-byte seed internally and creates a native VLS-backed signer — keys are held in native memory, not stored in JS
@@ -237,6 +290,7 @@ Two nodes: nodeA uses `PasswordRLNSigner` (issues asset, opens channel, pays); n
 - Final: A=1000, B=0
 
 **What the SDK does differently with `NativeExternalRLNSigner`:**
+
 - `initNode` calls `rlnCreateNativeExternalSigner(seedHex, network)` → returns `signerId`
 - Then calls `rlnInitNodeWithNativeExternalSigner(signerId)` instead of `rlnInitNode(password, mnemonic)`
 - On restart: `rlnCreateNativeExternalSigner` again + `rlnAttachNativeExternalSigner` + `rlnUnlockNodeWithNativeExternalSigner`
@@ -254,11 +308,47 @@ Two nodes: nodeA uses `PasswordRLNSigner` (issues asset, opens channel, pays); n
 Identical scenario to Flow 2 (3-node, 1000 USDT, 4 payments, close, on-chain sends) but nodeB uses `NativeExternalRLNSigner`. Demonstrates that the full asset channel payment lifecycle works with an external signer as the channel acceptor.
 
 **Key difference from Flow 2:**
+
 - nodeB uses `NativeExternalRLNSigner` — VLS in-process signing
 - `openChannel` uses `pushMsat: 0` — required when the acceptor has an external (VLS) signer; VLS rejects non-zero push on the acceptor side
 - Everything else is the same SDK API surface
 
 **Final balances:** A=25, B=25, C=950 (same as Flow 2)
+
+---
+
+## UTEXO 2-Node Flow (Utexo tab)
+
+**File:** `app/(tabs)/utexo.tsx`
+
+Interactive two-node walkthrough: **Init → Fund → UTXOs → Channel → Payments → Done**. Toggle **Regtest** or **UTEXO** at the top before **Start**.
+
+| Mode | Network | Funding | Unlock config |
+|------|---------|---------|---------------|
+| **Regtest** | `regtest` | Automatic via `sendToAddress()` + `mine()` if **dev** `local-node-bridge.js` is running on `:5000`; otherwise fund/mine manually | `EXPO_PUBLIC_RLN_*` in `.env.local` (same as Flows tab) |
+| **UTEXO** | `utexo` (signet) | Manual — send BTC to both addresses shown, or use Telegram [@Utexo_RLN_bot](https://t.me/Utexo_RLN_bot) `/getbtc <address>` | `EXPO_PUBLIC_UTEXO_*` in `.env.local` (template: `.env.utexo`) |
+
+### Regtest
+
+1. Start regtest infrastructure: `./regtest.sh start` from [rgb-lightning-node](https://github.com/UTEXO-Protocol/rgb-lightning-node) (or the dev fork above).
+2. For auto-fund / auto-mine: on the [dev branch](https://github.com/bandrivskiy/rgb-lightning-node/tree/feat/external-signer), also run `node local-node-bridge.js` (helper on port `5000`).
+3. Configure `.env.local` with `EXPO_PUBLIC_RLN_*` (use `10.0.2.2` on Android emulator).
+4. Open the **Utexo** tab, select **Regtest**, tap **Start**.
+
+The flow creates two `UTEXOWallet` instances (`PasswordRLNSigner`), funds both nodes, mines 6 blocks, creates RGB UTXOs, opens a BTC channel, and runs Lightning payments.
+
+### UTEXO (signet)
+
+1. Fill `EXPO_PUBLIC_UTEXO_*` in `.env.local` (RPC host, credentials, indexer, proxy — see `.env.utexo`).
+2. Rebuild the app so env vars are embedded (`npm run android`).
+3. Select **UTEXO**, tap **Start**, then fund **both** on-chain addresses (polls every 20s, up to 45 min).
+4. Optional faucet: message [@Utexo_RLN_bot](https://t.me/Utexo_RLN_bot) with `/getbtc <address>` for each address.
+
+Channel funding on signet waits for **6 confirmations** (~60 min); regtest confirms in seconds.
+
+### SDK surface (same as Flows)
+
+`createWallet` → `UTEXOWallet` + `PasswordRLNSigner` → `init` / `unlock` → `getAddress` / `syncWallet` / `getBtcBalance` → `createUtxos` → `connectPeer` / `openChannel` → `createLightningInvoice` / `payLightningInvoice` / `getLightningSendRequest`.
 
 ---
 
@@ -297,6 +387,7 @@ Identical scenario to Flow 2 (3-node, 1000 USDT, 4 payments, close, on-chain sen
 ## Key Patterns for Integration
 
 ### Wallet construction
+
 ```typescript
 const keys = await createWallet('regtest');
 
@@ -316,6 +407,7 @@ const wallet = new UTEXOWallet(
 ```
 
 ### First-time init vs restart
+
 ```typescript
 // First run — writes keys to disk
 await wallet.init();
@@ -330,6 +422,7 @@ await wallet.destroy();
 ```
 
 ### Polling pattern for channel ready (app side)
+
 ```typescript
 const deadline = Date.now() + 60_000;
 while (Date.now() < deadline) {
@@ -341,6 +434,7 @@ while (Date.now() < deadline) {
 ```
 
 ### RGB send sequence
+
 ```typescript
 // Receiver creates invoice
 const invoice = await receiverWallet.blindReceive({ minConfirmations: 1 });
