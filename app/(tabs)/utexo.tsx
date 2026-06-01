@@ -12,9 +12,9 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 import { AppColors } from '@/constants/theme';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
+import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
 // ── UTEXO node credentials (set via .env.utexo.local) ────────────────────────
 const UTEXO_UNLOCK = {
@@ -367,20 +367,21 @@ export default function UtexoScreen() {
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
           xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored,
           masterFingerprint: keysA.masterFingerprint },
-        new PasswordRLNSigner('passA', keysA.mnemonic),
+        new PasswordRLNSigner('password', keysA.mnemonic),
       );
       const wB = new UTEXOWallet(
         { storageDirPath: storageDirB, daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
           xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored,
           masterFingerprint: keysB.masterFingerprint },
-        new PasswordRLNSigner('passB', keysB.mnemonic),
+        new PasswordRLNSigner('password', keysB.mnemonic),
       );
       walletARef.current = wA;
       walletBRef.current = wB;
 
       // ── 3. Init ────────────────────────────────────────────────────────────
       req('nodeA.init');
+      console.log('wA', wA);
       await wA.init();
       res('nodeA.init');
 
@@ -390,6 +391,7 @@ export default function UtexoScreen() {
 
       // ── 4. Unlock ──────────────────────────────────────────────────────────
       const unlockParams = isRegtest ? REGTEST_UNLOCK : UTEXO_UNLOCK;
+      console.log('unlockParams', unlockParams);
       req('nodeA.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
       await wA.unlock(unlockParams);
       res('nodeA.unlock');
