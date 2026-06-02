@@ -13,20 +13,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
+import { buildUtexoConfig } from '@/utils/env';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
 import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
 // ── UTEXO node credentials (set in .env.local) ───────────────────────────────
-const UTEXO_UNLOCK = {
-  bitcoindRpcUsername: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_USERNAME?.trim() || '',
-  bitcoindRpcPassword: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PASSWORD?.trim() || '',
-  bitcoindRpcHost: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST?.trim() || '',
-  bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT?.trim() || '38332'),
-  indexerUrl: process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() || 'https://esplora-api.utexo.com',
-  proxyEndpoint: process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy-utexo.utexo.com/json-rpc',
-  announceAddresses: [] as string[],
-  announceAlias: null as string | null,
-};
+const UTEXO_UNLOCK = buildUtexoConfig().unlockParams;
 
 // ── Local regtest node credentials ────────────────────────────────────────────
 const _rpcHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';

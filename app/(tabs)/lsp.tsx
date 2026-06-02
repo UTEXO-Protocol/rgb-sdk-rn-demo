@@ -29,6 +29,7 @@ import {
   UtexoLSPClient,
 } from '@utexo/rgb-sdk-rn';
 import { AppColors } from '@/constants/theme';
+import { buildUtexoConfig } from '@/utils/env';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -36,16 +37,7 @@ const LSP_URL     = process.env.EXPO_PUBLIC_LSP_URL?.trim()            || 'https
 const FAUCET_URL  = process.env.EXPO_PUBLIC_FAUCET_URL?.trim()         || '';
 const FAUCET_TOKEN= process.env.EXPO_PUBLIC_FAUCET_BEARER_TOKEN?.trim()|| '';
 
-const UNLOCK = {
-  bitcoindRpcUsername: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_USERNAME?.trim() || '',
-  bitcoindRpcPassword: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PASSWORD?.trim() || '',
-  bitcoindRpcHost:     process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST?.trim()     || '',
-  bitcoindRpcPort:     Number(process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT?.trim() || '38332'),
-  indexerUrl:          process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim()            || 'https://esplora-api.utexo.com',
-  proxyEndpoint:       process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim()         || 'rpcs://rgb-proxy-utexo.utexo.com/json-rpc',
-  announceAddresses:   [] as string[],
-  announceAlias:       null as string | null,
-};
+const UNLOCK = buildUtexoConfig().unlockParams;
 
 const PAYMENT_MSAT         = 3_000_000;
 const PAYMENT_ASSET_AMOUNT = 100;

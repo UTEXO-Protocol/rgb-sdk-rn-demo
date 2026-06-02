@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -10,31 +10,12 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import {
-  BadRequestError,
-  ConfigurationError,
-  CryptoError,
-  deriveKeysFromMnemonic,
-  generateKeys,
-  NetworkError,
-  normalizeNetwork,
-  NotFoundError,
-  SDKError,
-  signMessage,
-  signPsbt,
-  signPsbtFromSeed,
-  validateBase64,
-  validateHex,
-  validateMnemonic,
-  validateNetwork,
-  validatePsbt,
-  ValidationError,
-  verifyMessage,
-  WalletError
-} from '@utexo/rgb-sdk-rn';
 
 import { AppColors } from '@/constants/theme';
 import {
+  buildRegtestConfig,
+  buildUtexoConfig,
+  runExtSignerOnchainSendFlow,
   runRLNUtexoExternalPaymentFlow,
   runRLNUtexoPaymentFlow,
   runRlnUtexoVssFlow,
@@ -43,25 +24,9 @@ import {
   runRlnVssFlow,
 } from '@/utils/wallet-flow';
 
-// ─── Test data ────────────────────────────────────────────────────────────────
-
-const TEST_MNEMONIC = 'poem twice question inch happy capital grain quality laptop dry chaos what';
-
-const EXPECTED_KEYS = {
-  mnemonic: TEST_MNEMONIC,
-  xpub: 'tpubD6NzVbkrYhZ4XCaTDersU6277zvyyV6uCCeEgx1jfv7bUYMrbTt8Vem1MBt5Gmp7eMwjv4rB54s2kjqNNtTLYpwFsVX7H2H93pJ8SpZFRRi',
-  accountXpubVanilla: 'tpubDDMTD6EJKKLP6Gx9JUnMpjf9NYyePJszmqBnNqULNmcgEuU1yQ3JsHhWZdRFecszWETnNsmhEe9vnaNibfzZkDDHycbR2rGFbXdHWRgBfu7',
-  accountXpubColored: 'tpubDDPLJfdVbDoGtnn6hSto3oCnm6hpfHe9uk2MxcANanxk87EuquhSVfSLQv7e5UykgzaFn41DUXaikjjVGcUSUTGNaJ9LcozfRwatKp1vTfC',
-  masterFingerprint: 'a66bffef',
-};
-
-const UTXO_UNSIGNED_PSBT = 'cHNidP8BAP01AQIAAAABtSecjg4J41fmQtoh4TTlQdnu6iifN5ogbVWEAXrUWhoAAAAAAP3///8G6AMAAAAAAAAiUSDzKPGEYMWF2Spr+6GDDaiByz+OjfjlV3Lfr/zYKZ2iB+gDAAAAAAAAIlEg83490lnilgZRgrHnETy+JEjou1md47ACmb0kn5rO2+joAwAAAAAAACJRIHD6gvLQXWd4BvEW0YjxA0z50cxfC3ZUhKXnKhPTS1B+6AMAAAAAAAAiUSCXxMTRByl/+IGyzvdE6V+4ac0UOeEwe1dl3zb8ceaZ5OgDAAAAAAAAIlEg3oU2/GUMIeYj4d/R1dK5ThTLhkg7JAhjPOLjNqb215YYEzEBAAAAACJRIHn8VHdi5k8OITo7LrsqYr+cQIASgZTwvtfvYoBHBxpWoXVIAAABASsALTEBAAAAACJRIM9hxZBkyMxn4vyYOosTZEYQIMqQZRSwxigi1aTQwJLrIRaUhLceLJAwJvzah8652iBUot/I4ZG5LVNrof4L451TuRkApmv/71YAAIABAACAAAAAgAEAAAAAAAAAARcglIS3HiyQMCb82ofOudogVKLfyOGRuS1Ta6H+C+OdU7kAAQUgeHCOVR20fg1Bz+fM/Cpg3KrkSlmKQDLwInucZ2bCMcwhB3hwjlUdtH4NQc/nzPwqYNyq5EpZikAy8CJ7nGdmwjHMGQCma//vVgAAgB+fDIAAAACAAAAAAAIAAAAAAQUgzBIX4uwl2L4m53HESkMyqyevlalsmf3tw9nH0r3KQoIhB8wSF+LsJdi+JudxxEpDMqsnr5WpbJn97cPZx9K9ykKCGQCma//vVgAAgB+fDIAAAACAAAAAAAMAAAAAAQUgs43Fa7pRIMJTLGHkWwyCRf16wo3uSS/3CDv0c550QBkhB7ONxWu6USDCUyxh5FsMgkX9esKN7kkv9wg79HOedEAZGQCma//vVgAAgB+fDIAAAACAAAAAAAQAAAAAAQUgaqAn3Z3FYWYqPiTb2KCMBirkLH3ZnhE1Q7NpCOiuJBkhB2qgJ92dxWFmKj4k29igjAYq5Cx92Z4RNUOzaQjoriQZGQCma//vVgAAgB+fDIAAAACAAAAAAAEAAAAAAQUgnZNdhk/w7sXuE3/fLeNHq5My6f6IqMI5KrZAVeoZdnUhB52TXYZP8O7F7hN/3y3jR6uTMun+iKjCOSq2QFXqGXZ1GQCma//vVgAAgB+fDIAAAACAAAAAAAAAAAAAAQUg+5xo2r852/jJjwIpMPXdsWsse2hpIxAhJhP6YDPcrrIhB/ucaNq/Odv4yY8CKTD13bFrLHtoaSMQISYT+mAz3K6yGQCma//vVgAAgAEAAIAAAACAAQAAAAEAAAAA';
-
-const UTXO_SIGNED_PSBT = 'cHNidP8BAP01AQIAAAABtSecjg4J41fmQtoh4TTlQdnu6iifN5ogbVWEAXrUWhoAAAAAAP3///8G6AMAAAAAAAAiUSDzKPGEYMWF2Spr+6GDDaiByz+OjfjlV3Lfr/zYKZ2iB+gDAAAAAAAAIlEg83490lnilgZRgrHnETy+JEjou1md47ACmb0kn5rO2+joAwAAAAAAACJRIHD6gvLQXWd4BvEW0YjxA0z50cxfC3ZUhKXnKhPTS1B+6AMAAAAAAAAiUSCXxMTRByl/+IGyzvdE6V+4ac0UOeEwe1dl3zb8ceaZ5OgDAAAAAAAAIlEg3oU2/GUMIeYj4d/R1dK5ThTLhkg7JAhjPOLjNqb215YYEzEBAAAAACJRIHn8VHdi5k8OITo7LrsqYr+cQIASgZTwvtfvYoBHBxpWoXVIAAABASsALTEBAAAAACJRIM9hxZBkyMxn4vyYOosTZEYQIMqQZRSwxigi1aTQwJLrAQhCAUDrRtVkPLHRkFNKbYlEL3bgjs6wjkfkO7fZytofjY3WL7EIHD3W5I2YmVucb9aSFTGJEU2m9+9laoEebGTB8KAdAAEFIHhwjlUdtH4NQc/nzPwqYNyq5EpZikAy8CJ7nGdmwjHMAAEFIMwSF+LsJdi+JudxxEpDMqsnr5WpbJn97cPZx9K9ykKCAAEFILONxWu6USDCUyxh5FsMgkX9esKN7kkv9wg79HOedEAZAAEFIGqgJ92dxWFmKj4k29igjAYq5Cx92Z4RNUOzaQjoriQZAAEFIJ2TXYZP8O7F7hN/3y3jR6uTMun+iKjCOSq2QFXqGXZ1AAEFIPucaNq/Odv4yY8CKTD13bFrLHtoaSMQISYT+mAz3K6yAA==';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type TestSuite = Record<string, any>;
 type FlowResults = Record<string, any> | null;
 
 // ─── Step card component ──────────────────────────────────────────────────────
@@ -180,7 +145,8 @@ function StepCard({
 
 function FlowCard({
   title,
-  subtitle,
+  funcName,
+  tags,
   description,
   accentColor,
   totalSteps,
@@ -191,7 +157,8 @@ function FlowCard({
   extra,
 }: {
   title: string;
-  subtitle?: string;
+  funcName: string;
+  tags?: string[];
   description: string;
   accentColor: string;
   totalSteps?: number;
@@ -223,7 +190,6 @@ function FlowCard({
         <View style={fStyles.cardTitleArea}>
           <View style={fStyles.cardTitleRow}>
             <Text style={fStyles.cardTitle}>{title}</Text>
-            {subtitle ? <Text style={fStyles.cardSubtitle}>{subtitle}</Text> : null}
             {effectiveRunning && <ActivityIndicator size="small" color={accentColor} style={{ marginLeft: 6 }} />}
             {hasResults && !effectiveRunning && (
               <View style={[fStyles.statusPill, { backgroundColor: success ? AppColors.successBg : AppColors.errorBg, borderColor: success ? AppColors.successBorder : AppColors.errorBorder }]}>
@@ -233,6 +199,16 @@ function FlowCard({
               </View>
             )}
           </View>
+          <Text style={fStyles.funcName}>{funcName}()</Text>
+          {tags && tags.length > 0 && (
+            <View style={fStyles.tagRow}>
+              {tags.map(tag => (
+                <View key={tag} style={[fStyles.tag, tag === 'RGB Sends' && fStyles.tagRgb]}>
+                  <Text style={[fStyles.tagText, tag === 'RGB Sends' && fStyles.tagTextRgb]}>{tag}</Text>
+                </View>
+              ))}
+            </View>
+          )}
           <Text style={fStyles.cardDesc}>{description}</Text>
         </View>
       </View>
@@ -280,7 +256,7 @@ function FlowCard({
             style={[fStyles.runBtn, { backgroundColor: accentColor }]}
             onPress={onRun}
             activeOpacity={0.8}>
-            <Text style={fStyles.runBtnText}>▶  Run {title}</Text>
+            <Text style={fStyles.runBtnText}>▶  Run</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -308,65 +284,6 @@ function FlowCard({
   );
 }
 
-// ─── SDK tests summary ────────────────────────────────────────────────────────
-
-function TestSummaryCard({ results, loading }: { results: TestSuite | null; loading: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-
-  const summary = results?.summary;
-  const allPassed = summary && summary.failed === 0;
-
-  return (
-    <View style={[tStyles.card, summary && { borderColor: allPassed ? AppColors.successBorder : AppColors.errorBorder }]}>
-      <TouchableOpacity
-        style={tStyles.header}
-        onPress={() => setExpanded(v => !v)}
-        activeOpacity={0.75}>
-        <View style={tStyles.titleRow}>
-          <Text style={tStyles.title}>SDK Tests</Text>
-          {loading && <ActivityIndicator size="small" color={AppColors.primary} style={{ marginLeft: 8 }} />}
-          {summary && !loading && (
-            <View style={[tStyles.pill, { backgroundColor: allPassed ? AppColors.successBg : AppColors.errorBg, borderColor: allPassed ? AppColors.successBorder : AppColors.errorBorder }]}>
-              <Text style={[tStyles.pillText, { color: allPassed ? AppColors.success : AppColors.error }]}>
-                {summary.passed}/{summary.total} passed
-              </Text>
-            </View>
-          )}
-        </View>
-        <Text style={tStyles.desc}>Automated tests run on mount to verify SDK integrity</Text>
-        {summary && (
-          <Text style={[tStyles.chevron, expanded && { color: AppColors.primary }]}>
-            {expanded ? '▲ collapse' : '▼ expand results'}
-          </Text>
-        )}
-      </TouchableOpacity>
-
-      {expanded && results && (
-        <View style={tStyles.body}>
-          {Object.entries(results)
-            .filter(([k]) => k !== 'summary')
-            .map(([key, value]: [string, any]) => {
-              const passed = value?.success !== false &&
-                (!value?.tests || Object.values(value.tests as Record<string, boolean>).every(Boolean));
-              return (
-                <View key={key} style={tStyles.testRow}>
-                  <Text style={[tStyles.testIcon, { color: passed ? AppColors.success : AppColors.error }]}>
-                    {passed ? '✓' : '✗'}
-                  </Text>
-                  <Text style={[tStyles.testName, { color: passed ? AppColors.textPrimary : AppColors.error }]}>
-                    {key}
-                  </Text>
-                  {!passed && !!value?.error && (
-                    <Text style={tStyles.testError} numberOfLines={1}>{value.error}</Text>
-                  )}
-                </View>
-              );
-            })}
-        </View>
-      )}
-    </View>
-  );
-}
 
 const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   rlnCreateNode: { label: 'Create Node', desc: 'Create RLN node with local storage and ports' },
@@ -681,6 +598,19 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   xPayRgbSendA: { label: 'RGB Send A→C', desc: 'nodeC.blindReceive(), nodeA.send() 925 units on-chain' },
   xPayRgbSendB: { label: 'RGB Send B→C', desc: 'nodeC.blindReceive(), nodeB (ext).send() 25 units on-chain' },
   xPayFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() on all 3 nodes — A=25, B=25, C=950' },
+  extOsAInit: { label: 'Node A Init', desc: 'UTEXOWallet.init() — NativeExternalRLNSigner (ext signer)' },
+  extOsAUnlock: { label: 'Node A Unlock', desc: 'UTEXOWallet.unlock() — NativeExternalRLNSigner' },
+  extOsBInit: { label: 'Node B Init', desc: 'UTEXOWallet.init() — PasswordRLNSigner' },
+  extOsBUnlock: { label: 'Node B Unlock', desc: 'UTEXOWallet.unlock() — PasswordRLNSigner' },
+  extOsAFund: { label: 'Fund Node A', desc: 'getAddress() + sendToAddress + mine 6' },
+  extOsACreateUtxos: { label: 'Node A UTXOs', desc: 'createUtxos() num=10 feeRate=7 (ext signer PSBT path)' },
+  extOsBFund: { label: 'Fund Node B', desc: 'getAddress() + sendToAddress + mine 6' },
+  extOsBCreateUtxos: { label: 'Node B UTXOs', desc: 'createUtxos() num=10 feeRate=7' },
+  extOsIssueAsset: { label: 'Issue Asset', desc: 'nodeB (password).issueAssetNia() — 1000 XSND (issuance blocked in ext signer mode)' },
+  extOsSendToExt: { label: 'Send → Ext Signer', desc: 'nodeA (ext).blindReceive(), nodeB (pwd).send() 500 units on-chain → nodeA' },
+  extOsWaitExtBalance: { label: 'Wait nodeA Balance', desc: 'Poll nodeA.getAssetBalance() until spendable=500' },
+  extOsSendFromExt: { label: 'Send ← Ext Signer', desc: 'nodeB (pwd).blindReceive(), nodeA (ext).send() 250 units — rgb_send_begin→rgb_sign_psbt→rgb_send_end' },
+  extOsFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() — expected nodeA=250, nodeB=750' },
 };
 
 // ─── Wallet flow step meta ────────────────────────────────────────────────────
@@ -719,9 +649,7 @@ const RLN_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
-  const RLN_ONLY_MODE = true;
-  const [testResults, setTestResults] = useState<TestSuite | null>(null);
-  const [testLoading, setTestLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'regtest' | 'utexo'>('regtest');
 
   const [rlnWalletChanPayResults, setRlnWalletChanPayResults] = useState<FlowResults>(null);
   const [runningRlnWalletChanPayFlow, setRunningRlnWalletChanPayFlow] = useState(false);
@@ -735,178 +663,25 @@ export default function FlowsScreen() {
   const [rlnExtPayResults, setRlnExtPayResults] = useState<FlowResults>(null);
   const [runningRlnExtPayFlow, setRunningRlnExtPayFlow] = useState(false);
   const rlnExtPayInFlightRef = useRef(false);
+  const [extOsSendResults, setExtOsSendResults] = useState<FlowResults>(null);
+  const [runningExtOsSendFlow, setRunningExtOsSendFlow] = useState(false);
+  const extOsSendInFlightRef = useRef(false);
   const [vssFlowResults, setVssFlowResults] = useState<FlowResults>(null);
   const [runningVssFlow, setRunningVssFlow] = useState(false);
   const vssFlowInFlightRef = useRef(false);
   const [rlnVssFlowResults, setRlnVssFlowResults] = useState<FlowResults>(null);
   const [runningRlnVssFlow, setRunningRlnVssFlow] = useState(false);
   const rlnVssFlowInFlightRef = useRef(false);
-  const effectiveRpcHost =
-    process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST ??
-    (Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1');
-  const effectiveUnlockRequestFromConfig = {
-    password: process.env.EXPO_PUBLIC_RLN_NODE_PASSWORD ?? 'password',
-    bitcoindRpcUsername: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME ?? 'user',
-    bitcoindRpcPassword: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD ?? 'password',
-    bitcoindRpcHost: effectiveRpcHost,
-    bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT ?? '18443'),
-    indexerUrl: process.env.EXPO_PUBLIC_RLN_INDEXER_URL ?? `${effectiveRpcHost}:50001`,
-    proxyEndpoint:
-      process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT ?? `rpc://${effectiveRpcHost}:3000/json-rpc`,
-  };
-  const rlnUnlockStep = [...(rlnWalletChanPayResults?.steps ?? [])]
-    .reverse()
-    .find((step: any) => String(step?.step ?? '').endsWith('UnlockNode'));
-  const rlnUnlockRequest =
-    rlnUnlockStep?.data?.request ??
-    rlnUnlockStep?.result?.request ??
-    effectiveUnlockRequestFromConfig;
-  const rlnEffectiveUnlockConfig = [
-    ['password', rlnUnlockRequest?.password ?? '(unset)'],
-    ['bitcoindRpcUsername', rlnUnlockRequest?.bitcoindRpcUsername ?? '(unset)'],
-    ['bitcoindRpcPassword', rlnUnlockRequest?.bitcoindRpcPassword ?? '(unset)'],
-    ['bitcoindRpcHost', rlnUnlockRequest?.bitcoindRpcHost ?? '(unset)'],
-    ['bitcoindRpcPort', String(rlnUnlockRequest?.bitcoindRpcPort ?? '(unset)')],
-    ['indexerUrl', rlnUnlockRequest?.indexerUrl ?? '(unset)'],
-    ['proxyEndpoint', rlnUnlockRequest?.proxyEndpoint ?? '(unset)'],
-  ] as const;
+  const activeUnlockParams = activeTab === 'regtest'
+    ? buildRegtestConfig().unlockParams
+    : buildUtexoConfig().unlockParams;
+  const activeUnlockRows: [string, string][] = [
+    ['host', `${activeUnlockParams.bitcoindRpcHost}:${activeUnlockParams.bitcoindRpcPort}`],
+    ['indexer', activeUnlockParams.indexerUrl],
+    ['proxy', activeUnlockParams.proxyEndpoint],
+  ];
 
 
-  // ── On-mount SDK tests ────────────────────────────────────────────────────
-
-  useEffect(() => {
-    async function runSdkTests() {
-      try {
-        setTestLoading(true);
-        const results: TestSuite = { summary: { total: 0, passed: 0, failed: 0 } };
-
-        const addResult = (key: string, obj: any, count: number) => {
-          results[key] = obj;
-          results.summary.total += count;
-          if (obj.success !== false && obj.tests) {
-            const vals = Object.values(obj.tests as Record<string, boolean>);
-            results.summary.passed += vals.filter(Boolean).length;
-            results.summary.failed += vals.filter(v => v === false).length;
-          } else if (obj.success === false) {
-            results.summary.failed += count;
-          }
-        };
-
-        // generateKeys
-        try {
-          const tk = await generateKeys('testnet');
-          const mk = await generateKeys('mainnet');
-          const rk = await generateKeys('regtest');
-          addResult('generateKeys', {
-            success: true,
-            tests: {
-              testnetValid: tk.xpub.startsWith('tpub') && tk.mnemonic.split(' ').length === 12,
-              mainnetValid: mk.xpub.startsWith('xpub'),
-              regtestValid: rk.xpub.startsWith('tpub'),
-              unique: tk.mnemonic !== mk.mnemonic,
-            },
-          }, 4);
-        } catch (e: any) { addResult('generateKeys', { success: false, error: e.message }, 4); }
-
-        // deriveKeysFromMnemonic
-        try {
-          const k = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
-          addResult('deriveKeysFromMnemonic', {
-            success: true,
-            tests: {
-              xpub: k.xpub === EXPECTED_KEYS.xpub,
-              accountXpubVanilla: k.accountXpubVanilla === EXPECTED_KEYS.accountXpubVanilla,
-              masterFingerprint: k.masterFingerprint?.toLowerCase() === EXPECTED_KEYS.masterFingerprint,
-              deterministic: (await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC)).xpub === k.xpub,
-            },
-          }, 4);
-        } catch (e: any) { addResult('deriveKeysFromMnemonic', { success: false, error: e.message }, 4); }
-
-        // signPsbt (stub throws without bdk-rn)
-        try {
-          await signPsbt(TEST_MNEMONIC, UTXO_UNSIGNED_PSBT, 'testnet');
-          addResult('signPsbt', { success: false, error: 'Expected throw, resolved' }, 1);
-        } catch (e: any) {
-          addResult('signPsbt', {
-            success: true,
-            tests: { throwsUnavailable: (e.message as string).toLowerCase().includes('unavailable') },
-          }, 1);
-        }
-
-        // signPsbtFromSeed (should throw in RN)
-        try {
-          const { mnemonicToSeedSync } = require('@scure/bip39');
-          const seed = new Uint8Array(Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC)));
-          await signPsbtFromSeed(seed, UTXO_UNSIGNED_PSBT, 'testnet');
-          addResult('signPsbtFromSeed', { success: false, error: 'Expected throw, resolved' }, 1);
-        } catch (e: any) {
-          addResult('signPsbtFromSeed', {
-            success: true,
-            tests: { throwsUnavailable: (e.message as string).toLowerCase().includes('unavailable') },
-          }, 1);
-        }
-
-        // signMessage + verifyMessage
-        try {
-          const { mnemonicToSeedSync } = require('@scure/bip39');
-          const seed = Buffer.from(mnemonicToSeedSync(TEST_MNEMONIC));
-          const keys = await deriveKeysFromMnemonic('testnet', TEST_MNEMONIC);
-          const sig = await signMessage({ message: 'hello rgb', seed, network: 'testnet' });
-          const valid = await verifyMessage({ message: 'hello rgb', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
-          const wrong = await verifyMessage({ message: 'wrong', signature: sig, accountXpub: keys.accountXpubVanilla, network: 'testnet' });
-          addResult('signMessage+verifyMessage', {
-            success: true,
-            tests: { signatureProduced: sig.length > 0, validSig: valid === true, wrongMsgFails: wrong === false },
-          }, 3);
-        } catch (e: any) { addResult('signMessage+verifyMessage', { success: false, error: e.message }, 3); }
-
-        // Error classes
-        try {
-          const sdkErr = new SDKError('msg', 'CODE');
-          const netErr = new NetworkError('msg', 503);
-          const walletErr = new WalletError('msg');
-          const cryptoErr = new CryptoError('msg');
-          const configErr = new ConfigurationError('msg');
-          const badReqErr = new BadRequestError('msg');
-          const notFoundErr = new NotFoundError('msg');
-          const valErr = new ValidationError('msg', 'field');
-          addResult('errorClasses', {
-            success: true,
-            tests: {
-              SDKError: sdkErr instanceof SDKError,
-              NetworkError: netErr.statusCode === 503,
-              WalletError: walletErr instanceof SDKError,
-              CryptoError: cryptoErr instanceof SDKError,
-              ConfigurationError: configErr instanceof SDKError,
-              BadRequestError: badReqErr.statusCode === 400,
-              NotFoundError: notFoundErr.statusCode === 404,
-              ValidationError: valErr.field === 'field',
-            },
-          }, 7);
-        } catch (e: any) { addResult('errorClasses', { success: false, error: e.message }, 7); }
-
-        // Validation
-        try {
-          const t: Record<string, boolean> = {};
-          t.normalizeNetwork = normalizeNetwork('mainnet') === 'mainnet';
-          try { validateNetwork('bad'); t.validateNetworkThrows = false; } catch { t.validateNetworkThrows = true; }
-          try { validateMnemonic('not'); t.validateMnemonicThrows = false; } catch { t.validateMnemonicThrows = true; }
-          validatePsbt(UTXO_UNSIGNED_PSBT); t.validatePsbt = true;
-          validateBase64(UTXO_UNSIGNED_PSBT); t.validateBase64 = true;
-          try { validateHex('!!'); t.validateHexThrows = false; } catch { t.validateHexThrows = true; }
-          validateHex('deadbeef'); t.validateHex = true;
-          addResult('validation', { success: true, tests: t }, Object.keys(t).length);
-        } catch (e: any) { addResult('validation', { success: false, error: e.message }, 7); }
-
-
-        setTestResults(results);
-      } finally {
-        setTestLoading(false);
-      }
-    }
-
-    // runSdkTests();
-  }, []);
   // ── Flow handlers ─────────────────────────────────────────────────────────
 
 
@@ -994,6 +769,27 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleExtOsSendFlow() {
+    if (extOsSendInFlightRef.current) return;
+    extOsSendInFlightRef.current = true;
+    try {
+      setRunningExtOsSendFlow(true);
+      setExtOsSendResults({ running: true, steps: [] });
+      const r = await runExtSignerOnchainSendFlow();
+      setExtOsSendResults({ ...r, running: false });
+    } catch (e: any) {
+      setExtOsSendResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningExtOsSendFlow(false);
+      extOsSendInFlightRef.current = false;
+    }
+  }
+
   async function handleVssFlow() {
     if (vssFlowInFlightRef.current) return;
     vssFlowInFlightRef.current = true;
@@ -1060,13 +856,10 @@ export default function FlowsScreen() {
             </View>
           </View>
           <View style={styles.envCard}>
-            <Text style={styles.envTitle}>Effective RLN unlock payload sent to SDK</Text>
-            <Text style={styles.envSubtitle}>
-              {rlnUnlockStep
-                ? 'Captured from the latest `rlnUnlockNode` step.'
-                : 'Pre-run payload derived from current runtime config (same defaults used by flow).'}
+            <Text style={styles.envTitle}>
+              {activeTab === 'regtest' ? 'Regtest config' : 'UTEXO config'}
             </Text>
-            {rlnEffectiveUnlockConfig.map(([key, value]) => (
+            {activeUnlockRows.map(([key, value]) => (
               <View key={key} style={styles.envRow}>
                 <Text style={styles.envKey}>{key}</Text>
                 <Text style={styles.envValue}>{value}</Text>
@@ -1075,164 +868,220 @@ export default function FlowsScreen() {
           </View>
         </View>
 
-        {/* SDK Tests */}
-        <TestSummaryCard results={testResults} loading={testLoading} />
+        {/* Network tab selector */}
+        <View style={styles.tabRow}>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'regtest' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('regtest')}
+            activeOpacity={0.75}>
+            <Text style={[styles.tabBtnText, activeTab === 'regtest' && styles.tabBtnTextActive]}>
+              Regtest
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'utexo' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('utexo')}
+            activeOpacity={0.75}>
+            <Text style={[styles.tabBtnText, activeTab === 'utexo' && styles.tabBtnTextActive]}>
+              UTEXO
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-        <FlowCard
-          title="UTEXOWallet: Channel + Payment"
-          subtitle="nodeA (NativeExternalRLNSigner) + nodeB (PasswordRLNSigner) — 14 steps"
-          description="Same channel+payment scenario as above but using UTEXOWallet. Demonstrates init()/unlock()/reinit() lifecycle — nodeA restarts on the same instance with no manager swap."
-          accentColor="#1D3A8A"
-          totalSteps={14}
-          results={rlnWalletChanPayResults}
-          running={runningRlnWalletChanPayFlow}
-          onRun={handleRlnWalletChanPayFlow}>
-          {rlnWalletChanPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#1D3A8A"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnWalletChanPayFlow}
-              />
-            );
-          })}
-        </FlowCard>
+        {activeTab === 'regtest' && (
+          <>
+            <FlowCard
+              title="BTC Channel · 2 Payments · Node Restart · RGB Sends"
+              funcName="runRlnUtexoWalletChannelPaymentFlow"
+              tags={['RGB Sends', 'Node Restart']}
+              description="nodeA + nodeB (both PasswordRLNSigner). Opens 500k sat BTC channel. Payment 1 B→A, then nodeA shuts down and reinit()s. Payment 2 after restart. Then issues 1000 WCTS and sends 300 units (witness) + 200 units (blind) on-chain to nodeB. Final: A=500, B=500."
+              accentColor="#1D3A8A"
+              totalSteps={14}
+              results={rlnWalletChanPayResults}
+              running={runningRlnWalletChanPayFlow}
+              onRun={handleRlnWalletChanPayFlow}>
+              {rlnWalletChanPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#1D3A8A"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningRlnWalletChanPayFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        <FlowCard
-          title="UTEXOWallet: Asset Channel + Payments + RGB Sends"
-          subtitle="3 nodes (PasswordRLNSigner) — 26 steps"
-          description="Full payment flow using UTEXOWallet: issue 1000 USDT, open asset channel (600 units), 4 lightning payments alternating directions, cooperative close, RGB on-chain sends to nodeC. Final balances: A=25, B=25, C=950."
-          accentColor="#1A5C38"
-          totalSteps={26}
-          results={rlnUtexoPayResults}
-          running={runningRlnUtexoPayFlow}
-          onRun={handleRlnUtexoPayFlow}>
-          {rlnUtexoPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#1A5C38"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnUtexoPayFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            <FlowCard
+              title="RGB Asset Channel · 4 Payments · RGB Sends"
+              funcName="runRLNUtexoPaymentFlow"
+              tags={['RGB Sends']}
+              description="3 nodes (all PasswordRLNSigner). nodeA issues 1000 USDT, opens asset channel to nodeB (600 units pushed). 4 LN payments alternating A↔B. Cooperative close. RGB on-chain: A→C 925 units, B→C 25 units. Final: A=25, B=25, C=950."
+              accentColor="#1A5C38"
+              totalSteps={26}
+              results={rlnUtexoPayResults}
+              running={runningRlnUtexoPayFlow}
+              onRun={handleRlnUtexoPayFlow}>
+              {rlnUtexoPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#1A5C38"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningRlnUtexoPayFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        <FlowCard
-          title="UTEXOWallet: Regular Node Issues Asset + Ext Signer Invoices"
-          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) — 19 steps"
-          description="nodeA (regular) issues 1000 USDT, opens asset channel (600 units, 100k sat) to nodeB (ext signer). nodeB creates asset LN invoices; nodeA pays both. nodeA restarts between payments. Cooperative close, wait balances, nodeB RGB-sends 150 back to nodeA."
-          accentColor="#7B2D8A"
-          totalSteps={19}
-          results={rlnAssetExtResults}
-          running={runningRlnAssetExtFlow}
-          onRun={handleRlnAssetExtFlow}>
-          {rlnAssetExtResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#7B2D8A"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnAssetExtFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            <FlowCard
+              title="Ext Signer · Asset Channel · Restart · Reverse Channel · RGB Send"
+              funcName="runRlnUtexoWalletAssetChannelExtSignerFlow"
+              tags={['RGB Sends', 'Ext Signer', 'Node Restart', 'VLS Initiates Channel']}
+              description="nodeA (Password) issues 1000 USDT, opens asset channel to nodeB (VLS ext signer). 2 LN payments — nodeA restarts between them. Cooperative close. Then nodeB (VLS) opens a REVERSE channel to nodeA — tests VLS as initiator. nodeB sends 150 units on-chain back to nodeA. Final: A=1000, B=0."
+              accentColor="#7B2D8A"
+              totalSteps={19}
+              results={rlnAssetExtResults}
+              running={runningRlnAssetExtFlow}
+              onRun={handleRlnAssetExtFlow}>
+              {rlnAssetExtResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#7B2D8A"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningRlnAssetExtFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        <FlowCard
-          title="UTEXOWallet: Ext Signer NodeB — Asset Channel + Payments + RGB Sends"
-          subtitle="nodeA (PasswordRLNSigner) + nodeB (NativeExternalRLNSigner) + nodeC — 26 steps"
-          description="Same as the 3-node payment flow but nodeB uses NativeExternalRLNSigner (VLS in-process). pushMsat=0 required (VLS rejects non-zero push on acceptor). 4 payments alternating directions, cooperative close, RGB on-chain sends to nodeC. Final: A=25, B=25, C=950."
-          accentColor="#8A3D1D"
-          totalSteps={26}
-          results={rlnExtPayResults}
-          running={runningRlnExtPayFlow}
-          onRun={handleRlnExtPayFlow}>
-          {rlnExtPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#8A3D1D"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnExtPayFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            <FlowCard
+              title="Ext Signer NodeB · RGB Asset Channel · 4 Payments"
+              funcName="runRLNUtexoExternalPaymentFlow"
+              tags={['Ext Signer']}
+              description="Mirror of the 3-node payment flow but nodeB uses NativeExternalRLNSigner (VLS). pushMsat=0 required — VLS rejects non-zero push as acceptor. 4 LN payments alternating A↔B, cooperative close. RGB on-chain sends to nodeC are TODO. Final: A=950, B=50."
+              accentColor="#8A3D1D"
+              totalSteps={26}
+              results={rlnExtPayResults}
+              running={runningRlnExtPayFlow}
+              onRun={handleRlnExtPayFlow}>
+              {rlnExtPayResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#8A3D1D"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningRlnExtPayFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        <FlowCard
-          title="UTEXOWallet: VSS Backup & Restore"
-          subtitle="1 node (UTEXO testnet) — 13 steps"
-          description="Init a UTEXOWallet with VSS enabled on UTEXO testnet, optionally issue VDMO, wipe local state, then restore from VSS. Fence-conflict on restore is handled gracefully."
-          accentColor="#1D6B8A"
-          totalSteps={13}
-          results={vssFlowResults}
-          running={runningVssFlow}
-          onRun={handleVssFlow}>
-          {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#1D6B8A"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningVssFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            <FlowCard
+              title="Ext Signer · RGB On-chain Send (no channel)"
+              funcName="runExtSignerOnchainSendFlow"
+              tags={['RGB Send', 'Ext Signer', 'On-chain']}
+              description="nodeB (Password) issues 1000 XSND, sends 500 on-chain to nodeA (NativeExternalRLNSigner) via blindReceive. nodeA then sends 250 back — exercises rgb_send_begin → rgb_sign_psbt → rgb_send_end on the ext signer path. Final: A=250, B=750."
+              accentColor="#1D5C8A"
+              totalSteps={13}
+              results={extOsSendResults}
+              running={runningExtOsSendFlow}
+              onRun={handleExtOsSendFlow}>
+              {extOsSendResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#1D5C8A"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningExtOsSendFlow}
+                  />
+                );
+              })}
+            </FlowCard>
 
-        <FlowCard
-          title="UTEXOWallet: VSS Backup & Restore (regtest)"
-          subtitle="1 node (regtest) — 12 steps"
-          description="Regtest VSS flow: init UTEXOWallet with VSS, fund via faucet, issue VDMO, wipe local state, restore from VSS. Fence-conflict on restore is handled gracefully."
-          accentColor="#6B3D1D"
-          totalSteps={12}
-          results={rlnVssFlowResults}
-          running={runningRlnVssFlow}
-          onRun={handleRlnVssFlow}>
-          {rlnVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
-            const meta = RLN_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
-            return (
-              <StepCard
-                key={idx}
-                idx={idx}
-                step={step}
-                label={meta.label}
-                desc={meta.desc}
-                accentColor="#6B3D1D"
-                isLast={idx === arr.length - 1}
-                deferErrorDisplay={runningRlnVssFlow}
-              />
-            );
-          })}
-        </FlowCard>
+            <FlowCard
+              title="VSS Backup & Restore"
+              funcName="runRlnVssFlow"
+              tags={['VSS', 'Regtest']}
+              description="Init UTEXOWallet with VSS on regtest. Fund 1 BTC, create UTXOs, issue 500 VDMO. Open BTC channel. Shut down and wipe local state. Restore from VSS — verifies pubkey match, channel presence, and asset balance after restore."
+              accentColor="#6B3D1D"
+              totalSteps={12}
+              results={rlnVssFlowResults}
+              running={runningRlnVssFlow}
+              onRun={handleRlnVssFlow}>
+              {rlnVssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+                const meta = RLN_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+                return (
+                  <StepCard
+                    key={idx}
+                    idx={idx}
+                    step={step}
+                    label={meta.label}
+                    desc={meta.desc}
+                    accentColor="#6B3D1D"
+                    isLast={idx === arr.length - 1}
+                    deferErrorDisplay={runningRlnVssFlow}
+                  />
+                );
+              })}
+            </FlowCard>
+          </>
+        )}
+
+        {activeTab === 'utexo' && (
+          <FlowCard
+            title="VSS Backup & Restore"
+            funcName="runRlnUtexoVssFlow"
+            tags={['VSS', 'UTEXO Testnet']}
+            description="Init UTEXOWallet with VSS on UTEXO testnet. Faucet-funded. If balance arrives in time: create UTXOs, issue 500 VDMO, open BTC channel. Then wipe local state and restore from VSS — verifies pubkey + channel survive the restore."
+            accentColor="#1D6B8A"
+            totalSteps={13}
+            results={vssFlowResults}
+            running={runningVssFlow}
+            onRun={handleVssFlow}>
+            {vssFlowResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+              const meta = UTEXO_VSS_STEP_META[step.step] ?? { label: step.step, desc: '' };
+              return (
+                <StepCard
+                  key={idx}
+                  idx={idx}
+                  step={step}
+                  label={meta.label}
+                  desc={meta.desc}
+                  accentColor="#1D6B8A"
+                  isLast={idx === arr.length - 1}
+                  deferErrorDisplay={runningVssFlow}
+                />
+              );
+            })}
+          </FlowCard>
+        )}
 
         <View style={styles.footer} />
       </ScrollView>
@@ -1296,10 +1145,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: AppColors.textSecondary,
   },
-  envSubtitle: {
-    fontSize: 11,
-    color: AppColors.textTertiary,
-  },
   envRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -1318,6 +1163,32 @@ const styles = StyleSheet.create({
     color: AppColors.textSecondary,
     textAlign: 'right',
     fontFamily: MONO,
+  },
+
+  tabRow: {
+    flexDirection: 'row',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: AppColors.border,
+    overflow: 'hidden',
+    marginBottom: 16,
+  },
+  tabBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: AppColors.bgBase,
+  },
+  tabBtnActive: {
+    backgroundColor: AppColors.primary,
+  },
+  tabBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: AppColors.textSecondary,
+  },
+  tabBtnTextActive: {
+    color: AppColors.black,
   },
 
   storeIdRow: {
@@ -1441,7 +1312,12 @@ const fStyles = StyleSheet.create({
   cardTitleArea: { flex: 1, gap: 4 },
   cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   cardTitle: { fontSize: 16, fontWeight: '700', color: AppColors.textPrimary },
-  cardSubtitle: { fontSize: 12, color: AppColors.textTertiary, fontFamily: MONO },
+  funcName: { fontSize: 11, color: AppColors.textTertiary, fontFamily: MONO, marginTop: 2 },
+  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 5 },
+  tag: { borderRadius: 5, borderWidth: 1, borderColor: AppColors.border, backgroundColor: AppColors.bgCardElevated, paddingHorizontal: 7, paddingVertical: 2 },
+  tagText: { fontSize: 10, fontWeight: '600', color: AppColors.textTertiary },
+  tagRgb: { borderColor: '#1A5C3880', backgroundColor: '#1A5C3820' },
+  tagTextRgb: { color: '#4ADE80' },
   statusPill: {
     borderRadius: 10,
     paddingHorizontal: 8,
@@ -1515,41 +1391,3 @@ const fStyles = StyleSheet.create({
   rerunBtnText: { fontWeight: '700', fontSize: 13 },
 });
 
-// Test summary styles
-const tStyles = StyleSheet.create({
-  card: {
-    backgroundColor: AppColors.bgCard,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: AppColors.border,
-    marginBottom: 14,
-    overflow: 'hidden',
-  },
-  header: { padding: 14, gap: 4 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  title: { fontSize: 16, fontWeight: '700', color: AppColors.textPrimary },
-  pill: {
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderWidth: 1,
-  },
-  pillText: { fontSize: 11, fontWeight: '600' },
-  desc: { fontSize: 13, color: AppColors.textSecondary },
-  chevron: { fontSize: 12, color: AppColors.textTertiary, marginTop: 2 },
-  body: {
-    borderTopWidth: 1,
-    borderTopColor: AppColors.border,
-    paddingVertical: 6,
-  },
-  testRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    gap: 8,
-  },
-  testIcon: { fontSize: 12, fontWeight: '700', width: 14 },
-  testName: { fontSize: 13, fontFamily: MONO, flex: 1 },
-  testError: { fontSize: 11, color: AppColors.error, flex: 1 },
-});
