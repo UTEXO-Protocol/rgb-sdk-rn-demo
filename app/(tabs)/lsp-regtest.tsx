@@ -57,9 +57,10 @@ const LSP_DAEMON_URL    = `http://${_host}:3005`;
 const FAUCET_DAEMON_URL = `http://${_host}:3008`;
 
 // Non-URL values come from env (written by start-lsp-regtest.sh).
-const ASSET_ID        = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID    ?? '';
-const LSP_PEER_PUBKEY = process.env.EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY ?? '';
-const LSP_LDK_PORT    = Number(process.env.EXPO_PUBLIC_LSP_REGTEST_LDK_PORT ?? '9737');
+const ASSET_ID     = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID ?? '';
+const LSP_LDK_PORT = Number(process.env.EXPO_PUBLIC_LSP_REGTEST_LDK_PORT ?? '9737');
+// Fetched at runtime so no app rebuild is needed after LSP restarts.
+let LSP_PEER_PUBKEY = process.env.EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY ?? '';
 
 const REGTEST_UNLOCK = {
   bitcoindRpcUsername: 'user',
@@ -249,7 +250,11 @@ export default function LspScreen() {
       addLog(`LSP_PEER=${LSP_PEER_PUBKEY ? LSP_PEER_PUBKEY.slice(0, 16) + '…' : '(empty)'}`);
 
       if (!ASSET_ID) throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID not set — run scripts/start-lsp-regtest.sh first');
-      if (!LSP_PEER_PUBKEY) throw new Error('EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY not set — run scripts/start-lsp-regtest.sh first');
+
+      // Fetch LSP pubkey at runtime — no rebuild needed after LSP restarts.
+      const lspNodeInfoResp = await fetch(`${LSP_DAEMON_URL}/nodeinfo`).then(r => r.json()) as any;
+      LSP_PEER_PUBKEY = lspNodeInfoResp?.pubkey ?? LSP_PEER_PUBKEY;
+      if (!LSP_PEER_PUBKEY) throw new Error('Could not fetch LSP pubkey — is the LSP daemon running on port 3005?');
 
       // ── raw fetch probe ────────────────────────────────────────────────────
       addLog(`raw fetch probe → ${LSP_URL}/health`);
@@ -678,7 +683,7 @@ export default function LspScreen() {
   const inPart2 = ['p2_init', 'p2_channel', 'p2_pay', 'p2_settle'].includes(phase);
   const spA = (balA?.vanilla?.spendable ?? 0) + (balA?.colored?.spendable ?? 0);
   const stA = (balA?.vanilla?.settled ?? 0) + (balA?.colored?.settled ?? 0);
-  const envReady = !!ASSET_ID && !!LSP_PEER_PUBKEY;
+  const envReady = !!ASSET_ID;
 
   return (
     <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>

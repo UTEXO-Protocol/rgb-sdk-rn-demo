@@ -107,12 +107,19 @@ if [ "${1:-}" = "stop" ]; then
   pkill -f "rgb-lightning-node.*data_lsp"    2>/dev/null || true
   pkill -f "rgb-lightning-node.*data_faucet" 2>/dev/null || true
   pkill -f "go run \."                       2>/dev/null || true
+  pkill -f "utexo-lsp"                       2>/dev/null || true
   pkill -f "local-node-bridge"               2>/dev/null || true
   log "Done."
   exit 0
 fi
 
 # ── preflight ─────────────────────────────────────────────────────────────────
+
+log ""
+log "⚠  IMPORTANT: Reset / Cancel any running demo app flow BEFORE continuing."
+log "   Active demo nodes stay connected to the LSP. If the cron fires while"
+log "   they are connected it creates stuck Initiated Sends → spendable=0."
+log ""
 
 [ -f "$RLN_BIN" ] || die "RLN binary not found: $RLN_BIN  (run: cargo build --release in rgb-lightning-node)"
 command -v go >/dev/null || die "go not found — install Go"
@@ -142,12 +149,20 @@ sleep 1
 # Always start fresh (mirrors test fixture: new artifact_dir per run)
 rm -rf "$LSP_DIR"
 mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs"
+APAY_BEARER_TOKEN="apay-regtest-secret"
+
 log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
+# --enable-virtual-channels-v0: required so peers can open/accept 0-conf virtual channels
+# --lsp-base-url: host node forwards async_order.new P2P messages to utexo-lsp
+# --lsp-bearer-token: must match APAY_BEARER_TOKEN in utexo-lsp (fail-closed if empty)
 "$RLN_BIN" "$LSP_DIR" \
   --daemon-listening-port "$LSP_PORT" \
   --ldk-peer-listening-port "$LSP_PEER_PORT" \
   --network regtest \
   --disable-authentication \
+  --enable-virtual-channels-v0 \
+  --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
+  --lsp-bearer-token "$APAY_BEARER_TOKEN" \
   >"$RGBLN_REPO/logs/rln-lsp.log" 2>&1 &
 LSP_PID=$!
 wait_for_port "$LSP_PORT" "LSP daemon"
@@ -281,10 +296,33 @@ log "LSP seeded. Checking LSP asset balance …"
 LSP_BAL=$(rln_post "$LSP_PORT" "/assetbalance" "{\"asset_id\":\"$ASSET_ID\"}" | jq '.settled // 0')
 log "LSP settled balance: $LSP_BAL"
 
+# ── set adb reverse ports so Android emulator can reach proxy + LSP ──────────
+# Must happen BEFORE utexo-lsp starts; otherwise cron fires, consignment
+# delivery fails (proxy unreachable), and Initiated Sends lock all UTXOs.
+if command -v adb >/dev/null 2>&1 && adb devices | grep -q "emulator\|device"; then
+  log "Setting adb reverse port forwards …"
+  adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"    || log "  tcp:3000 (proxy) FAILED — set manually"
+  adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"    || log "  tcp:3005 (LSP)   FAILED — set manually"
+  adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok" || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
+  adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"   || log "  tcp:5000 (bridge) FAILED — set manually"
+else
+  log "adb not found or no device — skipping port forwards"
+  log "  Run manually before starting the app:"
+  log "    adb reverse tcp:3000 tcp:3000"
+  log "    adb reverse tcp:3005 tcp:3005"
+  log "    adb reverse tcp:8080 tcp:8080"
+  log "    adb reverse tcp:5000 tcp:5000"
+fi
+
 # ── start utexo-lsp ───────────────────────────────────────────────────────────
 
-pkill -f "go run \." 2>/dev/null || true
-sleep 1
+pkill -f "go run \."  2>/dev/null || true
+pkill -f "utexo-lsp"  2>/dev/null || true
+sleep 2
+
+# Wipe the database so the new instance starts clean (no stale transfers/assets from previous runs)
+rm -f "$UTEXO_LSP_REPO/utexo_lsp.db"
+log "Wiped utexo_lsp.db"
 
 log "Starting utexo-lsp (port $UTEXO_PORT) with SUPPORTED_ASSET_IDS=$ASSET_ID …"
 cd "$UTEXO_LSP_REPO"
@@ -293,11 +331,13 @@ env \
   RGB_NODE_BASE_URL="http://127.0.0.1:$LSP_PORT" \
   LIGHTNING_ADDRESS_DOMAIN_URL="http://127.0.0.1:$UTEXO_PORT" \
   SUPPORTED_ASSET_IDS="$ASSET_ID" \
-  CRON_EVERY="5s" \
+  CRON_EVERY="30s" \
   DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
   DEFAULT_CHANNEL_ASSET_AMOUNT="1" \
   MIN_AMT_MSAT="3000000" \
+  DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
+  APAY_BEARER_TOKEN="$APAY_BEARER_TOKEN" \
   go run . >"$RGBLN_REPO/logs/utexo-lsp.log" 2>&1 &
 UTEXO_PID=$!
 wait_for_utexo
@@ -312,17 +352,19 @@ EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
 
-# Expo auto-loads .env.local — write there so Expo picks up vars without rebuild
+# Expo auto-loads .env.local — write LSP regtest vars there.
+# Single-source env workflow: keep all active vars in .env.local.
 ENV_LOCAL="$DEMO_DIR/.env.local"
 if [ -f "$ENV_LOCAL" ]; then
   grep -v "^EXPO_PUBLIC_LSP_REGTEST_\|^EXPO_PUBLIC_FAUCET_REGTEST_" "$ENV_LOCAL" > "$ENV_LOCAL.tmp" && mv "$ENV_LOCAL.tmp" "$ENV_LOCAL"
 fi
+
 cat >> "$ENV_LOCAL" <<EOF
 EXPO_PUBLIC_LSP_REGTEST_ASSET_ID="$ASSET_ID"
 EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
-log "LSP vars written to $ENV_LOCAL (Expo auto-loads this)"
+log "LSP regtest vars written to $ENV_LOCAL (single env-file workflow)"
 
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

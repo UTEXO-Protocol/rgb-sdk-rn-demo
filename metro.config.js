@@ -21,6 +21,26 @@ config.resolver = {
     // path.resolve(localCoreSdkPath, 'node_modules'),
   ],
   unstable_enableSymlinks: true,
+  unstable_enablePackageExports: false,
+  // Metro's package-exports enforcement (enabled by default in Metro 0.83 / RN 0.81)
+  // blocks relative imports that aren't listed in a package's `exports` field.
+  // expo-constants@18 only exports `.` and `./package.json`, so `./ExponentConstants`
+  // fails even though the file exists.  resolveRequest short-circuits that check.
+  resolveRequest: (context, moduleName, platform) => {
+    if (
+      moduleName === './ExponentConstants' &&
+      context.originModulePath.includes('expo-constants/build/Constants.js')
+    ) {
+      return {
+        filePath: path.resolve(
+          path.dirname(context.originModulePath),
+          'ExponentConstants.js'
+        ),
+        type: 'sourceFile',
+      };
+    }
+    return context.resolveRequest(context, moduleName, platform);
+  },
 };
 
 module.exports = config;

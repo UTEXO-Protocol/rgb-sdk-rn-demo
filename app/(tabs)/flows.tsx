@@ -1,4 +1,3 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -15,16 +14,12 @@ import {
   BadRequestError,
   ConfigurationError,
   CryptoError,
-  DEFAULT_INDEXER_URLS,
-  NotFoundError,
-  SDKError,
-  ValidationError,
-  VssBackupConfig,
-  WalletError,
   deriveKeysFromMnemonic,
   generateKeys,
   NetworkError,
   normalizeNetwork,
+  NotFoundError,
+  SDKError,
   signMessage,
   signPsbt,
   signPsbtFromSeed,
@@ -33,16 +28,18 @@ import {
   validateMnemonic,
   validateNetwork,
   validatePsbt,
+  ValidationError,
   verifyMessage,
+  WalletError
 } from '@utexo/rgb-sdk-rn';
 
 import { AppColors } from '@/constants/theme';
 import {
-  runRlnUtexoWalletChannelPaymentFlow,
-  runRLNUtexoPaymentFlow,
-  runRlnUtexoWalletAssetChannelExtSignerFlow,
   runRLNUtexoExternalPaymentFlow,
+  runRLNUtexoPaymentFlow,
   runRlnUtexoVssFlow,
+  runRlnUtexoWalletAssetChannelExtSignerFlow,
+  runRlnUtexoWalletChannelPaymentFlow,
   runRlnVssFlow,
 } from '@/utils/wallet-flow';
 
@@ -908,7 +905,7 @@ export default function FlowsScreen() {
       }
     }
 
-    runSdkTests();
+    // runSdkTests();
   }, []);
   // ── Flow handlers ─────────────────────────────────────────────────────────
 

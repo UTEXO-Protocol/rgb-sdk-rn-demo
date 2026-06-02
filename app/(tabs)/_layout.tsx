@@ -59,6 +59,13 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={26} name="bolt.circle.fill" color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="async-pay"
+        options={{
+          title: 'Apay',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="arrow.trianglehead.clockwise" color={color} />,
+        }}
+      />
     </Tabs>
   );
 }

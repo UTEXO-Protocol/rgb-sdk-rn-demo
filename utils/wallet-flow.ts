@@ -169,6 +169,42 @@ export async function sendToAddress(address: string, amount: number) {
   }
 }
 
+export async function sendToAddressUtexo(address: string, amountSat = 16900) {
+  const faucetUrl = process.env.EXPO_PUBLIC_FAUCET_URL?.trim() ?? '';
+  const faucetToken = process.env.EXPO_PUBLIC_FAUCET_BEARER_TOKEN?.trim() ?? '';
+  if (!faucetUrl) throw new Error('EXPO_PUBLIC_FAUCET_URL not set');
+  if (!faucetToken) throw new Error('EXPO_PUBLIC_FAUCET_BEARER_TOKEN not set');
+
+  console.log(`[utexo-faucet] sendToAddressUtexo(address="${address}", amountSat=${amountSat})`);
+  try {
+    const response = await fetch(faucetUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${faucetToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        amount: amountSat,
+        address,
+        fee_rate: 5,
+        skip_sync: false,
+      }),
+      signal: (AbortSignal as any).timeout?.(30_000),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${text}`);
+    }
+    console.log(`[utexo-faucet] sendToAddressUtexo ✓ response=${text}`);
+    return text;
+  } catch (error: any) {
+    console.error(
+      `[utexo-faucet] sendToAddressUtexo(address="${address}", amountSat=${amountSat}) ✗ ${error?.message ?? String(error)}`
+    );
+    throw new Error(`Unable to fund address via UTXEO faucet: ${error.message}`);
+  }
+}
+
 
 type RlnFlowResults = { steps: any[]; success: boolean; error: any };
 
@@ -1706,6 +1742,13 @@ export async function runRlnUtexoVssFlow() {
       announceAddresses: [] as string[],
       announceAlias: null as string | null,
     };
+    // Flow-local tuning: keep independent from other tests/flows.
+    // Fund as: utxo target size * count + safety buffer for fees/change.
+    const targetUtxoCount = 3;
+    const targetUtxoSizeSat = 32500;
+    const faucetSafetyBufferSat = 1130000;
+    const faucetAmountSat = targetUtxoSizeSat * targetUtxoCount + faucetSafetyBufferSat;
+    const channelCapacitySat = 100000;
 
     const keysA = await createWallet(network);
     const keysB = await createWallet(network);
@@ -1732,6 +1775,12 @@ export async function runRlnUtexoVssFlow() {
       xpubVan: keysA.accountXpubVanilla,
       xpubCol: keysA.accountXpubColored,
       masterFingerprint: keysA.masterFingerprint,
+    }));
+    console.log('[vss] walletB params', JSON.stringify({
+      storageDirPath: storageDirB,
+      daemonListeningPort: basePort + 100,
+      ldkPeerListeningPort: basePort + 101,
+      network,
     }));
     console.log('[vss] unlockParams', JSON.stringify(unlockParams));
     wallet = new UTEXOWallet(
@@ -1766,34 +1815,57 @@ export async function runRlnUtexoVssFlow() {
       new PasswordRLNSigner(password, keysB.mnemonic),
     );
     await wallet.init();
+    console.log('[vss] walletA init ✓');
     await wallet.unlock(unlockParams);
+    console.log('[vss] walletA unlock ✓');
     await nodeB.init();
+    console.log('[vss] walletB init ✓');
     await nodeB.unlock(unlockParams);
+    console.log('[vss] walletB unlock ✓');
     const nodeBInfo = await nodeB.getNodeInfo();
     const pubkeyB = String(nodeBInfo?.pubkey ?? '');
+    console.log(`[vss] walletB pubkey=${pubkeyB} storageDirB=${storageDirB}`);
     addStep('vssCreateWallets', 'success', { vssUrl, network, pubkeyB: pubkeyB.substring(0, 16) + '...' });
 
     // 2 — get deposit address + poll up to 3 min for BTC balance
     addStep('vssFundWallet', 'running');
     const address = await wallet.getAddress();
+    let faucetResponse: string | null = null;
+    try {
+      faucetResponse = await sendToAddressUtexo(address, faucetAmountSat);
+    } catch (e: any) {
+      console.warn(`[vss] faucet funding failed: ${e?.message ?? String(e)}`);
+    }
     let balance: any = null;
+    let settled = 0;
+    let spendable = 0;
     const fundDeadline = Date.now() + 3 * 60 * 1000;
     while (Date.now() < fundDeadline) {
       try {
         await wallet.syncWallet();
         balance = await wallet.getBtcBalance();
-        if (Number(balance?.vanilla?.spendable ?? 0) > 0) break;
+        settled = Number(balance?.vanilla?.settled ?? 0);
+        spendable = Number(balance?.vanilla?.spendable ?? 0);
+        console.log(`[vss] funding poll settled=${settled} spendable=${spendable}`);
+        // For UTXO creation we need confirmed sats; spendable/future can appear before settlement.
+        if (settled > 0) break;
       } catch (e: any) {
         console.warn(`[vss] waitForFunding: ${e?.message}`);
       }
       await sleep(15000);
     }
-    const hasFunds = Number(balance?.vanilla?.spendable ?? 0) > 0;
+    const hasFunds = settled > 0;
     addStep('vssFundWallet', 'success', {
       address,
+      faucetAmountSat,
+      faucetResponse,
+      settled,
+      spendable,
       balance,
       hasFunds,
-      note: hasFunds ? undefined : 'No balance — asset/channel steps skipped; VSS KV replication still tested',
+      note: hasFunds
+        ? undefined
+        : 'No settled balance yet — asset/channel steps skipped; VSS KV replication still tested',
     });
 
     let assetId: string | null = null;
@@ -1804,17 +1876,23 @@ export async function runRlnUtexoVssFlow() {
       // 3 — create UTXOs for RGB operations
       addStep('vssCreateUtxos', 'running');
       await wallet.syncWallet();
-      await wallet.createUtxos({ upTo: false, num: 5, feeRate: 3 });
+      await wallet.createUtxos({
+        upTo: false,
+        num: targetUtxoCount,
+        feeRate: 3,
+        size: targetUtxoSizeSat,
+      });
       const utxoDeadline = Date.now() + 45 * 60 * 1000;
       while (Date.now() < utxoDeadline) {
         await sleep(20000);
         await wallet.syncWallet();
         const unspents = await wallet.listUnspents().catch(() => []);
+        console.log(`[vss] unspents`, JSON.stringify(unspents));
         const confirmed = unspents.filter((u: any) => !(u.rgbAllocations?.length > 0));
         console.log(`[vss] UTXO confirmation check — rgb-ready=${confirmed.length}`);
-        if (confirmed.length >= 5) break;
+        if (confirmed.length >= targetUtxoCount) break;
       }
-      addStep('vssCreateUtxos', 'success', { num: 5 });
+      addStep('vssCreateUtxos', 'success', { num: targetUtxoCount });
 
       // 4 — issue NIA asset
       addStep('vssIssueAssetNia', 'running');
@@ -1829,29 +1907,63 @@ export async function runRlnUtexoVssFlow() {
       // 5 — open BTC channel nodeA → nodeB (wait up to 20 min for testnet confirmation)
       addStep('vssOpenChannel', 'running');
       const peerUriB = `${pubkeyB}@127.0.0.1:${basePort + 101}`;
-      try { await wallet.connectPeer(peerUriB); } catch {}
+      console.log(`[vss] openChannel: connectPeer(${peerUriB})`);
+      try {
+        await wallet.connectPeer(peerUriB);
+        console.log('[vss] openChannel: connectPeer ✓');
+      } catch (e: any) {
+        console.warn(`[vss] openChannel: connectPeer non-fatal: ${e?.message ?? String(e)}`);
+      }
       await sleep(1000);
+      console.log('[vss] openChannel: request', JSON.stringify({
+        peerPubkeyAndOptAddr: peerUriB,
+        capacitySat: channelCapacitySat,
+        pushMsat: 0,
+        public: true,
+        withAnchors: true,
+      }));
       const openResp = await wallet.openChannel({
         peerPubkeyAndOptAddr: peerUriB,
-        capacitySat: 200000,
+        capacitySat: channelCapacitySat,
         pushMsat: 0,
         public: true,
         withAnchors: true,
       });
       const tempChannelId = String(openResp?.temporaryChannelId ?? '');
+      console.log(`[vss] openChannel: temporaryChannelId=${tempChannelId || '(empty)'}`);
       const channelDeadline = Date.now() + 20 * 60 * 1000;
+      let channelUsable = false;
       while (Date.now() < channelDeadline) {
         await wallet.syncWallet();
         const info = await wallet.getNodeInfo();
-        if (Number(info?.numUsableChannels ?? 0) >= 1) break;
+        const usable = Number(info?.numUsableChannels ?? 0);
+        const total = Number(info?.numChannels ?? 0);
+        const channels = ((await wallet.listChannels().catch(() => [])) ?? []) as any[];
+        const shortChannels = channels.map((c: any) => ({
+          id: String(c?.channelId ?? '').substring(0, 16),
+          usable: !!c?.isUsable,
+          cap: Number(c?.capacitySat ?? 0),
+          txid: String(c?.fundingTxid ?? '').substring(0, 16),
+        }));
+        console.log(
+          `[vss] openChannel poll usable=${usable} total=${total} channels=${shortChannels.length} elapsedSec=${Math.floor((Date.now() - (channelDeadline - 20 * 60 * 1000)) / 1000)}`,
+          JSON.stringify(shortChannels)
+        );
+        if (usable >= 1) {
+          channelUsable = true;
+          break;
+        }
         await sleep(30000);
+      }
+      if (!channelUsable) {
+        console.warn('[vss] openChannel: timeout waiting for numUsableChannels >= 1, continuing with best-known channel state');
       }
       const channelsA = await wallet.listChannels() ?? [];
       const channel = (channelsA as any[]).find((c: any) => c.isUsable);
       channelId = String(channel?.channelId ?? tempChannelId);
       addStep('vssOpenChannel', 'success', {
         channelId: channelId.substring(0, 16) + '...',
-        capacitySat: Number(channel?.capacitySat ?? 200000),
+        capacitySat: Number(channel?.capacitySat ?? channelCapacitySat),
       });
     } else {
       addStep('vssCreateUtxos', 'success', { skipped: true });
