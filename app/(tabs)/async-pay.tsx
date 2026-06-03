@@ -4,13 +4,12 @@
  * Phase 1 — Recipient (User B) registers a hash pool with the LSP:
  *   wallet.apayRegisterHashPool(lspNodePubkey)
  *   Internally: Recipient RLN → Host RLN (P2P) → utexo-lsp /internal/async_order/new
- *   Result: utexo-lsp mints a haiku Lightning Address username for User B.
+ *   GET ${LSP_URL}/lightning_address/by_pubkey/${userBPubkey} → username + domain
  *
  * Phase 2 — Sender (User A) discovers User B's Lightning Address and pays:
  *   GET ${LSP_URL}/.well-known/lnurlp/${username}   → LNURL callback
- *   (username is minted by utexo-lsp — NOT the node pubkey; see dev logs after Phase 1)
  *   GET ${callback}?amount=${amtMsat}                   → HODL BOLT11
- *   wallet.payLightningInvoice({ lnInvoice: hodlBolt11 })
+ *   wallet.payLightningInvoice({ lnInvoice: hodlBolt11, assetId, assetAmount })
  *   → HTLC is held at the LSP (payment NOT yet settled)
  *
  * Phase 3 — User B comes online and claims:
@@ -20,8 +19,6 @@
  *
  * Prerequisites:
  *   cd rgb-sdk-rn-demo && ./scripts/start-lsp-regtest.sh
- *   After Phase 1, look up User B's LNURL username via the [dev] sqlite log line,
- *   set EXPO_PUBLIC_LNADDR_USERNAME in .env.local, reload the app, and re-run.
  */
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
@@ -42,6 +39,7 @@ import { mine, sendToAddress } from '@/utils/wallet-flow';
 import {
   createWallet,
   PasswordRLNSigner,
+  UtexoLSPClient,
   UTEXOWallet,
 } from '@utexo/rgb-sdk-rn';
 
@@ -51,8 +49,7 @@ const _host = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
 
 const LSP_URL        = `http://${_host}:8080`;
 const LSP_DAEMON_URL = `http://${_host}:3005`;
-// Dev-only: haiku username from utexo-lsp lnaddr_accounts (NOT User B's pubkey).
-const LNADDR_USERNAME = process.env.EXPO_PUBLIC_LNADDR_USERNAME?.trim() ?? '';
+const lspClient      = new UtexoLSPClient({ baseUrl: LSP_URL });
 
 const ASSET_ID    = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID ?? '';
 const LSP_LDK_PORT = Number(process.env.EXPO_PUBLIC_LSP_REGTEST_LDK_PORT ?? '9737');
@@ -101,23 +98,6 @@ const PHASE_LABELS: Record<Phase, string> = {
 
 const PHASES_P1: Phase[] = ['b_init', 'b_fund', 'b_utxos', 'b_channel', 'register'];
 const PHASES_P2: Phase[] = ['a_init', 'a_fund', 'a_utxos', 'a_channel', 'lnurlp', 'send', 'poll', 'claim', 'done'];
-
-function logLnaddrUsernameDevHint(addLog: (msg: string, type?: LogEntry['type']) => void, peerPubkey: string) {
-  addLog('[dev] LNURL path uses utexo-lsp haiku username — not the node pubkey', 'info');
-  addLog(`[dev] User B pubkey: ${peerPubkey}`, 'info');
-  addLog(
-    `[dev] sqlite3 utexo-lsp/utexo_lsp.db "SELECT username FROM lnaddr_accounts WHERE peer_pubkey='${peerPubkey}';"`,
-    'info',
-  );
-  addLog('[dev] Set EXPO_PUBLIC_LNADDR_USERNAME=<username> in .env.local, reload app, re-run', 'info');
-}
-
-function requireLnaddrUsername(): string {
-  if (LNADDR_USERNAME) return LNADDR_USERNAME;
-  throw new Error(
-    'Dev: set EXPO_PUBLIC_LNADDR_USERNAME from the [dev] sqlite query in logs, reload the app, then re-run',
-  );
-}
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
@@ -197,6 +177,7 @@ export default function AsyncPayScreen() {
   // Recipient (User B) state
   const [pubkeyB, setPubkeyB] = useState('');
   const [lnaddrUsername, setLnaddrUsername] = useState('');
+  const [lnaddrDomain, setLnaddrDomain] = useState('');
   const [hashPoolInfo, setHashPoolInfo] = useState<any>(null);
   const [channelB, setChannelB] = useState<any>(null);
 
@@ -222,7 +203,8 @@ export default function AsyncPayScreen() {
   const run = useCallback(async () => {
     abortRef.current = false;
     setLog([]); setErrorMsg('');
-    setPubkeyB(''); setHashPoolInfo(null); setChannelB(null);
+    setPubkeyB(''); setLnaddrUsername(''); setLnaddrDomain('');
+    setHashPoolInfo(null); setChannelB(null);
     setChannelA(null); setHodlBolt11(''); setPaymentHash('');
     setClaimResult(null); setFinalBalB(null);
 
@@ -381,11 +363,16 @@ export default function AsyncPayScreen() {
         acceptedThroughIndex: pool.acceptedThroughIndex,
       });
       addLog(`Hash pool registered ✓  ${pool.hashes.length} hashes issued to LSP`, 'success');
-      logLnaddrUsernameDevHint(addLog, bPubkey);
-      if (LNADDR_USERNAME) {
-        setLnaddrUsername(LNADDR_USERNAME);
-        addLog(`Lightning Address for User B: ${LNADDR_USERNAME}@${_host}:8080`, 'success');
-      }
+
+      req('GET /lightning_address/by_pubkey/{pubkey}', { pubkey: short(bPubkey) });
+      const lnaddr = await lspClient.getLightningAddressByPubkey(bPubkey);
+      setLnaddrUsername(lnaddr.username);
+      setLnaddrDomain(lnaddr.domain);
+      res('lightningAddressByPubkey', {
+        username: lnaddr.username,
+        domain: lnaddr.domain,
+      });
+      addLog(`Lightning Address for User B: ${lnaddr.username}@${lnaddr.domain}`, 'success');
 
       // ─────────────────────────────────────────────────────────────────────
       // PHASE 2 — Sender (User A)
@@ -475,26 +462,16 @@ export default function AsyncPayScreen() {
       // ─────────────────────────────────────────────────────────────────────
       setPhase('lnurlp');
 
-      const username = requireLnaddrUsername();
-      setLnaddrUsername(username);
-
-      req('GET /.well-known/lnurlp/{username}', { username });
-      const lnurlRes = await fetch(`${LSP_URL}/.well-known/lnurlp/${encodeURIComponent(username)}`);
-      if (!lnurlRes.ok) {
-        const txt = await lnurlRes.text();
-        throw new Error(`LNURL discovery failed ${lnurlRes.status}: ${txt}`);
+      const username = lnaddr.username;
+      if (!username) {
+        throw new Error('Lightning Address username missing — hash pool registration may have failed');
       }
-      const lnurlMeta = await lnurlRes.json() as { callback: string; minSendable: number; maxSendable: number };
-      res('lnurlp', { callback: short(lnurlMeta.callback, 40), minSendable: lnurlMeta.minSendable });
 
-      req('GET callback?amount=', { amtMsat: PAYMENT_MSAT });
-      const sep = lnurlMeta.callback.includes('?') ? '&' : '?';
-      const callbackRes = await fetch(`${lnurlMeta.callback}${sep}amount=${PAYMENT_MSAT}`);
-      if (!callbackRes.ok) {
-        const txt = await callbackRes.text();
-        throw new Error(`LNURL callback failed ${callbackRes.status}: ${txt}`);
+      if (!ASSET_ID) {
+        throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID is required for async-pay (RGB legs avoid Host sendpayment hash collision)');
       }
-      const callbackData = await callbackRes.json() as { pr: string };
+      req('GET /.well-known/lnurlp/{username} → callback', { username, amtMsat: PAYMENT_MSAT, assetId: ASSET_ID, assetAmount: PAYMENT_ASSET_AMOUNT });
+      const callbackData = await lspClient.resolveAddress(username, PAYMENT_MSAT, ASSET_ID, PAYMENT_ASSET_AMOUNT);
       if (!callbackData.pr) throw new Error('LNURL callback returned no invoice (pr)');
 
       setHodlBolt11(callbackData.pr);
@@ -505,14 +482,31 @@ export default function AsyncPayScreen() {
       // LSP holds the HTLC — does NOT settle yet (User B is "offline").
       setPhase('send');
 
-      req('userA.payLightningInvoice → HODL');
-      const payRes = await wA.payLightningInvoice({ lnInvoice: callbackData.pr });
-      const pHash  = (payRes as any)?.paymentHash ?? (payRes as any)?.txid ?? '';
+      req('userA.payLightningInvoice → HODL', {
+        assetId: ASSET_ID,
+        assetAmount: PAYMENT_ASSET_AMOUNT,
+      });
+      const payRes = await wA.payLightningInvoice({
+        lnInvoice: callbackData.pr,
+        assetId: ASSET_ID,
+        assetAmount: PAYMENT_ASSET_AMOUNT,
+      });
+      const pHash = payRes.txid ?? '';
+      const payStatus = String(payRes.status ?? '').toLowerCase();
       setPaymentHash(pHash);
       res('userA.payLightningInvoice', {
-        status:      (payRes as any)?.status ?? 'sent',
+        status: payRes.status ?? 'unknown',
         paymentHash: short(pHash),
       });
+      if (payStatus === 'failed') {
+        throw new Error(
+          `userA.payLightningInvoice failed for RGB HODL invoice (hash=${short(pHash)}). ` +
+            'Check User A RGB channel balance and that asset_id/asset_amount match the LNURL callback.',
+        );
+      }
+      if (payStatus !== 'pending') {
+        addLog(`userA pay status is ${payRes.status} (expected Pending for hodl at LSP)`, 'info');
+      }
       addLog('HTLC held at LSP — User B is "offline" (payment not yet settled)', 'success');
 
       // Give LSP time to process the HTLC
@@ -522,20 +516,48 @@ export default function AsyncPayScreen() {
       // PHASE 4 — User B "comes online" and claims the pending HODL payment
       // ─────────────────────────────────────────────────────────────────────
       setPhase('poll');
-      addLog('User B coming online — polling for INBOUND_HODL Claimable payment…');
+      addLog('User B coming online — reconnecting to LSP peer to signal presence…');
+
+      // Re-establish peer connection so the LSP detects User B is online and
+      // forwards the held HTLC. The TCP connection may have dropped since the
+      // channel was opened (LDK does not keep it alive indefinitely).
+      try { await wB.connectPeer(lspPeerUri); addLog('User B peer reconnect ok', 'success'); }
+      catch (e: any) { addLog(`User B peer reconnect (ignored): ${e?.message ?? String(e)}`); }
+      await sleep(2000);
+
+      addLog('Polling for INBOUND_HODL Claimable payment…');
 
       const claimDeadline = Date.now() + CLAIM_TIMEOUT_S * 1000;
       let hodlPayment: any = null;
+      let reconnectEvery = 0;
 
       while (Date.now() < claimDeadline) {
         if (abortRef.current) throw new Error('Cancelled');
         await sleep(POLL_INTERVAL_MS);
+
+        // Reconnect every ~15 s to keep signalling presence to the LSP
+        reconnectEvery += POLL_INTERVAL_MS;
+        if (reconnectEvery >= 15000) {
+          reconnectEvery = 0;
+          try { await wB.connectPeer(lspPeerUri); } catch {}
+        }
+
         await wB.syncWallet();
 
         const payments = await wB.listPaymentsRaw();
+        const isInboundHodl = (t?: string) =>
+          (t ?? '').toLowerCase().replace(/_/g, '') === 'inboundhodl';
+        const isClaimable = (s?: string) =>
+          (s ?? '').toLowerCase() === 'claimable';
         const claimable = payments.find(
-          (p) => p.paymentType === 'InboundHodl' && p.status === 'Claimable'
+          (p) => isInboundHodl(p.paymentType) && isClaimable(p.status),
         );
+        if (payments.length > 0 && !claimable) {
+          const sample = payments.slice(0, 3).map(
+            (p) => `${p.paymentType}/${p.status}`,
+          ).join(', ');
+          addLog(`userB payment sample: ${sample}`, 'info');
+        }
         addLog(`userB payments: ${payments.length} total  InboundHodl/Claimable: ${claimable ? 'FOUND' : 'none yet'}`);
 
         if (claimable) {
@@ -590,7 +612,8 @@ export default function AsyncPayScreen() {
     if (walletBRef.current) { try { await walletBRef.current.destroy(); } catch {} walletBRef.current = null; }
     setPhase('idle');
     setLog([]); setErrorMsg('');
-    setPubkeyB(''); setHashPoolInfo(null); setChannelB(null);
+    setPubkeyB(''); setLnaddrUsername(''); setLnaddrDomain('');
+    setHashPoolInfo(null); setChannelB(null);
     setChannelA(null); setHodlBolt11(''); setPaymentHash('');
     setClaimResult(null); setFinalBalB(null);
   }, []);
@@ -705,7 +728,11 @@ export default function AsyncPayScreen() {
             ['Hashes',     `${hashPoolInfo.hashes.length} issued`],
             ['Unused',     String(hashPoolInfo.unusedHashes)],
             ['Accepted→',  String(hashPoolInfo.acceptedThroughIndex)],
-            ['LN Address', lnaddrUsername ? `${lnaddrUsername}@lsp` : `${short(pubkeyB, 20)}…@lsp`],
+            ['LN Address', lnaddrUsername && lnaddrDomain
+              ? `${lnaddrUsername}@${lnaddrDomain}`
+              : lnaddrUsername
+                ? `${lnaddrUsername}@…`
+                : '(pending)'],
           ]} />
         )}
 

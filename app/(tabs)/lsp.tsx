@@ -192,7 +192,7 @@ export default function LspScreen() {
       req('lsp.getInfo');
       const info = await lsp.getInfo();
       setLspInfo(info);
-      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.num_channels, usable: info.num_usable_channels });
+      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
 
       // ── 2. Create Node A and Node B ────────────────────────────────────────
       req('createWallet nodeA (recipient)');
@@ -409,7 +409,7 @@ export default function LspScreen() {
           <Text style={s.subtitle}>Signet · lsp-signet.utexo.com</Text>
           <View style={s.badge}>
             <View style={[s.dot, { backgroundColor: lspInfo ? AppColors.success : AppColors.textTertiary }]} />
-            <Text style={s.badgeTxt}>{lspInfo ? `LSP connected · ${lspInfo.num_channels} ch` : 'Not connected'}</Text>
+            <Text style={s.badgeTxt}>{lspInfo ? `LSP connected · ${lspInfo.numChannels} ch` : 'Not connected'}</Text>
           </View>
         </View>
 
@@ -476,7 +476,7 @@ export default function LspScreen() {
         {lspInfo && (
           <InfoCard title="LSP" accent={AppColors.success} rows={[
             ['Pubkey', short(lspInfo.pubkey, 28)],
-            ['Channels', `${lspInfo.num_channels} total · ${lspInfo.num_usable_channels} usable`],
+            ['Channels', `${lspInfo.numChannels} total · ${lspInfo.numUsableChannels} usable`],
             ['Balance', satStr(lspInfo.local_balance_sat ?? 0)],
           ]} />
         )}

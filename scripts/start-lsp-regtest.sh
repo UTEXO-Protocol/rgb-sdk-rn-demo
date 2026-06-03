@@ -152,15 +152,16 @@ mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs"
 APAY_BEARER_TOKEN="apay-regtest-secret"
 
 log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
-# --enable-virtual-channels-v0: required so peers can open/accept 0-conf virtual channels
 # --lsp-base-url: host node forwards async_order.new P2P messages to utexo-lsp
 # --lsp-bearer-token: must match APAY_BEARER_TOKEN in utexo-lsp (fail-closed if empty)
+# NOTE: --enable-virtual-channels-v0 intentionally omitted — matches Python e2e test_flow0
+#       which uses standard channels (RGBLN_ENABLE_VIRTUAL_CHANNELS_V0=false by default).
+#       Re-add if testing async-pay.tsx virtual channel flow.
 "$RLN_BIN" "$LSP_DIR" \
   --daemon-listening-port "$LSP_PORT" \
   --ldk-peer-listening-port "$LSP_PEER_PORT" \
   --network regtest \
   --disable-authentication \
-  --enable-virtual-channels-v0 \
   --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
   --lsp-bearer-token "$APAY_BEARER_TOKEN" \
   >"$RGBLN_REPO/logs/rln-lsp.log" 2>&1 &
@@ -336,8 +337,10 @@ env \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
   DEFAULT_CHANNEL_ASSET_AMOUNT="1" \
   MIN_AMT_MSAT="3000000" \
-  DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
+  UTXO_MIN_COUNT="15" \
+  UTXO_TARGET_COUNT="25" \
   APAY_BEARER_TOKEN="$APAY_BEARER_TOKEN" \
+  APAY_OUTBOUND_MIN_FINAL_CLTV_EXPIRY_DELTA="42" \
   go run . >"$RGBLN_REPO/logs/utexo-lsp.log" 2>&1 &
 UTEXO_PID=$!
 wait_for_utexo
