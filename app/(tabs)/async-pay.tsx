@@ -262,7 +262,7 @@ export default function AsyncPayScreen() {
         new PasswordRLNSigner('apaypassB', keysB.mnemonic),
       );
       walletBRef.current = wB;
-      const lspB = wB.createLsp(LSP_PEER);
+      const lspB = await wB.createLsp(LSP_PEER);
       await wB.init();
       await wB.unlock(REGTEST_UNLOCK);
 
@@ -402,7 +402,7 @@ export default function AsyncPayScreen() {
         new PasswordRLNSigner('apaypassA', keysA.mnemonic),
       );
       walletARef.current = wA;
-      const lspA = wA.createLsp(LSP_PEER);
+      const lspA = await wA.createLsp(LSP_PEER);
       await wA.init();
       await wA.unlock(REGTEST_UNLOCK);
       res('userA.init', { pubkey: short(String((await wA.getNodeInfo())?.pubkey ?? '')) });
