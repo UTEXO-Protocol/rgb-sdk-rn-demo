@@ -26,7 +26,8 @@ import {
   createWallet,
   PasswordRLNSigner,
   UTEXOWallet,
-  UtexoLSPClient,
+  UtexoLsp,
+  type LspPeer,
 } from '@utexo/rgb-sdk-rn';
 import { AppColors } from '@/constants/theme';
 import { buildUtexoConfig } from '@/utils/env';
@@ -171,11 +172,8 @@ export default function LspScreen() {
       addLog(`← ${label}${d ? '  '+Object.entries(d).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join(' ') : ''}`, 'success');
 
     try {
-      // ── diagnostic: log resolved config values ─────────────────────────────
-      addLog(`LSP_URL = ${LSP_URL}`);
-      addLog(`UtexoLSPClient type = ${typeof UtexoLSPClient}`);
-
       // ── diagnostic: raw fetch to confirm network works ─────────────────────
+      addLog(`LSP_URL = ${LSP_URL}`);
       addLog('raw fetch test → https://lsp-signet.utexo.com/health');
       try {
         const probe = await fetch('https://lsp-signet.utexo.com/health');
@@ -185,16 +183,7 @@ export default function LspScreen() {
         addLog(`typeof fetch = ${typeof fetch}`);
       }
 
-      const lsp = new UtexoLSPClient({ baseUrl: LSP_URL });
-      addLog(`lsp instance created: ${typeof lsp}`);
-
-      // ── 1. LSP connectivity ────────────────────────────────────────────────
-      req('lsp.getInfo');
-      const info = await lsp.getInfo();
-      setLspInfo(info);
-      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
-
-      // ── 2. Create Node A and Node B ────────────────────────────────────────
+      // ── 1. Create Node A and Node B ────────────────────────────────────────
       req('createWallet nodeA (recipient)');
       const keysA = await createWallet('signet' as any);
       res('createWallet nodeA', { fingerprint: keysA.masterFingerprint });
@@ -228,10 +217,19 @@ export default function LspScreen() {
       walletARef.current = wA;
       walletBRef.current = wB;
 
+      // LSP_PEER: peerPubkey/host/port unused on signet (no connectPeer / waitForChannel)
+      const LSP_PEER: LspPeer = { baseUrl: LSP_URL, peerPubkey: '', peerHost: '', peerPort: 0 };
+      const lspA = wA.createLsp(LSP_PEER);
+
       for (const [w, label] of [[wA,'nodeA'],[wB,'nodeB']] as [UTEXOWallet,string][]) {
         req(`${label}.init`); await w.init(); res(`${label}.init`);
         req(`${label}.unlock`); await w.unlock(UNLOCK); res(`${label}.unlock`);
       }
+
+      req('lsp.getInfo');
+      const info = await lspA.http.getInfo();
+      setLspInfo(info);
+      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
 
       req('nodeA.getAddress'); const adA = await wA.getAddress(); setAddrA(adA); res('nodeA.getAddress', { address: adA });
       req('nodeB.getAddress'); const adB = await wB.getAddress(); setAddrB(adB); res('nodeB.getAddress', { address: adB });
@@ -305,24 +303,18 @@ export default function LspScreen() {
       setAssetInfo(asset);
       res('nodeB.issueAssetNia', { assetId: short(assetId), supply: asset?.issuedSupply });
 
-      // ── 6. Node A creates LN invoice → lightningReceive ────────────────────
+      // ── 6. Node A receives RGB over Lightning ──────────────────────────────
       setPhase('lsp_setup');
 
-      req('nodeA.createLightningInvoice', { amtMsat: PAYMENT_MSAT, assetAmount: PAYMENT_ASSET_AMOUNT });
-      const invResult = await wA.createLightningInvoice({
+      req('lspA.receiveAsset', { assetId: short(assetId), amountSats: PAYMENT_MSAT / 1000, amountRgb: PAYMENT_ASSET_AMOUNT });
+      const { lnInvoice: aInvoice, rgbInvoice } = await lspA.receiveAsset({
+        assetId,
         amountSats: PAYMENT_MSAT / 1000,
-        expirySeconds: 3600,
-        asset: { assetId, amount: PAYMENT_ASSET_AMOUNT },
+        amountRgb:  PAYMENT_ASSET_AMOUNT,
       });
-      const aInvoice = invResult.lnInvoice;
       setLnInvoiceA(aInvoice);
-      res('nodeA.createLightningInvoice', { invoice: short(aInvoice, 32) });
-
-      req('lsp.lightningReceive', { assetId: short(assetId) });
-      const lr = await lsp.lightningReceive({ lnInvoice: aInvoice, rgb: { assetId, durationSeconds: 3600 } });
-      const rgbInvoice = lr.rgbInvoice;
       setRgbInvoiceLsp(rgbInvoice);
-      res('lsp.lightningReceive', { rgbInvoice: short(rgbInvoice, 32), mappingId: lr.mappingId });
+      res('lspA.receiveAsset', { lnInvoice: short(aInvoice, 32), rgbInvoice: short(rgbInvoice, 32) });
 
       // ── 7. Node B sends RGB to LSP's address ──────────────────────────────
       setPhase('rgb_send');
@@ -352,26 +344,15 @@ export default function LspScreen() {
       if (!rgbSettled) addLog('RGB settlement timeout — LSP may still process');
       else addLog('Node B RGB send settled ✓', 'success');
 
-      // ── 9. Poll Node A LN invoice ─────────────────────────────────────────
-      addLog('Polling Node A invoice status …');
+      // ── 9. Wait for Node A LN invoice to settle ───────────────────────────
+      addLog('Waiting for Node A invoice to settle …');
       setInvoiceStatus('Pending');
-      const payDeadline = Date.now() + SETTLE_TIMEOUT_MS;
-      let lnSettled = false;
-      while (Date.now() < payDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_MS);
-        try {
-          await wA.syncWallet();
-          const status = await wA.getLightningReceiveRequest(aInvoice);
-          setInvoiceStatus(status ?? 'Pending');
-          addLog(`nodeA invoice: ${status}`);
-          if (status === 'Settled') { lnSettled = true; break; }
-          if (status === 'Failed') throw new Error('Node A LN invoice failed');
-        } catch (e: any) { if ((e?.message??'').includes('failed')) throw e; console.error('[lsp] ln poll', e?.message??e); }
-      }
-
-      if (lnSettled) addLog('Node A LN invoice Settled ✓ — LSP paid!', 'success');
-      else addLog('LN settlement timeout — needs active LSP channel on signet', 'error');
+      await lspA.awaitReceiveSettlement(aInvoice, {
+        timeoutMs:      SETTLE_TIMEOUT_MS,
+        pollIntervalMs: POLL_MS,
+        onProgress: (s) => { setInvoiceStatus(s); addLog(`nodeA invoice: ${s}`); },
+      });
+      addLog('Node A LN invoice Settled ✓ — LSP paid!', 'success');
 
       setPhase('done');
 

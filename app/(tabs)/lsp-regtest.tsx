@@ -39,8 +39,9 @@ import { mine, sendToAddress } from '@/utils/wallet-flow';
 import {
   createWallet,
   PasswordRLNSigner,
-  UtexoLSPClient,
+  UtexoLsp,
   UTEXOWallet,
+  type LspPeer,
 } from '@utexo/rgb-sdk-rn';
 
 // ── Config — from env (written by start-lsp-regtest.sh) ───────────────────────
@@ -267,12 +268,6 @@ export default function LspScreen() {
         addLog(`probe error: ${e?.message ?? String(e)}`, 'error');
       }
 
-      req('lsp.getInfo');
-      const lsp = new UtexoLSPClient({ baseUrl: LSP_URL });
-      const info = await lsp.getInfo();
-      setLspInfo(info);
-      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
-
       req('lsp daemon.nodeinfo');
       const lspDaemonInfo = await daemonGet(LSP_DAEMON_URL, '/nodeinfo');
       res('lsp daemon.nodeinfo', { pubkey: short(lspDaemonInfo.pubkey), assetChannels: lspDaemonInfo.num_channels });
@@ -308,6 +303,19 @@ export default function LspScreen() {
         new PasswordRLNSigner('lsppass1', keysA.mnemonic),
       );
       walletARef.current = wA;
+
+      const LSP_PEER: LspPeer = {
+        baseUrl:    LSP_URL,
+        peerPubkey: LSP_PEER_PUBKEY,
+        peerHost:   _host,
+        peerPort:   LSP_LDK_PORT,
+      };
+      const lspA = wA.createLsp(LSP_PEER);
+
+      req('lsp.getInfo');
+      const info = await lspA.http.getInfo();
+      setLspInfo(info);
+      res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
 
       addLog('calling wA.init()…');
       try {
@@ -358,44 +366,23 @@ export default function LspScreen() {
       // Matches: clients["user_a"].connectpeer + wait_for_peer_channel_usable
       setPhase('channel');
 
-      const lspPeerUri = `${LSP_PEER_PUBKEY}@${_host}:${LSP_LDK_PORT}`;
-      req('userA.connectPeer', { peer: short(lspPeerUri, 40) });
-      try {
-        await wA.connectPeer(lspPeerUri);
-        res('userA.connectPeer');
-      } catch (e: any) {
-        addLog(`connectPeer (ignored): ${e?.message ?? String(e)}`);
-      }
+      req('lspA.connect');
+      await lspA.connect();
+      res('lspA.connect');
 
-      // mine 2 to trigger LSP reconcileChannels cron (CRON_EVERY=5s)
       addLog('Mining 2 blocks to trigger LSP channel open …');
       await mine(2);
-      await sleep(6000); // wait for LSP cron (5s + buffer)
+      await sleep(6000);
 
-      // wait_for_peer_channel_usable — poll until channel is ready
       addLog(`Waiting for RGB channel usable (asset: ${short(ASSET_ID)}) …`);
-      const chanDeadline = Date.now() + CHANNEL_TIMEOUT_S * 1000;
-      let channelUsable = false;
-      while (Date.now() < chanDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await mine(1);
-        await sleep(3000);
-        await wA.syncWallet();
-        const info = await wA.getNodeInfo();
-        const usable = Number(info?.numUsableChannels ?? 0);
-        const channels = (await wA.listChannels()) ?? [];
-        const rgbChan = (channels as any[]).find((c: any) =>
-          (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
-        );
-        addLog(`userA channels: ${channels.length} total, ${usable} usable, RGB chan: ${rgbChan ? 'YES' : 'NO'}`);
-        if (rgbChan) {
-          setChannelInfo(rgbChan);
-          channelUsable = true;
-          break;
-        }
-      }
-      if (!channelUsable) throw new Error('Timeout waiting for RGB channel to become usable');
-      addLog(`RGB channel usable ✓  cap=${channelInfo?.capacitySat ?? '?'} sat`, 'success');
+      const chanA = await lspA.waitForChannel(ASSET_ID, {
+        timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
+        pollIntervalMs: 3_000,
+        onProgress:  (msg) => addLog(`userA ${msg}`),
+        onEachPoll:  () => mine(1),
+      });
+      setChannelInfo(chanA);
+      addLog(`RGB channel usable ✓  cap=${chanA.capacitySat} sat`, 'success');
 
       // refresh_transfers + sync before User B setup
       // mirrors conftest.py: refresh_transfers + sync_sdk_nodes + mine(2) between connects
@@ -424,6 +411,7 @@ export default function LspScreen() {
         new PasswordRLNSigner('lsppass2', keysB.mnemonic),
       );
       walletBRef.current = wB;
+      const lspB = wB.createLsp(LSP_PEER);
       await wB.init();
       await wB.unlock(REGTEST_UNLOCK);
       res('userB.init');
@@ -441,30 +429,22 @@ export default function LspScreen() {
 
       setPhase('b_channel');
 
-      req('userB.connectPeer', { peer: short(lspPeerUri, 40) });
-      try { await wB.connectPeer(lspPeerUri); res('userB.connectPeer'); }
-      catch (e: any) { addLog(`connectPeer B (ignored): ${e?.message ?? String(e)}`); }
+      req('lspB.connect');
+      await lspB.connect();
+      res('lspB.connect');
 
       addLog('Mining 2 blocks to trigger LSP channel open for User B …');
       await mine(2);
       await sleep(6000);
 
       addLog('Waiting for RGB channel usable on User B …');
-      const chanDeadlineB = Date.now() + CHANNEL_TIMEOUT_S * 1000;
-      let channelBUsable = false;
-      while (Date.now() < chanDeadlineB) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await mine(1);
-        await sleep(3000);
-        await wB.syncWallet();
-        const channelsB = (await wB.listChannels()) ?? [];
-        const rgbChanB = (channelsB as any[]).find((c: any) =>
-          (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
-        );
-        addLog(`userB channels: ${channelsB.length} total, RGB chan: ${rgbChanB ? 'YES' : 'NO'}`);
-        if (rgbChanB) { setChannelInfoB(rgbChanB); channelBUsable = true; break; }
-      }
-      if (!channelBUsable) throw new Error('Timeout waiting for User B RGB channel');
+      const chanB = await lspB.waitForChannel(ASSET_ID, {
+        timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
+        pollIntervalMs: 3_000,
+        onProgress: (msg) => addLog(`userB ${msg}`),
+        onEachPoll: () => mine(1),
+      });
+      setChannelInfoB(chanB);
       addLog('User B RGB channel usable ✓', 'success');
 
       await refreshTransfers(LSP_DAEMON_URL);
@@ -475,27 +455,15 @@ export default function LspScreen() {
       // Mirrors flows.py:run_lightning_receive_flow exactly.
       setPhase('lsp_flow');
 
-      req('userA.createLightningInvoice', { amtMsat: PAYMENT_MSAT, assetId: short(ASSET_ID), assetAmount: PAYMENT_ASSET_AMOUNT });
-      const invResult = await wA.createLightningInvoice({
+      req('lspA.receiveAsset', { assetId: short(ASSET_ID), amountSats: PAYMENT_MSAT / 1000, amountRgb: PAYMENT_ASSET_AMOUNT });
+      const { lnInvoice: aInvoice, rgbInvoice } = await lspA.receiveAsset({
+        assetId:    ASSET_ID,
         amountSats: PAYMENT_MSAT / 1000,
-        expirySeconds: 3600,
-        asset: { assetId: ASSET_ID, amount: PAYMENT_ASSET_AMOUNT },
+        amountRgb:  PAYMENT_ASSET_AMOUNT,
       });
-      const aInvoice = invResult.lnInvoice;
       setLnInvoiceA(aInvoice);
-      res('userA.createLightningInvoice', { invoice: short(aInvoice, 32) });
-
-      req('lsp.lightningReceive', { assetId: short(ASSET_ID) });
-      const lr = await lsp.lightningReceive({
-        lnInvoice: aInvoice,
-        rgb: { assetId: ASSET_ID },
-      });
-      const rgbInvoice = lr.rgbInvoice;
       setRgbInvoiceLsp(rgbInvoice);
-      res('lsp.lightningReceive', {
-        rgbInvoice: short(rgbInvoice, 32),
-        mappingId: lr.mappingId,
-      });
+      res('lspA.receiveAsset', { lnInvoice: short(aInvoice, 32), rgbInvoice: short(rgbInvoice, 32) });
 
       // ── Faucet sends RGB to LSP's invoice ─────────────────────────────────
       // Mirrors: env.faucet.decodergbinvoice + env.faucet.sendrgb
@@ -564,34 +532,14 @@ export default function LspScreen() {
       if (!rgbDeliverySettled) addLog('RGB delivery settlement timeout — LSP may still be processing');
       else addLog('Faucet Send + LSP receive both Settled ✓', 'success');
 
-      // ── Poll User A LN invoice until Succeeded ────────────────────────────
-      // Mirrors: wait_until(user_a_invoice_succeeded) in flows.py.
-      // flows.py checks invoicestatus == "Succeeded"; SDK may return "Settled" — accept both.
-      addLog(`Polling userA invoice status …`);
+      addLog('Waiting for userA LN invoice to settle …');
       setInvoiceStatus('Pending');
-      const payDeadline = Date.now() + PAYMENT_TIMEOUT_S * 1000;
-      let lnSettled = false;
-      while (Date.now() < payDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_INTERVAL_S * 1000);
-        try {
-          await wA.syncWallet();
-          const status = await wA.getLightningReceiveRequest(aInvoice);
-          setInvoiceStatus(status ?? 'Pending');
-          addLog(`userA invoice: ${status}`);
-          if (String(status) === 'Succeeded' || String(status) === 'Settled') { lnSettled = true; break; }
-          if (status === 'Failed') throw new Error('User A LN invoice failed');
-        } catch (e: any) {
-          if ((e?.message ?? '').includes('failed')) throw e;
-          console.error('[lsp] invoice poll:', e?.message ?? e);
-        }
-      }
-
-      if (lnSettled) {
-        addLog('userA LN invoice Succeeded ✓ — LSP paid via RGB channel!', 'success');
-      } else {
-        addLog('Invoice settlement timeout — check utexo-lsp logs', 'error');
-      }
+      await lspA.awaitReceiveSettlement(aInvoice, {
+        timeoutMs:      PAYMENT_TIMEOUT_S * 1000,
+        pollIntervalMs: POLL_INTERVAL_S * 1000,
+        onProgress: (s) => { setInvoiceStatus(s); addLog(`userA invoice: ${s}`); },
+      });
+      addLog('userA LN invoice Succeeded ✓ — LSP paid via RGB channel!', 'success');
 
       // final asset balance on User A — sync first so offchain balance is fresh
       try {
@@ -615,19 +563,11 @@ export default function LspScreen() {
       // Wait for User A outbound_balance_msat >= PAYMENT_MSAT before paying.
       // Mirrors test_flow0_full_e2e.py user_a_has_outbound_liquidity check.
       addLog('Waiting for User A outbound RGB balance to cover payment …');
-      const outboundDeadline = Date.now() + CHANNEL_TIMEOUT_S * 1000;
-      while (Date.now() < outboundDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await wA.syncWallet();
-        const channels = (await wA.listChannels()) ?? [];
-        const lspChan = (channels as any[]).find((c: any) =>
-          (c.peerPubkey || c.peer_pubkey) === LSP_PEER_PUBKEY && (c.isUsable || c.is_usable)
-        );
-        const outboundMsat = lspChan?.outboundBalanceMsat ?? lspChan?.outbound_balance_msat ?? 0;
-        addLog(`userA outbound: ${outboundMsat} msat (need ${PAYMENT_MSAT})`);
-        if (outboundMsat >= PAYMENT_MSAT) break;
-        await sleep(POLL_INTERVAL_S * 1000);
-      }
+      await lspA.waitForOutboundLiquidity(PAYMENT_MSAT, {
+        timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
+        pollIntervalMs: POLL_INTERVAL_S * 1000,
+        onProgress: (msg) => addLog(msg),
+      });
       addLog('User A outbound balance ready ✓', 'success');
 
       await wA.syncWallet();
@@ -654,32 +594,15 @@ export default function LspScreen() {
       res('userA.payLightningInvoice', { status: (payResult as any)?.status ?? 'sent' });
       if (payStatus === 'failed') throw new Error('userA.payLightningInvoice failed immediately — check channel balance and route');
 
-      // Poll until User B invoice Succeeded
       setPhase('p2_settle');
-      addLog('Polling userB invoice status …');
+      addLog('Waiting for userB invoice to settle …');
       setInvoiceStatusB('Pending');
-      const p2Deadline = Date.now() + PAYMENT_TIMEOUT_S * 1000;
-      let p2Settled = false;
-      while (Date.now() < p2Deadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_INTERVAL_S * 1000);
-        try {
-          await wB.syncWallet();
-          const statusB = await wB.getLightningReceiveRequest(bInvoice);
-          setInvoiceStatusB(statusB ?? 'Pending');
-          addLog(`userB invoice: ${statusB}`);
-          if (String(statusB) === 'Succeeded' || String(statusB) === 'Settled') { p2Settled = true; break; }
-          if (statusB === 'Failed') throw new Error('User B LN invoice failed');
-        } catch (e: any) {
-          if ((e?.message ?? '').includes('failed')) throw e;
-        }
-      }
-
-      if (p2Settled) {
-        addLog('userB LN invoice Succeeded ✓ — User A paid User B via RGB Lightning!', 'success');
-      } else {
-        addLog('Part 2 settlement timeout', 'error');
-      }
+      await lspB.awaitReceiveSettlement(bInvoice, {
+        timeoutMs:      PAYMENT_TIMEOUT_S * 1000,
+        pollIntervalMs: POLL_INTERVAL_S * 1000,
+        onProgress: (s) => { setInvoiceStatusB(s); addLog(`userB invoice: ${s}`); },
+      });
+      addLog('userB LN invoice Succeeded ✓ — User A paid User B via RGB Lightning!', 'success');
 
       // Poll offchain balance delta — mirrors test_flow0 wait_until(offchain_balances_updated).
       // NOTE: rlnAssetBalance native binding currently returns only {settled,future,spendable}.

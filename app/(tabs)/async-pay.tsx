@@ -2,7 +2,7 @@
  * Async Payment tab — demonstrates the full apay flow:
  *
  * Phase 1 — Recipient (User B) registers a hash pool with the LSP:
- *   wallet.apayRegisterHashPool(lspNodePubkey)
+ *   wallet.apayNew(lspNodePubkey)
  *   Internally: Recipient RLN → Host RLN (P2P) → utexo-lsp /internal/async_order/new
  *   GET ${LSP_URL}/lightning_address/by_pubkey/${userBPubkey} → username + domain
  *
@@ -39,8 +39,9 @@ import { mine, sendToAddress } from '@/utils/wallet-flow';
 import {
   createWallet,
   PasswordRLNSigner,
-  UtexoLSPClient,
+  UtexoLsp,
   UTEXOWallet,
+  type LspPeer,
 } from '@utexo/rgb-sdk-rn';
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -49,7 +50,6 @@ const _host = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
 
 const LSP_URL        = `http://${_host}:8080`;
 const LSP_DAEMON_URL = `http://${_host}:3005`;
-const lspClient      = new UtexoLSPClient({ baseUrl: LSP_URL });
 
 const ASSET_ID    = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID ?? '';
 const LSP_LDK_PORT = Number(process.env.EXPO_PUBLIC_LSP_REGTEST_LDK_PORT ?? '9737');
@@ -230,6 +230,13 @@ export default function AsyncPayScreen() {
       if (!LSP_PEER_PUBKEY) throw new Error('Could not fetch LSP pubkey — is the LSP daemon running?');
       addLog(`LSP pubkey (full): ${LSP_PEER_PUBKEY}`, 'success');
 
+      const LSP_PEER: LspPeer = {
+        baseUrl:    LSP_URL,
+        peerPubkey: LSP_PEER_PUBKEY,
+        peerHost:   _host,
+        peerPort:   LSP_LDK_PORT,
+      };
+
       const keysB = await createWallet('regtest' as any);
       const tsB   = Date.now();
       const portB = 40000 + Math.floor(Math.random() * 2000);
@@ -255,6 +262,7 @@ export default function AsyncPayScreen() {
         new PasswordRLNSigner('apaypassB', keysB.mnemonic),
       );
       walletBRef.current = wB;
+      const lspB = wB.createLsp(LSP_PEER);
       await wB.init();
       await wB.unlock(REGTEST_UNLOCK);
 
@@ -289,30 +297,22 @@ export default function AsyncPayScreen() {
       setPhase('b_channel');
 
       const lspPeerUri = `${LSP_PEER_PUBKEY}@${_host}:${LSP_LDK_PORT}`;
-      req('userB.connectPeer', { peer: short(lspPeerUri, 40) });
-      try { await wB.connectPeer(lspPeerUri); res('userB.connectPeer'); }
-      catch (e: any) { addLog(`connectPeer B (ignored): ${e?.message ?? String(e)}`); }
+      req('lspB.connect');
+      await lspB.connect();
+      res('lspB.connect');
 
       addLog('Mining 2 blocks to trigger LSP channel open for User B…');
       await mine(2);
       await sleep(6000);
 
       addLog('Waiting for RGB channel usable on User B…');
-      const chanDeadlineB = Date.now() + CHANNEL_TIMEOUT_S * 1000;
-      let bChannelReady = false;
-      while (Date.now() < chanDeadlineB) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await mine(1);
-        await sleep(3000);
-        await wB.syncWallet();
-        const channels = (await wB.listChannels()) ?? [];
-        const rgbChan  = (channels as any[]).find((c: any) =>
-          (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
-        );
-        addLog(`userB channels: ${channels.length} total  RGB usable: ${rgbChan ? 'YES' : 'no'}`);
-        if (rgbChan) { setChannelB(rgbChan); bChannelReady = true; break; }
-      }
-      if (!bChannelReady) throw new Error('Timeout waiting for User B RGB channel');
+      const chanB = await lspB.waitForChannel(ASSET_ID, {
+        timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
+        pollIntervalMs: 3_000,
+        onProgress:  (msg) => addLog(`userB ${msg}`),
+        onEachPoll:  () => mine(1),
+      });
+      setChannelB(chanB);
       addLog('User B RGB channel usable ✓', 'success');
 
       // Give the node a moment to stabilise onion messaging after channel open.
@@ -343,11 +343,11 @@ export default function AsyncPayScreen() {
       catch (e: any) { addLog(`re-connect (ignored): ${e?.message ?? String(e)}`); }
       await sleep(1000);
 
-      req('userB.apayRegisterHashPool', { hostNodeId: short(LSP_PEER_PUBKEY) });
+      req('userB.apayNew', { hostNodeId: short(LSP_PEER_PUBKEY) });
 
       let pool: any;
       try {
-        pool = await wB.apayRegisterHashPool(LSP_PEER_PUBKEY);
+        pool = await wB.apayNew(LSP_PEER_PUBKEY);
       } catch (apayErr: any) {
         addLog(`apayNew error: code=${apayErr?.code} name=${apayErr?.name} msg=${apayErr?.message ?? String(apayErr)}`, 'error');
         addLog(`apayNew keys: ${Object.keys(apayErr ?? {}).join(', ')}`, 'error');
@@ -355,7 +355,7 @@ export default function AsyncPayScreen() {
         throw apayErr;
       }
       setHashPoolInfo(pool);
-      res('apayRegisterHashPool', {
+      res('apayNew', {
         orderId:              short(pool.orderId),
         status:               pool.status,
         unusedHashes:         pool.unusedHashes,
@@ -365,7 +365,7 @@ export default function AsyncPayScreen() {
       addLog(`Hash pool registered ✓  ${pool.hashes.length} hashes issued to LSP`, 'success');
 
       req('GET /lightning_address/by_pubkey/{pubkey}', { pubkey: short(bPubkey) });
-      const lnaddr = await lspClient.getLightningAddressByPubkey(bPubkey);
+      const lnaddr = await lspB.http.getLightningAddressByPubkey(bPubkey);
       setLnaddrUsername(lnaddr.username);
       setLnaddrDomain(lnaddr.domain);
       res('lightningAddressByPubkey', {
@@ -402,6 +402,7 @@ export default function AsyncPayScreen() {
         new PasswordRLNSigner('apaypassA', keysA.mnemonic),
       );
       walletARef.current = wA;
+      const lspA = wA.createLsp(LSP_PEER);
       await wA.init();
       await wA.unlock(REGTEST_UNLOCK);
       res('userA.init', { pubkey: short(String((await wA.getNodeInfo())?.pubkey ?? '')) });
@@ -431,30 +432,22 @@ export default function AsyncPayScreen() {
       // ── Connect User A to LSP, wait for channel ───────────────────────────
       setPhase('a_channel');
 
-      req('userA.connectPeer', { peer: short(lspPeerUri, 40) });
-      try { await wA.connectPeer(lspPeerUri); res('userA.connectPeer'); }
-      catch (e: any) { addLog(`connectPeer A (ignored): ${e?.message ?? String(e)}`); }
+      req('lspA.connect');
+      await lspA.connect();
+      res('lspA.connect');
 
       addLog('Mining 2 blocks to trigger LSP channel open for User A…');
       await mine(2);
       await sleep(6000);
 
       addLog('Waiting for RGB channel usable on User A…');
-      const chanDeadlineA = Date.now() + CHANNEL_TIMEOUT_S * 1000;
-      let aChannelReady = false;
-      while (Date.now() < chanDeadlineA) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await mine(1);
-        await sleep(3000);
-        await wA.syncWallet();
-        const channels = (await wA.listChannels()) ?? [];
-        const rgbChan  = (channels as any[]).find((c: any) =>
-          (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
-        );
-        addLog(`userA channels: ${channels.length} total  RGB usable: ${rgbChan ? 'YES' : 'no'}`);
-        if (rgbChan) { setChannelA(rgbChan); aChannelReady = true; break; }
-      }
-      if (!aChannelReady) throw new Error('Timeout waiting for User A RGB channel');
+      const chanA = await lspA.waitForChannel(ASSET_ID, {
+        timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
+        pollIntervalMs: 3_000,
+        onProgress:  (msg) => addLog(`userA ${msg}`),
+        onEachPoll:  () => mine(1),
+      });
+      setChannelA(chanA);
       addLog('User A RGB channel usable ✓', 'success');
 
       // ─────────────────────────────────────────────────────────────────────
@@ -471,7 +464,7 @@ export default function AsyncPayScreen() {
         throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID is required for async-pay (RGB legs avoid Host sendpayment hash collision)');
       }
       req('GET /.well-known/lnurlp/{username} → callback', { username, amtMsat: PAYMENT_MSAT, assetId: ASSET_ID, assetAmount: PAYMENT_ASSET_AMOUNT });
-      const callbackData = await lspClient.resolveAddress(username, PAYMENT_MSAT, ASSET_ID, PAYMENT_ASSET_AMOUNT);
+      const callbackData = await lspA.http.resolveAddress(username, PAYMENT_MSAT, ASSET_ID, PAYMENT_ASSET_AMOUNT);
       if (!callbackData.pr) throw new Error('LNURL callback returned no invoice (pr)');
 
       setHodlBolt11(callbackData.pr);
@@ -649,7 +642,7 @@ export default function AsyncPayScreen() {
               {'Demonstrates the complete async payment (apay) protocol — three parts:\n\n' +
                'Part 1 — Recipient (User B) registers a hash pool:\n' +
                'User B creates an RGB channel with the LSP, then calls\n' +
-               'apayRegisterHashPool(lspNodePubkey). Internally the RLN node\n' +
+               'apayNew(lspNodePubkey). Internally the RLN node\n' +
                'sends hashes to the Host RLN via P2P onion messages. The LSP\n' +
                'stores the pool and creates a Lightning Address for User B.\n\n' +
                'Part 2 — Sender (User A) pays via LNURL-pay:\n' +
@@ -700,7 +693,7 @@ export default function AsyncPayScreen() {
                 case 'b_fund':    return 'Funding User B (sendToAddress + mine 6)…';
                 case 'b_utxos':   return 'Creating UTXOs for User B…';
                 case 'b_channel': return 'Waiting for LSP → User B RGB channel…';
-                case 'register':  return 'Registering hash pool with LSP (apayRegisterHashPool)…';
+                case 'register':  return 'Registering hash pool with LSP (apayNew)…';
                 case 'a_init':    return 'Creating User A (sender) node…';
                 case 'a_fund':    return 'Funding User A…';
                 case 'a_utxos':   return 'Creating UTXOs for User A…';
@@ -722,7 +715,7 @@ export default function AsyncPayScreen() {
 
         {/* Hash pool card */}
         {hashPoolInfo && (
-          <InfoCard title="Hash Pool (apayRegisterHashPool)" accent={AppColors.primary} rows={[
+          <InfoCard title="Hash Pool (apayNew)" accent={AppColors.primary} rows={[
             ['Order ID',   short(hashPoolInfo.orderId, 28)],
             ['Status',     hashPoolInfo.status],
             ['Hashes',     `${hashPoolInfo.hashes.length} issued`],
