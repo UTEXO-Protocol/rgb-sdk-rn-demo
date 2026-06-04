@@ -12,6 +12,7 @@ expo-env.d.ts
 .env.utexo
 .env.local
 .env
+/scripts/start-lsp-local.sh
 # Native
 .kotlin/
 *.orig.*

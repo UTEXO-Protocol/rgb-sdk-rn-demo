@@ -123,6 +123,24 @@ async function refreshTransfers(daemonUrl: string): Promise<void> {
   await daemonPost(daemonUrl, '/refreshtransfers', { skip_sync: false });
 }
 
+// ── Demo helpers: faucet daemon (external RLN node, NOT the SDK) ─────────────
+const faucet = {
+  assetBalance:     (assetId: string) => daemonPost(FAUCET_DAEMON_URL, '/assetbalance',     { asset_id: assetId }),
+  decodeRgbInvoice: (invoice: string) => daemonPost(FAUCET_DAEMON_URL, '/decodergbinvoice', { invoice }),
+  sendRgb:          (body: object)    => daemonPost(FAUCET_DAEMON_URL, '/sendrgb',           body),
+  listTransfers:    (assetId: string) => daemonPost(FAUCET_DAEMON_URL, '/listtransfers',     { asset_id: assetId }),
+  refresh:          ()                => refreshTransfers(FAUCET_DAEMON_URL),
+  refreshOnce:      ()                => daemonPost(FAUCET_DAEMON_URL, '/refreshtransfers',  { skip_sync: false }),
+};
+
+// ── Demo helpers: LSP daemon (external RLN node, NOT the SDK) ────────────────
+const lspDaemon = {
+  nodeInfo:      ()                => daemonGet(LSP_DAEMON_URL,  '/nodeinfo'),
+  listTransfers: (assetId: string) => daemonPost(LSP_DAEMON_URL, '/listtransfers', { asset_id: assetId }),
+  refresh:       ()                => refreshTransfers(LSP_DAEMON_URL),
+  refreshOnce:   ()                => daemonPost(LSP_DAEMON_URL, '/refreshtransfers', { skip_sync: false }),
+};
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 const PHASES_P1: Phase[] = ['preflight', 'init', 'fund', 'utxos', 'channel', 'b_init', 'b_channel', 'lsp_flow', 'rgb_send', 'settle'];
@@ -269,11 +287,11 @@ export default function LspScreen() {
       }
 
       req('lsp daemon.nodeinfo');
-      const lspDaemonInfo = await daemonGet(LSP_DAEMON_URL, '/nodeinfo');
-      res('lsp daemon.nodeinfo', { pubkey: short(lspDaemonInfo.pubkey), assetChannels: lspDaemonInfo.num_channels });
+      const lspDaemonNodeInfoData = await lspDaemon.nodeInfo();
+      res('lsp daemon.nodeinfo', { pubkey: short(lspDaemonNodeInfoData.pubkey), assetChannels: lspDaemonNodeInfoData.num_channels });
 
       req('faucet daemon.assetbalance', { assetId: short(ASSET_ID) });
-      const faucetBal = await daemonPost(FAUCET_DAEMON_URL, '/assetbalance', { asset_id: ASSET_ID });
+      const faucetBal = await faucet.assetBalance(ASSET_ID);
       res('faucet.assetbalance', { settled: faucetBal.settled, spendable: faucetBal.spendable });
       if (Number(faucetBal.settled) < 1) {
         throw new Error(`Faucet has no settled RGB balance (${faucetBal.settled}) — run start-lsp-regtest.sh`);
@@ -386,8 +404,8 @@ export default function LspScreen() {
 
       // refresh_transfers + sync before User B setup
       // mirrors conftest.py: refresh_transfers + sync_sdk_nodes + mine(2) between connects
-      await daemonPost(LSP_DAEMON_URL,    '/refreshtransfers', { skip_sync: false });
-      await daemonPost(FAUCET_DAEMON_URL, '/refreshtransfers', { skip_sync: false });
+      await lspDaemon.refreshOnce();
+      await faucet.refreshOnce();
       await wA.syncWallet();
       await mine(2);
 
@@ -447,7 +465,7 @@ export default function LspScreen() {
       setChannelInfoB(chanB);
       addLog('User B RGB channel usable ✓', 'success');
 
-      await refreshTransfers(LSP_DAEMON_URL);
+      await lspDaemon.refresh();
       await wA.syncWallet();
       await wB.syncWallet();
 
@@ -470,7 +488,7 @@ export default function LspScreen() {
       setPhase('rgb_send');
 
       req('faucet.decodergbinvoice');
-      const decoded = await daemonPost(FAUCET_DAEMON_URL, '/decodergbinvoice', { invoice: rgbInvoice });
+      const decoded = await faucet.decodeRgbInvoice(rgbInvoice);
       const recipientId = decoded.recipient_id;
       const transportEndpoints = decoded.transport_endpoints ?? [`rpc://${_host}:3000/json-rpc`];
       // Use assignment from invoice; fall back to FAUCET_PAY_AMOUNT if value is 0 (mirrors flows.py)
@@ -480,7 +498,7 @@ export default function LspScreen() {
       res('faucet.decodergbinvoice', { recipientId: short(recipientId, 24), endpoints: transportEndpoints.length });
 
       req('faucet.sendrgb', { amount: assignment.value, recipientId: short(recipientId, 20) });
-      await daemonPost(FAUCET_DAEMON_URL, '/sendrgb', {
+      await faucet.sendRgb({
         donation: false,
         fee_rate: 7,
         min_confirmations: 1,
@@ -500,8 +518,8 @@ export default function LspScreen() {
       await sleep(2000);
 
       req('refreshtransfers lsp + faucet (×2)');
-      await refreshTransfers(LSP_DAEMON_URL);
-      await refreshTransfers(FAUCET_DAEMON_URL);
+      await lspDaemon.refresh();
+      await faucet.refresh();
       res('refreshtransfers');
 
       // ── Poll faucet Send + LSP ReceiveBlind both Settled ─────────────────
@@ -515,10 +533,10 @@ export default function LspScreen() {
         await mine(1); // mirrors flows.py rgb_delivery_settled: mine each iteration
         await sleep(POLL_INTERVAL_S * 1000);
         try {
-          await refreshTransfers(LSP_DAEMON_URL);
-          await refreshTransfers(FAUCET_DAEMON_URL);
-          const faucetTransfers = await daemonPost(FAUCET_DAEMON_URL, '/listtransfers', { asset_id: ASSET_ID });
-          const lspTransfers    = await daemonPost(LSP_DAEMON_URL,    '/listtransfers', { asset_id: ASSET_ID });
+          await lspDaemon.refresh();
+          await faucet.refresh();
+          const faucetTransfers = await faucet.listTransfers(ASSET_ID);
+          const lspTransfers    = await lspDaemon.listTransfers(ASSET_ID);
           const faucetSend = [...(faucetTransfers.transfers ?? [])].reverse().find((t: any) => t.kind === 'Send');
           const lspReceive = [...(lspTransfers.transfers    ?? [])].reverse().find((t: any) => t.kind === 'ReceiveBlind');
           addLog(`faucet Send: ${faucetSend?.status ?? 'none'}  LSP receive: ${lspReceive?.status ?? 'none'}`);
