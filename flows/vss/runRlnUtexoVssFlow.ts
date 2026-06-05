@@ -75,9 +75,6 @@ export async function runRlnUtexoVssFlow() {
       vssUrl,
       vssAllowHttp: vssUrl.startsWith('http://'),
       vssAllowEmptyRestore: false,
-      xpubVan: keysA.accountXpubVanilla,
-      xpubCol: keysA.accountXpubColored,
-      masterFingerprint: keysA.masterFingerprint,
     }));
     console.log('[vss] walletB params', JSON.stringify({
       storageDirPath: storageDirB,
@@ -97,9 +94,6 @@ export async function runRlnUtexoVssFlow() {
         vssUrl,
         vssAllowHttp: vssUrl.startsWith('http://'),
         vssAllowEmptyRestore: false,
-        xpubVan: keysA.accountXpubVanilla,
-        xpubCol: keysA.accountXpubColored,
-        masterFingerprint: keysA.masterFingerprint,
       },
       new PasswordRLNSigner(password, keysA.mnemonic),
     );
@@ -111,9 +105,6 @@ export async function runRlnUtexoVssFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysB.accountXpubVanilla,
-        xpubCol: keysB.accountXpubColored,
-        masterFingerprint: keysB.masterFingerprint,
       },
       new PasswordRLNSigner(password, keysB.mnemonic),
     );
@@ -301,9 +292,6 @@ export async function runRlnUtexoVssFlow() {
         vssUrl,
         vssAllowHttp: vssUrl.startsWith('http://'),
         vssAllowEmptyRestore: false,
-        xpubVan: keysA.accountXpubVanilla,
-        xpubCol: keysA.accountXpubColored,
-        masterFingerprint: keysA.masterFingerprint,
       },
       new PasswordRLNSigner(password, keysA.mnemonic),
     );

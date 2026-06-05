@@ -357,15 +357,13 @@ export default function UtexoScreen() {
       const wA = new UTEXOWallet(
         { storageDirPath: storageDirA, daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
-          xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored,
-          masterFingerprint: keysA.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
       const wB = new UTEXOWallet(
         { storageDirPath: storageDirB, daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
-          xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored,
-          masterFingerprint: keysB.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
       walletARef.current = wA;

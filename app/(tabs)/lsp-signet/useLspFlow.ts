@@ -130,7 +130,7 @@ export function useLspFlow() {
       const wA = new UTEXOWallet(
         { storageDirPath: await mkDir('a'), daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
           network: 'utexo', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
-          xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored, masterFingerprint: keysA.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
       walletARef.current = wA;
@@ -183,7 +183,7 @@ export function useLspFlow() {
       const wB = new UTEXOWallet(
         { storageDirPath: await mkDir('b'), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
           network: 'utexo', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
-          xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored, masterFingerprint: keysB.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
       walletBRef.current = wB;

@@ -676,9 +676,9 @@ export default function FlowsScreen() {
     ? buildRegtestConfig().unlockParams
     : buildUtexoConfig().unlockParams;
   const activeUnlockRows: [string, string][] = [
-    ['host', `${activeUnlockParams.bitcoindRpcHost}:${activeUnlockParams.bitcoindRpcPort}`],
-    ['indexer', activeUnlockParams.indexerUrl],
-    ['proxy', activeUnlockParams.proxyEndpoint],
+    ['host', `${activeUnlockParams.bitcoindRpcHost ?? '(default)'}:${activeUnlockParams.bitcoindRpcPort ?? '(default)'}`],
+    ['indexer', activeUnlockParams.indexerUrl ?? '(network default)'],
+    ['proxy', activeUnlockParams.proxyEndpoint ?? '(network default)'],
   ];
 
 

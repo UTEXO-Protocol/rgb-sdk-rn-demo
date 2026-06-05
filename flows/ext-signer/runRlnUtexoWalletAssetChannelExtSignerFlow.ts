@@ -51,9 +51,6 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysA.accountXpubVanilla,
-        xpubCol: keysA.accountXpubColored,
-        masterFingerprint: keysA.masterFingerprint,
       },
       new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
     );
@@ -67,9 +64,6 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysB.accountXpubVanilla,
-        xpubCol: keysB.accountXpubColored,
-        masterFingerprint: keysB.masterFingerprint,
       },
       new NativeExternalRLNSigner(keysB.mnemonic, network),
     );

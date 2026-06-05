@@ -1,3 +1,4 @@
+import type { IRLNUnlockParams } from '@utexo/rgb-sdk-rn';
 import { Platform } from 'react-native';
 
 export function readEnv(name: string): string | null {
@@ -49,7 +50,7 @@ export function buildUtexoConfig() {
       // announceAddresses: [] as string[],
       // announceAlias: null as string | null,
       // gossipRgsServerUrl,
-    },
+    } as IRLNUnlockParams,
   };
 }
 
@@ -69,11 +70,11 @@ export function buildRegtestConfig() {
       // bitcoindRpcPassword: rpcPassword,
       // bitcoindRpcHost: rpcHost,
       // bitcoindRpcPort: rpcPort ? Number(rpcPort) : null,
-      // indexerUrl,
-      // proxyEndpoint,
+      indexerUrl,
+      proxyEndpoint,
       announceAddresses: [] as string[],
       announceAlias: null as string | null,
       // gossipRgsServerUrl: readEnv('RLN_GOSSIP_RGS_URL'),
-    },
+    } as IRLNUnlockParams,
   };
 }

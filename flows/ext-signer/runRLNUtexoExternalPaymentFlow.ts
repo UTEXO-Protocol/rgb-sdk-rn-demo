@@ -57,9 +57,6 @@ export async function runRLNUtexoExternalPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysA.accountXpubVanilla,
-        xpubCol: keysA.accountXpubColored,
-        masterFingerprint: keysA.masterFingerprint,
       },
       new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
     );
@@ -72,9 +69,6 @@ export async function runRLNUtexoExternalPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysB.accountXpubVanilla,
-        xpubCol: keysB.accountXpubColored,
-        masterFingerprint: keysB.masterFingerprint,
       },
       new NativeExternalRLNSigner(keysB.mnemonic, network),
     );
@@ -86,9 +80,6 @@ export async function runRLNUtexoExternalPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysC.accountXpubVanilla,
-        xpubCol: keysC.accountXpubColored,
-        masterFingerprint: keysC.masterFingerprint,
       },
       new PasswordRLNSigner(nodeCPassword, keysC.mnemonic),
     );

@@ -57,9 +57,6 @@ export async function runRLNUtexoPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysA.accountXpubVanilla,
-        xpubCol: keysA.accountXpubColored,
-        masterFingerprint: keysA.masterFingerprint,
       },
       new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
     );
@@ -71,9 +68,6 @@ export async function runRLNUtexoPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysB.accountXpubVanilla,
-        xpubCol: keysB.accountXpubColored,
-        masterFingerprint: keysB.masterFingerprint,
       },
       new PasswordRLNSigner(nodeBPassword, keysB.mnemonic),
     );
@@ -85,9 +79,6 @@ export async function runRLNUtexoPaymentFlow() {
         network,
         maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
-        xpubVan: keysC.accountXpubVanilla,
-        xpubCol: keysC.accountXpubColored,
-        masterFingerprint: keysC.masterFingerprint,
       },
       new PasswordRLNSigner(nodeCPassword, keysC.mnemonic),
     );
@@ -98,7 +89,7 @@ export async function runRLNUtexoPaymentFlow() {
 
     addStep('wPayAUnlock', 'running');
     await nodeA.unlock(unlockParams);
-    addStep('wPayAUnlock', 'success', {});
+    addStep('wPayAUnlock', 'success', { unlockParams });
 
     // issue #23 — optional regression check: estimateFeeRate can throw Conflict right after unlock; not required for the flow.
     // const feeEstimate = await nodeA.estimateFeeRate(6);
@@ -113,7 +104,7 @@ export async function runRLNUtexoPaymentFlow() {
 
     addStep('wPayBUnlock', 'running');
     await nodeB.unlock(unlockParams);
-    addStep('wPayBUnlock', 'success', {});
+    addStep('wPayBUnlock', 'success', { unlockParams });
 
     addStep('wPayCInit', 'running');
     await nodeC.init();
@@ -121,7 +112,7 @@ export async function runRLNUtexoPaymentFlow() {
 
     addStep('wPayCUnlock', 'running');
     await nodeC.unlock(unlockParams);
-    addStep('wPayCUnlock', 'success', {});
+    addStep('wPayCUnlock', 'success', { unlockParams });
 
     addStep('wPayAFund', 'running');
     const addrA = await nodeA.getAddress();
