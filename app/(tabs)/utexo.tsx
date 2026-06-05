@@ -373,6 +373,7 @@ export default function UtexoScreen() {
 
       // ── 3. Init ────────────────────────────────────────────────────────────
       req('nodeA.init');
+      console.log('wA', wA);
       await wA.init();
       res('nodeA.init');
 
@@ -382,6 +383,7 @@ export default function UtexoScreen() {
 
       // ── 4. Unlock ──────────────────────────────────────────────────────────
       const unlockParams = isRegtest ? REGTEST_UNLOCK : UTEXO_UNLOCK;
+      console.log('unlockParams', unlockParams);
       req('nodeA.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
       await wA.unlock(unlockParams);
       res('nodeA.unlock');
