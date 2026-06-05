@@ -13,20 +13,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
+import { buildUtexoConfig } from '@/utils/env';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
 import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
-// ── UTEXO node credentials (set via .env.utexo.local) ────────────────────────
-const UTEXO_UNLOCK = {
-  bitcoindRpcUsername: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_USERNAME?.trim() || '',
-  bitcoindRpcPassword: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PASSWORD?.trim() || '',
-  bitcoindRpcHost: process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST?.trim() || '',
-  bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_UTEXO_BITCOIND_RPC_PORT?.trim() || '38332'),
-  indexerUrl: process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() || 'https://esplora-api.utexo.com',
-  proxyEndpoint: process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy.utexo.com/json-rpc',
-  announceAddresses: [] as string[],
-  announceAlias: null as string | null,
-};
+// ── UTEXO node credentials (set in .env.local) ───────────────────────────────
+const UTEXO_UNLOCK = buildUtexoConfig().unlockParams;
 
 // ── Local regtest node credentials ────────────────────────────────────────────
 const _rpcHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
@@ -365,15 +357,13 @@ export default function UtexoScreen() {
       const wA = new UTEXOWallet(
         { storageDirPath: storageDirA, daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
-          xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored,
-          masterFingerprint: keysA.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
       const wB = new UTEXOWallet(
         { storageDirPath: storageDirB, daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
           network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
-          xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored,
-          masterFingerprint: keysB.masterFingerprint },
+        },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
       walletARef.current = wA;
@@ -392,11 +382,11 @@ export default function UtexoScreen() {
       // ── 4. Unlock ──────────────────────────────────────────────────────────
       const unlockParams = isRegtest ? REGTEST_UNLOCK : UTEXO_UNLOCK;
       console.log('unlockParams', unlockParams);
-      req('nodeA.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
+      req('nodeA.unlock', { indexer: unlockParams.indexerUrl, proxy: unlockParams.proxyEndpoint });
       await wA.unlock(unlockParams);
       res('nodeA.unlock');
 
-      req('nodeB.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
+      req('nodeB.unlock', { indexer: unlockParams.indexerUrl, proxy: unlockParams.proxyEndpoint });
       await wB.unlock(unlockParams);
       res('nodeB.unlock');
 

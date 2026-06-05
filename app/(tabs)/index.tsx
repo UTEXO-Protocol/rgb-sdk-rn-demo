@@ -15,188 +15,100 @@ import { AppColors } from '@/constants/theme';
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
-const SDK_SECTIONS = [
+type Item = {
+  name: string;
+  sig: string;   // compact TypeScript signature: "(params) → ReturnType"
+  desc: string;
+};
+
+type Section = {
+  title: string;
+  items: Item[];
+};
+
+const SDK_SECTIONS: Section[] = [
   {
     title: 'Standalone Functions',
     items: [
-      { name: 'wallet', desc: 'Singleton proxy to WalletManager' },
-      { name: 'generateKeys()', desc: 'Generate fresh keypair for any network' },
-      { name: 'createWallet()', desc: 'Convenience: generateKeys on regtest' },
-      { name: 'createWalletManager()', desc: 'Instantiate a WalletManager from params' },
-      { name: 'deriveKeysFromMnemonic()', desc: 'Derive keys from BIP-39 mnemonic' },
-      { name: 'deriveKeysFromSeed()', desc: 'Derive keys from raw seed bytes / hex' },
-      { name: 'deriveKeysFromXpriv()', desc: 'Derive keys from extended private key' },
-      { name: 'deriveKeysFromMnemonicOrSeed()', desc: 'Auto-detects mnemonic vs seed' },
-      { name: 'restoreKeys()', desc: 'Alias for deriveKeysFromMnemonic' },
-      { name: 'accountXpubsFromMnemonic()', desc: 'Return vanilla + colored account xpubs' },
-      { name: 'getXprivFromMnemonic()', desc: 'Return master xpriv from mnemonic' },
-      { name: 'getXpubFromXpriv()', desc: 'Derive xpub from xpriv' },
-      { name: 'signPsbt()', desc: 'Sign a PSBT using mnemonic' },
-      { name: 'signPsbtSync()', desc: 'Synchronous PSBT signing' },
-      { name: 'signPsbtFromSeed()', desc: 'Seed-based PSBT signing (RN: throws)' },
-      { name: 'signMessage()', desc: 'Sign an arbitrary message' },
-      { name: 'verifyMessage()', desc: 'Verify a message signature' },
-      { name: 'restoreFromBackup()', desc: 'Restore wallet from encrypted backup file' },
-      { name: 'restoreFromVss()', desc: 'Restore wallet from VSS server' },
-      { name: 'toUnitsNumber()', desc: 'Convert decimal amount to base units' },
-      { name: 'fromUnitsNumber()', desc: 'Convert base units to decimal amount' },
-    ],
-  },
-  {
-    title: 'WalletManager',
-    items: [
-      { name: 'initialize()', desc: 'Connect to indexer and go online' },
-      { name: 'goOnline()', desc: 'Explicitly connect to an indexer URL' },
-      { name: 'getXpub()', desc: 'Return vanilla + colored account xpubs' },
-      { name: 'getNetwork()', desc: 'Return the configured network' },
-      { name: 'isDisposed()', desc: 'Check if wallet is closed' },
-      { name: 'dispose()', desc: 'Close wallet and release resources' },
-      { name: 'getBtcBalance()', desc: 'Get vanilla + colored BTC balance' },
-      { name: 'getAddress()', desc: 'Get a fresh receive address' },
-      { name: 'listUnspents()', desc: 'List all UTXOs' },
-      { name: 'createUtxosBegin()', desc: 'Build PSBT for UTXO creation' },
-      { name: 'createUtxosEnd()', desc: 'Broadcast signed UTXO creation PSBT' },
-      { name: 'createUtxos()', desc: 'Full UTXO creation (begin + sign + end)' },
-      { name: 'listAssets()', desc: 'List all RGB assets (NIA + IFA)' },
-      { name: 'getAssetBalance()', desc: 'Get balance for a specific asset' },
-      { name: 'issueAssetNia()', desc: 'Issue a Non-Inflatable Asset' },
-      { name: 'issueAssetIfa()', desc: 'Issue an Inflatable Asset' },
-      { name: 'inflateBegin()', desc: 'Build PSBT for asset inflation' },
-      { name: 'inflateEnd()', desc: 'Broadcast signed inflation PSBT' },
-      { name: 'inflate()', desc: 'Full inflate (begin + sign + end)' },
-      { name: 'sendBegin()', desc: 'Build PSBT for asset transfer' },
-      { name: 'sendEnd()', desc: 'Broadcast signed transfer PSBT' },
-      { name: 'send()', desc: 'Full asset send (begin + sign + end)' },
-      { name: 'sendBtcBegin()', desc: 'Build PSBT for BTC send' },
-      { name: 'sendBtcEnd()', desc: 'Broadcast signed BTC send PSBT' },
-      { name: 'sendBtc()', desc: 'Full BTC send (begin + sign + end)' },
-      { name: 'blindReceive()', desc: 'Generate a blinded receive invoice' },
-      { name: 'witnessReceive()', desc: 'Generate a witness receive invoice' },
-      { name: 'decodeRGBInvoice()', desc: 'Decode an RGB invoice string' },
-      { name: 'listTransactions()', desc: 'List all on-chain transactions' },
-      { name: 'listTransfers()', desc: 'List RGB transfers (optionally by asset)' },
-      { name: 'failTransfers()', desc: 'Mark stale transfers as failed' },
-      { name: 'refreshWallet()', desc: 'Refresh wallet state from indexer' },
-      { name: 'syncWallet()', desc: 'Sync wallet with latest chain state' },
-      { name: 'estimateFeeRate()', desc: 'Estimate fee rate for N blocks' },
-      { name: 'estimateFee()', desc: 'Estimate fee for a PSBT' },
-      { name: 'createBackup()', desc: 'Create an encrypted local backup' },
-      { name: 'configureVssBackup()', desc: 'Configure VSS auto-backup' },
-      { name: 'vssBackup()', desc: 'Upload encrypted backup to VSS server' },
-      { name: 'vssBackupInfo()', desc: 'Query VSS server backup metadata' },
-      { name: 'disableVssAutoBackup()', desc: 'Disable background auto-backup' },
-      { name: 'signPsbt()', desc: 'Sign a PSBT using the wallet mnemonic' },
-      { name: 'signMessage()', desc: 'Sign a message using wallet keys' },
-      { name: 'verifyMessage()', desc: 'Verify a message signature' },
+      { name: 'createWallet()',              sig: '(network: Network) → Promise<WalletKeys>',                    desc: 'Generate fresh keypair + return all derived keys' },
+      { name: 'generateKeys()',              sig: '(network: Network) → Promise<WalletKeys>',                    desc: 'Same as createWallet — alias used in flows' },
+      { name: 'deriveKeysFromMnemonic()',    sig: '(network, mnemonic: string) → Promise<WalletKeys>',           desc: 'Derive keys from BIP-39 mnemonic deterministically' },
+      { name: 'signMessage()',               sig: '({ message, seed, network }) → Promise<string>',              desc: 'Sign an arbitrary message with wallet keys' },
+      { name: 'verifyMessage()',             sig: '({ message, signature, accountXpub, network }) → Promise<boolean>', desc: 'Verify a message signature' },
+      { name: 'toUnitsNumber()',             sig: '(amount: number, precision: number) → number',                desc: 'Convert decimal amount to base units' },
+      { name: 'fromUnitsNumber()',           sig: '(amount: number, precision: number) → number',                desc: 'Convert base units to decimal display amount' },
     ],
   },
   {
     title: 'UTEXOWallet',
     items: [
-      { name: 'new UTEXOWallet()', desc: 'Instantiate from mnemonic/seed + options' },
-      { name: 'initialize()', desc: 'Init both UTEXO + layer-1 WalletManager' },
-      { name: 'static restoreFromVss()', desc: 'Restore both wallets from VSS backup' },
-      { name: 'derivePublicKeys()', desc: 'Derive public keys for a network' },
-      { name: 'getPubKeys()', desc: 'Return cached public keys' },
-      { name: 'getXpub()', desc: 'Return vanilla + colored xpubs' },
-      { name: 'getNetwork()', desc: 'Return the configured network' },
-      { name: 'dispose()', desc: 'Close wallet and release resources' },
-      { name: 'isDisposed()', desc: 'Check if wallet is closed' },
-      { name: 'getBtcBalance()', desc: 'Get BTC balance' },
-      { name: 'getAddress()', desc: 'Get receive address' },
-      { name: 'listUnspents()', desc: 'List UTXOs' },
-      { name: 'createUtxos()', desc: 'Create UTXOs for RGB operations' },
-      { name: 'listAssets()', desc: 'List all RGB assets' },
-      { name: 'getAssetBalance()', desc: 'Get balance for an asset' },
-      { name: 'issueAssetNia()', desc: 'Issue a Non-Inflatable Asset' },
-      { name: 'send()', desc: 'Send RGB assets' },
-      { name: 'sendBtc()', desc: 'Send BTC' },
-      { name: 'onchainReceive()', desc: 'Generate onchain receive request' },
-      { name: 'onchainSend()', desc: 'Send assets via onchain' },
-      { name: 'getOnchainSendStatus()', desc: 'Query onchain send status' },
-      { name: 'listOnchainTransfers()', desc: 'List onchain transfers' },
-      { name: 'createLightningInvoice()', desc: 'Create a Lightning receive invoice' },
-      { name: 'payLightningInvoice()', desc: 'Pay a Lightning invoice' },
-      { name: 'getLightningSendRequest()', desc: 'Query lightning send status' },
-      { name: 'getLightningReceiveRequest()', desc: 'Query lightning receive status' },
-      { name: 'vssBackup()', desc: 'Upload backup to VSS server' },
-      { name: 'vssBackupInfo()', desc: 'Query VSS backup metadata' },
-      { name: 'configureVssBackup()', desc: 'Enable VSS auto-backup' },
-      { name: 'disableVssAutoBackup()', desc: 'Disable VSS auto-backup' },
-      { name: 'signPsbt()', desc: 'Sign a PSBT' },
-      { name: 'signMessage()', desc: 'Sign a message' },
-      { name: 'verifyMessage()', desc: 'Verify a message signature' },
-      { name: 'refreshWallet()', desc: 'Refresh wallet state' },
-      { name: 'syncWallet()', desc: 'Sync with chain' },
-      { name: 'estimateFeeRate()', desc: 'Estimate fee rate' },
+      { name: 'new UTEXOWallet()',           sig: '(config: WalletConfig, signer: RLNSigner) → UTEXOWallet',    desc: 'Instantiate a wallet node. Does not connect — call init() next.' },
+      { name: 'init()',                      sig: '() → Promise<void>',                                         desc: 'Create the RLN node and run the signer setup (createNode + signer.initNode)' },
+      { name: 'unlock()',                    sig: '(params: UnlockParams) → Promise<void>',                     desc: 'Connect to bitcoind + indexer + proxy and bring the node online' },
+      { name: 'reinit()',                    sig: '(params: UnlockParams) → Promise<void>',                     desc: 'Shutdown + unlock in one call — restart without recreating the instance' },
+      { name: 'shutdown()',                  sig: '() → Promise<void>',                                         desc: 'Stop the RLN daemon, keeping the instance alive for reinit()' },
+      { name: 'destroy()',                   sig: '() → Promise<void>',                                         desc: 'Shutdown + release all resources. Call in finally blocks.' },
+      { name: 'getNodeInfo()',               sig: '() → Promise<RlnNodeInfo>',                                  desc: 'pubkey, numChannels, numUsableChannels, localBalanceMsat, peers[]' },
+      { name: 'getNetworkInfo()',            sig: '() → Promise<{ network: string; height: number }>',          desc: 'Current chain and best block height' },
+      { name: 'getAddress()',                sig: '() → Promise<string>',                                       desc: 'Derive a fresh bech32 receive address' },
+      { name: 'getBtcBalance()',             sig: '() → Promise<BtcBalance>',                                   desc: 'vanilla + colored: { spendable, future, immature }' },
+      { name: 'getAssetBalance()',           sig: '(assetId: string) → Promise<AssetBalance>',                  desc: 'spendable, future, settled, offchainInbound, offchainOutbound' },
+      { name: 'syncWallet()',                sig: '() → Promise<void>',                                         desc: 'Sync wallet UTXO set with the indexer' },
+      { name: 'refreshWallet()',             sig: '() → Promise<void>',                                         desc: 'Refresh RGB transfer statuses from the proxy' },
+      { name: 'createUtxos()',               sig: '({ upTo, num, feeRate, size? }) → Promise<void>',            desc: 'Allocate UTXOs for RGB operations. Mine 1 block after on regtest.' },
+      { name: 'listUnspents()',              sig: '() → Promise<Unspent[]>',                                    desc: 'All UTXOs with their RGB allocations' },
+      { name: 'listAssets()',                sig: '() → Promise<{ nia?: AssetNIA[]; cfa?: AssetCFA[] }>',       desc: 'All RGB assets tracked by this wallet' },
+      { name: 'listTransactions()',          sig: '() → Promise<Transaction[]>',                                desc: 'All on-chain transactions' },
+      { name: 'listTransfers()',             sig: '(assetId: string) → Promise<Transfer[]>',                    desc: 'RGB transfers for a specific asset. Transfer has expiration field.' },
+      { name: 'listOnchainTransfers()',      sig: '(assetId: string) → Promise<Transfer[]>',                    desc: 'On-chain RGB transfers only (Send / Receive)' },
+      { name: 'failTransfers()',             sig: '({ batchTransferIdx?, noAssetOnly }) → Promise<boolean>',    desc: 'Mark stale/expired pending transfers as failed. Returns true if any changed.' },
+      { name: 'issueAssetNia()',             sig: '({ ticker, name, precision, amounts }) → Promise<AssetNIA>', desc: 'Issue a Non-Inflatable RGB asset. Mine 1 block after on regtest.' },
+      { name: 'blindReceive()',              sig: '({ minConfirmations, durationSeconds? }) → Promise<InvoiceReceiveData>', desc: 'Generate a blinded receive invoice. Returns invoice, recipientId, batchTransferIdx.' },
+      { name: 'witnessReceive()',            sig: '({ minConfirmations }) → Promise<InvoiceReceiveData>',       desc: 'Generate a witness receive invoice (UTXO-anchored)' },
+      { name: 'send()',                      sig: '({ invoice, assetId, amount, donation, feeRate, minConfirmations, witnessData? }) → Promise<SendResult>', desc: 'On-chain RGB transfer. SendResult has txid + batchTransferIdx.' },
+      { name: 'onchainSend()',               sig: '({ invoice, amount, feeRate, minConfirmations, skipSync }) → Promise<void>', desc: 'Send RGB via on-chain transport (used in LSP flow for Node B → LSP)' },
+      { name: 'estimateFeeRate()',           sig: '(blocks: number) → Promise<number>',                         desc: 'Estimate sat/vB fee rate for confirmation in N blocks' },
+      { name: 'connectPeer()',               sig: '(peerUri: string) → Promise<void>',                         desc: 'Connect to a peer. Format: pubkey@host:port. Errors are usually safe to ignore.' },
+      { name: 'listPeers()',                 sig: '() → Promise<Peer[]>',                                       desc: 'List currently connected peers' },
+      { name: 'listChannels()',              sig: '() → Promise<RlnChannel[]>',                                 desc: 'All channels: channelId, fundingTxid, isUsable, capacitySat, assetId?, assetLocalAmount?' },
+      { name: 'openChannel()',               sig: '({ peerPubkeyAndOptAddr, capacitySat, pushMsat, public, withAnchors, assetId?, assetAmount? }) → Promise<{ temporaryChannelId }>',  desc: 'Open a BTC or RGB asset channel. Poll listChannels() for fundingTxid, then mine 6 blocks.' },
+      { name: 'closeChannel()',              sig: '(channelId: string, peerPubkey: string, force: boolean) → Promise<void>', desc: 'Cooperative (force=false) or force close. Mine + refreshWallet ×3 after.' },
+      { name: 'createLightningInvoice()',    sig: '({ amountSats, expirySeconds, asset: { assetId, amount } }) → Promise<{ lnInvoice }>',  desc: 'Create a BOLT11 invoice for an RGB asset payment' },
+      { name: 'payLightningInvoice()',       sig: '({ lnInvoice: string }) → Promise<{ txid }>',               desc: 'Pay a BOLT11 invoice. Poll getLightningSendRequest() with the returned txid.' },
+      { name: 'getLightningSendRequest()',   sig: '(paymentHash: string) → Promise<"Pending" | "Settled" | "Failed">', desc: 'Poll payment status after payLightningInvoice()' },
+      { name: 'getLightningReceiveRequest()', sig: '(lnInvoice: string) → Promise<"Pending" | "Settled" | "Failed">', desc: 'Poll invoice status after createLightningInvoice()' },
+      { name: 'listLightningPayments()',     sig: '() → Promise<{ payments: LightningPayment[] }>',            desc: 'All lightning payment history' },
+      { name: 'vssClearFence()',             sig: '(password: string) → Promise<void>',                        desc: 'Clear the VSS fence before restore — call after init() and before unlock()' },
     ],
   },
   {
-    title: 'UTEXO / Lightning',
+    title: 'Signers',
     items: [
-      { name: 'UTEXOProtocol', desc: 'Combined Lightning + Onchain protocol class' },
-      { name: 'LightningProtocol', desc: 'Lightning Network protocol interface' },
-      { name: 'OnchainProtocol', desc: 'Onchain transfer protocol interface' },
-      { name: 'bridgeAPI', desc: 'HTTP client for UTEXO bridge API' },
-      { name: 'getBridgeAPI()', desc: 'Get configured bridge API instance' },
+      { name: 'PasswordRLNSigner',           sig: '(password: string, mnemonic: string) → PasswordRLNSigner', desc: 'Standard signer. Injects password automatically on unlock.' },
+      { name: 'NativeExternalRLNSigner',     sig: '(mnemonic: string, network: Network) → NativeExternalRLNSigner', desc: 'VLS-backed external signer. Use when testing the external signer path. pushMsat must be 0 on acceptor side.' },
+    ],
+  },
+  {
+    title: 'UtexoLSPClient',
+    items: [
+      { name: 'new UtexoLSPClient()',        sig: '({ baseUrl: string }) → UtexoLSPClient',                    desc: 'HTTP client for the utexo-lsp Go service' },
+      { name: 'getInfo()',                   sig: '() → Promise<LspInfo>',                                     desc: 'pubkey, num_channels, num_usable_channels, local_balance_sat' },
+      { name: 'lightningReceive()',          sig: '({ lnInvoice, rgb: { assetId, durationSeconds? } }) → Promise<{ lnInvoice, rgbInvoice, mappingId }>',  desc: 'Register an LN invoice with the LSP. Returns an RGB invoice for the faucet/sender to pay.' },
     ],
   },
   {
     title: 'Error Classes',
     items: [
-      { name: 'SDKError', desc: 'Base class for all SDK errors' },
-      { name: 'NetworkError', desc: 'HTTP/network failures (carries statusCode)' },
-      { name: 'ValidationError', desc: 'Input validation failures (carries field)' },
-      { name: 'WalletError', desc: 'Wallet state and operation errors' },
-      { name: 'CryptoError', desc: 'Cryptographic operation errors' },
-      { name: 'ConfigurationError', desc: 'Invalid SDK configuration' },
-      { name: 'BadRequestError', desc: 'HTTP 400 errors' },
-      { name: 'NotFoundError', desc: 'HTTP 404 errors' },
-      { name: 'ConflictError', desc: 'HTTP 409 errors' },
-      { name: 'RgbNodeError', desc: 'RGB node operation errors' },
-    ],
-  },
-  {
-    title: 'Logger',
-    items: [
-      { name: 'logger', desc: 'Global SDK logger instance' },
-      { name: 'configureLogging()', desc: 'Set the global log level' },
-      { name: 'LogLevel', desc: 'Enum: DEBUG | INFO | WARN | ERROR | NONE' },
-    ],
-  },
-  {
-    title: 'Validation',
-    items: [
-      { name: 'validateNetwork()', desc: 'Throws if network string is invalid' },
-      { name: 'normalizeNetwork()', desc: 'Normalize network string variants' },
-      { name: 'validateMnemonic()', desc: 'Validate BIP-39 mnemonic phrase' },
-      { name: 'validatePsbt()', desc: 'Validate base64-encoded PSBT' },
-      { name: 'validateBase64()', desc: 'Validate a base64 string' },
-      { name: 'validateHex()', desc: 'Validate a hex-encoded string' },
-      { name: 'validateRequired()', desc: 'Throw if value is null/undefined' },
-      { name: 'validateString()', desc: 'Throw if value is not a string' },
-    ],
-  },
-  {
-    title: 'Constants',
-    items: [
-      { name: 'COIN_RGB_MAINNET', desc: '827166 — RGB mainnet coin type' },
-      { name: 'COIN_RGB_TESTNET', desc: '827167 — RGB testnet coin type' },
-      { name: 'COIN_BITCOIN_MAINNET', desc: '0 — Bitcoin mainnet coin type' },
-      { name: 'COIN_BITCOIN_TESTNET', desc: '1 — Bitcoin testnet coin type' },
-      { name: 'NETWORK_MAP', desc: 'Map of network name → canonical name' },
-      { name: 'BIP32_VERSIONS', desc: 'BIP-32 version bytes per network' },
-      { name: 'DERIVATION_PURPOSE', desc: '86 — Taproot derivation purpose' },
-      { name: 'DERIVATION_ACCOUNT', desc: '0 — Default account index' },
-      { name: 'KEYCHAIN_RGB', desc: '0 — RGB keychain index' },
-      { name: 'KEYCHAIN_BTC', desc: '0 — BTC keychain index' },
-      { name: 'DEFAULT_NETWORK', desc: '"regtest" — default network' },
-      { name: 'DEFAULT_API_TIMEOUT', desc: 'Default HTTP timeout in ms' },
-      { name: 'DEFAULT_MAX_RETRIES', desc: '3 — default retry count' },
-      { name: 'DEFAULT_LOG_LEVEL', desc: 'Default log level value' },
-      { name: 'utexoNetworkMap', desc: 'Map of app network → UTEXO network name' },
-      { name: 'utexoNetworkIdMap', desc: 'Map of network → network ID metadata' },
-      { name: 'getDestinationAsset()', desc: 'Resolve destination asset for a bridge' },
+      { name: 'SDKError',             sig: '(message, code) → SDKError',              desc: 'Base class — all SDK errors extend this' },
+      { name: 'NetworkError',         sig: '(message, statusCode: number)',            desc: 'HTTP/network failures. Check .statusCode.' },
+      { name: 'ValidationError',      sig: '(message, field: string)',                 desc: 'Input validation failures. Check .field.' },
+      { name: 'WalletError',          sig: '(message)',                                desc: 'Wallet state and operation errors' },
+      { name: 'CryptoError',          sig: '(message)',                                desc: 'Cryptographic operation errors' },
+      { name: 'ConfigurationError',   sig: '(message)',                                desc: 'Invalid SDK configuration' },
+      { name: 'BadRequestError',      sig: '(message) · statusCode=400',              desc: 'HTTP 400 — bad request' },
+      { name: 'NotFoundError',        sig: '(message) · statusCode=404',              desc: 'HTTP 404 — resource not found' },
+      { name: 'ConflictError',        sig: '(message) · statusCode=409',              desc: 'HTTP 409 — conflict (e.g. estimateFeeRate right after unlock)' },
+      { name: 'RgbNodeError',         sig: '(message, code)',                          desc: 'RGB node operation errors. code="InsufficientAssets" etc.' },
     ],
   },
 ];
@@ -216,7 +128,7 @@ function VersionBadge({ label, value, accent }: { label: string; value: string; 
   );
 }
 
-function SectionCard({ title, items }: { title: string; items: { name: string; desc: string }[] }) {
+function SectionCard({ title, items }: { title: string; items: Item[] }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -244,6 +156,7 @@ function SectionCard({ title, items }: { title: string; items: { name: string; d
               <View style={styles.methodDot} />
               <View style={styles.methodInfo}>
                 <Text style={styles.methodName}>{item.name}</Text>
+                <Text style={styles.methodSig}>{item.sig}</Text>
                 <Text style={styles.methodDesc}>{item.desc}</Text>
               </View>
             </View>
@@ -275,7 +188,7 @@ export default function DocsScreen() {
             </View>
           </View>
           <Text style={styles.headerSubtitle}>
-            Complete API reference for the RGB SDK React Native package.
+            API reference for the methods used in this demo.
           </Text>
 
           {/* Version badges */}
@@ -302,12 +215,7 @@ export default function DocsScreen() {
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
               <Text style={styles.statValue}>{totalMethods}</Text>
-              <Text style={styles.statLabel}>exports</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statItem}>
-              <Text style={styles.statValue}>100%</Text>
-              <Text style={styles.statLabel}>covered</Text>
+              <Text style={styles.statLabel}>methods</Text>
             </View>
           </View>
         </View>
@@ -322,7 +230,7 @@ export default function DocsScreen() {
 
         <View style={styles.footer}>
           <Text style={styles.footerText}>
-            See the Flows tab to run live SDK tests and end-to-end flow demos.
+            See the Flows tab to run live end-to-end demos against real infrastructure.
           </Text>
         </View>
       </ScrollView>
@@ -545,7 +453,7 @@ const styles = StyleSheet.create({
     height: 5,
     borderRadius: 3,
     backgroundColor: AppColors.primary,
-    marginTop: 6,
+    marginTop: 7,
   },
   methodInfo: {
     flex: 1,
@@ -553,14 +461,21 @@ const styles = StyleSheet.create({
   },
   methodName: {
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
     color: AppColors.textPrimary,
     fontFamily: MONO,
+  },
+  methodSig: {
+    fontSize: 11,
+    color: AppColors.textTertiary,
+    fontFamily: MONO,
+    lineHeight: 16,
   },
   methodDesc: {
     fontSize: 12,
     color: AppColors.textSecondary,
     lineHeight: 17,
+    marginTop: 1,
   },
 
   // Footer

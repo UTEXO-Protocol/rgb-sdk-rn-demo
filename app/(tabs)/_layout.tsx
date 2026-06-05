@@ -45,6 +45,27 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={26} name="bitcoinsign.circle.fill" color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="lsp"
+        options={{
+          title: 'LSP',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="bolt.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="lsp-regtest"
+        options={{
+          title: 'LSP RT',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="bolt.circle.fill" color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="async-pay"
+        options={{
+          title: 'Apay',
+          tabBarIcon: ({ color }) => <IconSymbol size={26} name="arrow.trianglehead.clockwise" color={color} />,
+        }}
+      />
     </Tabs>
   );
 }
