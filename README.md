@@ -1,6 +1,6 @@
 # rgb-sdk-rn Demo
 
-End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, plus a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet).
+End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet), and two **LSP** flows demonstrating inbound RGB liquidity via a Liquidity Service Provider (regtest and UTEXO signet).
 
 ---
 
@@ -349,6 +349,98 @@ Channel funding on signet waits for **6 confirmations** (~60 min); regtest confi
 ### SDK surface (same as Flows)
 
 `createWallet` → `UTEXOWallet` + `PasswordRLNSigner` → `init` / `unlock` → `getAddress` / `syncWallet` / `getBtcBalance` → `createUtxos` → `connectPeer` / `openChannel` → `createLightningInvoice` / `payLightningInvoice` / `getLightningSendRequest`.
+
+---
+
+## LSP Flows
+
+Two additional tabs demonstrate the **LSP (Liquidity Service Provider)** protocol — an external party opens an inbound RGB Lightning channel to the user node.
+
+---
+
+### LSP Signet (lsp-signet tab)
+
+**File:** `app/(tabs)/lsp-signet/useLspFlow.ts`
+
+Runs against the UTEXO public LSP (`https://lsp-signet.utexo.com`) on the **`utexo`** (signet) network. No local infrastructure is needed — just BTC on signet to fund the two nodes.
+
+**What it demonstrates:**
+
+1. **Inbound liquidity (Part 1):** NodeA connects to the LSP and waits for the LSP to open an RGB channel. NodeA calls `lspA.receiveAsset()` to get an RGB invoice + LN invoice. An external party sends RGB on-chain to the RGB invoice. The LSP then settles the LN invoice to deliver the asset over Lightning.
+2. **A→B payment (Part 2):** NodeB also gets a channel from the LSP. NodeA pays NodeB via the LSP as a routing node.
+
+**Environment variables:**
+
+```bash
+# Optional — defaults shown are the UTEXO public endpoints
+EXPO_PUBLIC_LSP_URL=https://lsp-signet.utexo.com
+EXPO_PUBLIC_SIGNET_ASSET_ID=rgb:YKIEjkhU-iqVFK0y-bfDUio6-bukqH7o-dxjctKB-5TuQ7aM
+```
+
+Both variables have built-in defaults so no `.env.local` is needed to try the flow.
+
+**Running the flow:**
+
+1. Open the **LSP Signet** tab and tap **Run**.
+2. Fund **nodeA** address shown on screen (any signet BTC faucet, e.g. [@Utexo_RLN_bot](https://t.me/Utexo_RLN_bot) `/getbtc <address>`).
+3. Fund **nodeB** address similarly.
+4. Wait for LSP to open both channels (~6 signet confirmations, up to 30 min).
+5. When prompted **MANUAL SEND REQUIRED** — send the exact RGB asset amount to the RGB invoice shown (use your own RGB-capable node or wallet).
+6. Wait for the LN invoice to settle (~1–2 signet blocks after the LSP receives the asset).
+7. Part 2 runs automatically once Part 1 settles.
+
+**Key SDK calls:**
+
+- `wA.createLsp()` — creates an `UtexoLSPClient` bound to `lspBaseUrl` from wallet params
+- `lspA.connect()` — connects the node to the LSP peer
+- `lspA.waitForChannel(assetId, { timeoutMs, pollIntervalMs, onProgress })` — polls until the LSP-opened RGB channel is usable
+- `lspA.receiveAsset({ assetId, amountSats, amountRgb })` — calls `/lightning_receive` on the LSP; returns `{ lnInvoice, rgbInvoice }`
+- `lspA.awaitReceiveSettlement(lnInvoice, { timeoutMs, pollIntervalMs, onProgress })` — polls invoice until `'Settled'`
+- `lspA.waitForOutboundLiquidity(amountMsat, ...)` — polls until nodeA has enough outbound balance to send
+
+---
+
+### LSP Regtest (lsp-regtest tab)
+
+**File:** `app/(tabs)/lsp-regtest/useLspFlow.ts`
+
+Same LSP protocol but against a **local regtest** stack. Fully automated — the demo funds both nodes and mines blocks itself; no manual RGB send is needed (the Faucet RLN node sends on-chain instead).
+
+**Infrastructure required:** Run `./scripts/start-lsp-regtest.sh` from the project root before launching the flow. This script:
+
+1. Wipes and restarts `data_lsp` + `data_faucet` RLN nodes.
+2. Issues a new RGB asset (UTST) on the Faucet node.
+3. Seeds the LSP with 3 units from the Faucet.
+4. Starts the `utexo-lsp` Go service with `SUPPORTED_ASSET_IDS` set to the new asset.
+5. Writes the new asset ID + LSP pubkey to `.env.lsp.local` and `.env.local`.
+
+**Services started by the script:**
+
+| Service | Port | Command |
+|---------|------|---------|
+| LSP RLN node | 3005 (REST), 9737 (LDK) | `rgb-lightning-node data_lsp` |
+| Faucet RLN node | 3008 (REST), 9740 (LDK) | `rgb-lightning-node data_faucet` |
+| utexo-lsp (Go) | 8080 | `go run .` in `utexo-lsp/` |
+
+Also requires the standard regtest stack (`./regtest.sh start` — Bitcoin Core, Electrum, RGB Proxy) and `local-node-bridge.js` on port `5000`.
+
+**Android emulator — required port forwards:**
+
+```bash
+adb reverse tcp:3000 tcp:3000   # RGB Proxy  ← critical; missing this locks LSP UTXOs permanently
+adb reverse tcp:3005 tcp:3005   # LSP RLN node
+adb reverse tcp:5000 tcp:5000   # Bitcoin node helper
+```
+
+**Stopping:**
+
+```bash
+./scripts/start-lsp-regtest.sh stop
+pkill -f "utexo-lsp"
+```
+
+**Common failure — `InsufficientAssets` / stuck Initiated Sends:**
+The LSP cron fires every 5 s and calls `/openchannel` for every connected peer. If the RGB Proxy is unreachable from the emulator (missing `adb reverse tcp:3000`), each attempt creates an Initiated Send that locks a UTXO without settling. After all 3 seeded UTXOs are locked the LSP has `spendable=0` and permanently returns `InsufficientAssets`. Fix: set the port forward **before** connecting the app, then re-run `start-lsp-regtest.sh`.
 
 ---
 
