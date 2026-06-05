@@ -124,12 +124,12 @@ export function useLspFlow() {
       setPhase('init');
 
       req('createWallet nodeA');
-      const keysA = await createWallet('signet' as any);
+      const keysA = await createWallet('utexo' as any);
       res('createWallet nodeA', { fingerprint: keysA.masterFingerprint });
 
       const wA = new UTEXOWallet(
         { storageDirPath: await mkDir('a'), daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
-          network: 'signet', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
+          network: 'utexo', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
           xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored, masterFingerprint: keysA.masterFingerprint },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
@@ -177,12 +177,12 @@ export function useLspFlow() {
       setPhase('b_init');
 
       req('createWallet nodeB');
-      const keysB = await createWallet('signet' as any);
+      const keysB = await createWallet('utexo' as any);
       res('createWallet nodeB', { fingerprint: keysB.masterFingerprint });
 
       const wB = new UTEXOWallet(
         { storageDirPath: await mkDir('b'), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
-          network: 'signet', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
+          network: 'utexo', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
           xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored, masterFingerprint: keysB.masterFingerprint },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
