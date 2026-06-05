@@ -9,8 +9,8 @@ import {
 } from '@utexo/rgb-sdk-rn';
 
 import {
-  ASSET_TOTAL_SUPPLY, CHANNEL_TIMEOUT_MS, FAUCET_AMOUNT_SAT,
-  FAUCET_TOKEN, FAUCET_URL, FUND_TIMEOUT_MS, LSP_URL,
+  ASSET_ID, CHANNEL_TIMEOUT_MS, FAUCET_AMOUNT_SAT,
+  FUND_TIMEOUT_MS, LSP_URL,
   PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT, POLL_MS,
   satStr,
   SETTLE_TIMEOUT_MS,
@@ -74,158 +74,153 @@ export function useLspFlow() {
         addLog(`LSP health error: ${e?.message ?? String(e)}`, 'error');
       }
 
-      // ── Init Node A + Node B ──────────────────────────────────────────────
-      req('createWallet nodeA');
-      const keysA = await createWallet('signet' as any);
-      res('createWallet nodeA', { fingerprint: keysA.masterFingerprint });
-
-      req('createWallet nodeB');
-      const keysB = await createWallet('signet' as any);
-      res('createWallet nodeB', { fingerprint: keysB.masterFingerprint });
+      const assetId = ASSET_ID;
+      addLog(`Asset: ${short(assetId)}`, 'success');
 
       const ts    = Date.now();
       const portA = 33000 + Math.floor(Math.random() * 2000);
       const portB = portA + 100;
-
       const mkDir = async (name: string) => {
         const uri = `${documentDirectory ?? ''}lsp_sig_${name}_${ts}`;
         await FileSystem.makeDirectoryAsync(uri, { intermediates: true });
         return uri.replace('file://', '');
       };
 
-      // Both wallets get lspBaseUrl — required for no-arg createLsp()
+      // helper: poll until settled balance > 0, returns the settled amount
+      const pollFunded = async (w: UTEXOWallet, label: string): Promise<number> => {
+        const deadline = Date.now() + FUND_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          if (abortRef.current) throw new Error('Cancelled');
+          await sleep(POLL_MS);
+          try {
+            await w.syncWallet();
+            const b = await w.getBtcBalance() as any;
+            const st = (b?.vanilla?.settled ?? 0) + (b?.colored?.settled ?? 0);
+            addLog(`${label} settled: ${satStr(st)}`);
+            if (st > 0) return st;
+          } catch (e: any) { console.error(`[lsp-signet] fund poll ${label}`, e?.message ?? e); }
+        }
+        throw new Error(`Timed out waiting for ${label} funds`);
+      };
+
+      // helper: poll until any spendable appears (createUtxos tx confirmed)
+      const pollUtxosConfirmed = async (w: UTEXOWallet, label: string): Promise<void> => {
+        const deadline = Date.now() + FUND_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+          if (abortRef.current) throw new Error('Cancelled');
+          await sleep(POLL_MS);
+          try {
+            await w.syncWallet();
+            const b = await w.getBtcBalance() as any;
+            const sp = (b?.vanilla?.spendable ?? 0) + (b?.colored?.spendable ?? 0);
+            addLog(`${label} spendable: ${satStr(sp)}`);
+            if (sp > 0) { addLog(`${label} UTXOs confirmed ✓`, 'success'); return; }
+          } catch (e: any) { console.error(`[lsp-signet] utxo poll ${label}`, e?.message ?? e); }
+        }
+        addLog(`${label} UTXO confirmation timeout — continuing`);
+      };
+
+      // ── Node A: init → fund → utxos → channel ────────────────────────────
+      setPhase('init');
+
+      req('createWallet nodeA');
+      const keysA = await createWallet('signet' as any);
+      res('createWallet nodeA', { fingerprint: keysA.masterFingerprint });
+
       const wA = new UTEXOWallet(
         { storageDirPath: await mkDir('a'), daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
           network: 'signet', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
           xpubVan: keysA.accountXpubVanilla, xpubCol: keysA.accountXpubColored, masterFingerprint: keysA.masterFingerprint },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
-      const wB = new UTEXOWallet(
-        { storageDirPath: await mkDir('b'), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
-          network: 'signet', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
-          xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored, masterFingerprint: keysB.masterFingerprint },
-        new PasswordRLNSigner('password', keysB.mnemonic),
-      );
       walletARef.current = wA;
-      walletBRef.current = wB;
 
-      for (const [w, label] of [[wA, 'nodeA'], [wB, 'nodeB']] as [UTEXOWallet, string][]) {
-        req(`${label}.init`); await w.init(); res(`${label}.init`);
-        req(`${label}.unlock`); await w.unlock(UNLOCK); res(`${label}.unlock`);
-      }
+      req('nodeA.init'); await wA.init(); res('nodeA.init');
+      req('nodeA.unlock'); await wA.unlock(UNLOCK); res('nodeA.unlock');
 
-      // Discover LSP peer from lspBaseUrl — pubkey from GET /get_info, host from URL
       const lspA = await wA.createLsp();
-      const lspB = await wB.createLsp();
-
       req('lsp.getInfo');
       const info = await lspA.http.getInfo();
       setLspInfo(info);
       res('lsp.getInfo', { pubkey: short(info.pubkey), channels: info.numChannels, usable: info.numUsableChannels });
 
-      req('nodeA.getAddress'); const adA = await wA.getAddress(); setAddrA(adA); res('nodeA.getAddress', { address: adA });
-      req('nodeB.getAddress'); const adB = await wB.getAddress(); setAddrB(adB); res('nodeB.getAddress', { address: adB });
+      req('nodeA.getAddress');
+      const adA = await wA.getAddress(); setAddrA(adA);
+      res('nodeA.getAddress', { address: adA });
 
-      // ── Fund both via thunderstack faucet ─────────────────────────────────
       setPhase('fund');
+      addLog(`⚠️  Send ${FAUCET_AMOUNT_SAT} sat to nodeA on signet:`);
+      addLog(`nodeA address: ${adA}`);
+      await pollFunded(wA, 'nodeA');
+      addLog('nodeA funded ✓', 'success');
 
-      for (const [address, label] of [[adA, 'nodeA'], [adB, 'nodeB']] as [string, string][]) {
-        addLog(`Faucet → ${label} (${FAUCET_AMOUNT_SAT} sat)`);
-        try {
-          const r = await fetch(FAUCET_URL, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${FAUCET_TOKEN}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ amount: FAUCET_AMOUNT_SAT, address, fee_rate: 5, skip_sync: false }),
-            signal: (AbortSignal as any).timeout?.(30_000),
-          });
-          if (r.ok) addLog(`Faucet ${label} ok`, 'success');
-          else addLog(`Faucet ${label} ${r.status} — continuing`);
-        } catch (e: any) {
-          addLog(`Faucet ${label} timeout — continuing`);
-        }
-        await sleep(3_000);
-      }
-
-      addLog('Polling for confirmed balance on both nodes …');
-      let stA = 0, stB = 0;
-      const fundDeadline = Date.now() + FUND_TIMEOUT_MS;
-      while (Date.now() < fundDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_MS);
-        try {
-          if (stA === 0) { await wA.syncWallet(); const b = await wA.getBtcBalance() as any; setBalA(b); stA = (b?.vanilla?.settled ?? 0) + (b?.colored?.settled ?? 0); addLog(`nodeA settled: ${satStr(stA)}`); }
-          if (stB === 0) { await wB.syncWallet(); const b = await wB.getBtcBalance() as any; setBalB(b); stB = (b?.vanilla?.settled ?? 0) + (b?.colored?.settled ?? 0); addLog(`nodeB settled: ${satStr(stB)}`); }
-          if (stA > 0 && stB > 0) break;
-        } catch (e: any) { console.error('[lsp-signet] fund poll', e?.message ?? e); }
-      }
-      if (stA === 0 || stB === 0) throw new Error(`Timed out waiting for funds — A:${satStr(stA)} B:${satStr(stB)}`);
-      addLog(`Both funded ✓  A:${satStr(stA)}  B:${satStr(stB)}`, 'success');
-
-      // ── Create UTXOs ──────────────────────────────────────────────────────
       setPhase('utxos');
-      for (const [w, label] of [[wA, 'nodeA'], [wB, 'nodeB']] as [UTEXOWallet, string][]) {
-        req(`${label}.syncWallet`); await w.syncWallet(); res(`${label}.syncWallet`);
-        req(`${label}.refreshWallet`); await w.refreshWallet(); res(`${label}.refreshWallet`);
-        req(`${label}.createUtxos`, { num: 5, feeRate: 2 });
-        await w.createUtxos({ upTo: false, num: 5, feeRate: 2 });
-        res(`${label}.createUtxos`);
-      }
+      req('nodeA.syncWallet'); await wA.syncWallet(); res('nodeA.syncWallet');
+      req('nodeA.refreshWallet'); await wA.refreshWallet(); res('nodeA.refreshWallet');
+      req('nodeA.createUtxos', { num: 5, feeRate: 2 });
+      await wA.createUtxos({ upTo: false, num: 5, feeRate: 2 });
+      res('nodeA.createUtxos');
+      await pollUtxosConfirmed(wA, 'nodeA');
 
-      addLog('Waiting for UTXO txs to confirm …');
-      const utxoDeadline = Date.now() + FUND_TIMEOUT_MS;
-      let confA = false, confB = false;
-      while (Date.now() < utxoDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_MS);
-        try {
-          if (!confA) { await wA.syncWallet(); const b = await wA.getBtcBalance() as any; setBalA(b); const sp = (b?.vanilla?.spendable ?? 0) + (b?.colored?.spendable ?? 0); if (sp > 0 && sp < stA) { confA = true; addLog('nodeA UTXOs confirmed', 'success'); } }
-          if (!confB) { await wB.syncWallet(); const b = await wB.getBtcBalance() as any; setBalB(b); const sp = (b?.vanilla?.spendable ?? 0) + (b?.colored?.spendable ?? 0); if (sp > 0 && sp < stB) { confB = true; addLog('nodeB UTXOs confirmed', 'success'); } }
-          if (confA && confB) break;
-        } catch (e: any) { console.error('[lsp-signet] utxo poll', e?.message ?? e); }
-      }
-
-      // ── Node B issues RGB asset ───────────────────────────────────────────
-      setPhase('asset');
-      req('nodeB.issueAssetNia', { ticker: 'UTST', supply: ASSET_TOTAL_SUPPLY });
-      const asset   = await wB.issueAssetNia({ ticker: 'UTST', name: 'UTEXO LSP Test', precision: 0, amounts: [ASSET_TOTAL_SUPPLY] });
-      const assetId = String(asset?.assetId ?? '');
-      if (!assetId) throw new Error('issueAssetNia returned no assetId');
-      setAssetInfo(asset);
-      res('nodeB.issueAssetNia', { assetId: short(assetId), supply: asset?.issuedSupply });
-
-      // ── Node A connects to LSP → wait for RGB channel ─────────────────────
-      // Signet: no onEachPoll — blocks arrive naturally.
-      // Both channels opened before lightning_receive flow (mirrors regtest conftest).
       setPhase('channel');
-
-      req('lspA.connect');
-      await lspA.connect();
-      res('lspA.connect');
-
-      addLog(`Waiting for LSP → Node A RGB channel (asset: ${short(assetId)}) …`);
+      req('lspA.connect'); await lspA.connect(); res('lspA.connect');
+      addLog(`Waiting for LSP → nodeA RGB channel (asset: ${short(assetId)}) …`);
       const chanA = await lspA.waitForChannel(assetId, {
         timeoutMs:      CHANNEL_TIMEOUT_MS,
         pollIntervalMs: POLL_MS,
         onProgress:     (msg) => addLog(`nodeA ${msg}`),
       });
       setChannelA(chanA);
-      addLog(`Node A RGB channel usable ✓  cap=${chanA.capacitySat} sat`, 'success');
+      addLog(`nodeA RGB channel usable ✓  cap=${chanA.capacitySat} sat`, 'success');
 
-      // ── Node B connects to LSP → wait for RGB channel ─────────────────────
+      // ── Node B: init → fund → utxos → channel ────────────────────────────
+      setPhase('b_init');
+
+      req('createWallet nodeB');
+      const keysB = await createWallet('signet' as any);
+      res('createWallet nodeB', { fingerprint: keysB.masterFingerprint });
+
+      const wB = new UTEXOWallet(
+        { storageDirPath: await mkDir('b'), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
+          network: 'signet', maxMediaUploadSizeMb: 20, lspBaseUrl: LSP_URL,
+          xpubVan: keysB.accountXpubVanilla, xpubCol: keysB.accountXpubColored, masterFingerprint: keysB.masterFingerprint },
+        new PasswordRLNSigner('password', keysB.mnemonic),
+      );
+      walletBRef.current = wB;
+
+      req('nodeB.init'); await wB.init(); res('nodeB.init');
+      req('nodeB.unlock'); await wB.unlock(UNLOCK); res('nodeB.unlock');
+
+      const lspB = await wB.createLsp();
+
+      req('nodeB.getAddress');
+      const adB = await wB.getAddress(); setAddrB(adB);
+      res('nodeB.getAddress', { address: adB });
+
+      setPhase('b_fund');
+      addLog(`⚠️  Send ${FAUCET_AMOUNT_SAT} sat to nodeB on signet:`);
+      addLog(`nodeB address: ${adB}`);
+      await pollFunded(wB, 'nodeB');
+      addLog('nodeB funded ✓', 'success');
+
+      setPhase('b_utxos');
+      req('nodeB.syncWallet'); await wB.syncWallet(); res('nodeB.syncWallet');
+      req('nodeB.refreshWallet'); await wB.refreshWallet(); res('nodeB.refreshWallet');
+      req('nodeB.createUtxos', { num: 5, feeRate: 2 });
+      await wB.createUtxos({ upTo: false, num: 5, feeRate: 2 });
+      res('nodeB.createUtxos');
+      await pollUtxosConfirmed(wB, 'nodeB');
+
       setPhase('b_channel');
-
-      req('lspB.connect');
-      await lspB.connect();
-      res('lspB.connect');
-
-      addLog('Waiting for LSP → Node B RGB channel …');
+      req('lspB.connect'); await lspB.connect(); res('lspB.connect');
+      addLog('Waiting for LSP → nodeB RGB channel …');
       const chanB = await lspB.waitForChannel(assetId, {
         timeoutMs:      CHANNEL_TIMEOUT_MS,
         pollIntervalMs: POLL_MS,
         onProgress:     (msg) => addLog(`nodeB ${msg}`),
       });
       setChannelB(chanB);
-      addLog('Node B RGB channel usable ✓', 'success');
+      addLog('nodeB RGB channel usable ✓', 'success');
 
       await wA.syncWallet();
       await wB.syncWallet();
@@ -243,37 +238,23 @@ export function useLspFlow() {
       setRgbInvoiceLsp(rgbInvoice);
       res('lspA.receiveAsset', { lnInvoice: short(aInvoice, 32), rgbInvoice: short(rgbInvoice, 32) });
 
-      // ── Node B sends RGB on-chain to LSP's RGB invoice ────────────────────
+      // ── Manual RGB send to LSP's RGB invoice ─────────────────────────────
       setPhase('rgb_send');
 
-      req('nodeB.onchainSend', { amount: PAYMENT_ASSET_AMOUNT, feeRate: 2 });
-      await wB.onchainSend({ invoice: rgbInvoice, amount: PAYMENT_ASSET_AMOUNT, feeRate: 2, minConfirmations: 1, skipSync: false });
-      res('nodeB.onchainSend');
-      addLog(`Node B sent ${PAYMENT_ASSET_AMOUNT} ${asset?.ticker} to LSP`, 'success');
+      addLog(`⚠️  MANUAL SEND REQUIRED — send ${PAYMENT_ASSET_AMOUNT} units of the asset to LSP`);
+      addLog(`asset:      ${assetId}`);
+      addLog(`rgb invoice: ${rgbInvoice}`);
+      addLog(`amount:     ${PAYMENT_ASSET_AMOUNT}`);
+      addLog('Send the asset on-chain to the RGB invoice above, then wait for settlement …');
 
-      // ── Poll Node B Send transfer until Settled ───────────────────────────
+      // onchainSend commented out — user sends manually from their own node
+      // req('nodeB.onchainSend', { amount: PAYMENT_ASSET_AMOUNT, feeRate: 2 });
+      // await wB.onchainSend({ invoice: rgbInvoice, amount: PAYMENT_ASSET_AMOUNT, feeRate: 2, minConfirmations: 1, skipSync: false });
+      // res('nodeB.onchainSend');
+
+      // ── Wait for LN invoice to settle (proves LSP received the RGB asset) ─
       setPhase('settle');
-      addLog('Polling Node B Send transfer to settle …');
-      const sendDeadline = Date.now() + SETTLE_TIMEOUT_MS;
-      let rgbSettled = false;
-      while (Date.now() < sendDeadline) {
-        if (abortRef.current) throw new Error('Cancelled');
-        await sleep(POLL_MS);
-        try {
-          await wB.syncWallet();
-          await wB.refreshWallet();
-          const transfers = await wB.listOnchainTransfers(assetId);
-          const latest    = [...(transfers ?? [])].reverse().find((t: any) => t.kind === 'Send');
-          addLog(`nodeB Send: ${latest?.status ?? 'none'}`);
-          if (latest?.status === 'Settled') { rgbSettled = true; break; }
-          if (latest?.status === 'Failed') throw new Error('Node B RGB send failed');
-        } catch (e: any) { if ((e?.message ?? '').includes('failed')) throw e; console.error('[lsp-signet] rgb poll', e?.message ?? e); }
-      }
-      if (!rgbSettled) addLog('RGB settlement timeout — LSP may still be processing');
-      else addLog('Node B RGB send settled ✓', 'success');
-
-      // ── Wait for Node A LN invoice to settle ──────────────────────────────
-      addLog('Waiting for Node A LN invoice to settle …');
+      addLog('Waiting for Node A LN invoice to settle (will happen once LSP receives the asset) …');
       setInvoiceStatus('Pending');
       await lspA.awaitReceiveSettlement(aInvoice, {
         timeoutMs:      SETTLE_TIMEOUT_MS,
