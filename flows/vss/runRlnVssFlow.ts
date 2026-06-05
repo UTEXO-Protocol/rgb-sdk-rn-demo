@@ -1,10 +1,3 @@
-import {
-  createWallet,
-  PasswordRLNSigner,
-  UTEXOWallet,
-} from '@utexo/rgb-sdk-rn';
-import * as FileSystem from 'expo-file-system/legacy';
-import { documentDirectory } from 'expo-file-system/legacy';
 import { mine, sendToAddress } from '@/utils/bitcoin-node';
 import { buildRegtestConfig, readEnv } from '@/utils/env';
 import {
@@ -13,6 +6,13 @@ import {
   endExclusiveFlow,
   sleep,
 } from '@/utils/flow-core';
+import {
+  createWallet,
+  PasswordRLNSigner,
+  UTEXOWallet,
+} from '@utexo/rgb-sdk-rn';
+import * as FileSystem from 'expo-file-system/legacy';
+import { documentDirectory } from 'expo-file-system/legacy';
 
 export async function runRlnVssFlow() {
   const flowName = 'runRlnVssFlow';
@@ -76,6 +76,7 @@ export async function runRlnVssFlow() {
       new PasswordRLNSigner(password, keysB.mnemonic),
     );
     await wallet.init();
+    console.log(unlockParams);
     await wallet.unlock(unlockParams);
     await nodeB.init();
     await nodeB.unlock(unlockParams);

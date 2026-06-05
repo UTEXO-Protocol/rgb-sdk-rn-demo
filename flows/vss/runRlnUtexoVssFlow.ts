@@ -44,7 +44,6 @@ export async function runRlnUtexoVssFlow() {
     // so that 127.0.0.1:PORT on the emulator tunnels to the host.
     const vssUrl = process.env.EXPO_PUBLIC_UTEXO_VSS_URL?.trim() ?? null;
 
-    if (!unlockParams.bitcoindRpcHost) throw new Error('EXPO_PUBLIC_UTEXO_BITCOIND_RPC_HOST not set — configure .env');
     if (!vssUrl) throw new Error('EXPO_PUBLIC_UTEXO_VSS_URL not set — add it to .env');
     // Flow-local tuning: keep independent from other tests/flows.
     // Fund as: utxo target size * count + safety buffer for fees/change.

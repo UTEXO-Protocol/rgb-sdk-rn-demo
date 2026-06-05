@@ -384,11 +384,11 @@ export default function UtexoScreen() {
       // ── 4. Unlock ──────────────────────────────────────────────────────────
       const unlockParams = isRegtest ? REGTEST_UNLOCK : UTEXO_UNLOCK;
       console.log('unlockParams', unlockParams);
-      req('nodeA.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
+      req('nodeA.unlock', { indexer: unlockParams.indexerUrl, proxy: unlockParams.proxyEndpoint });
       await wA.unlock(unlockParams);
       res('nodeA.unlock');
 
-      req('nodeB.unlock', { host: unlockParams.bitcoindRpcHost, port: unlockParams.bitcoindRpcPort });
+      req('nodeB.unlock', { indexer: unlockParams.indexerUrl, proxy: unlockParams.proxyEndpoint });
       await wB.unlock(unlockParams);
       res('nodeB.unlock');
 

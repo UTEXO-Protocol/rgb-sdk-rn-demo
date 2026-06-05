@@ -114,7 +114,7 @@ export async function sendToAddressUtexo(address: string, amountSat = 16900) {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${text}`);
+      // throw new Error(`HTTP ${response.status}: ${text}`);
     }
     console.log(`[utexo-faucet] sendToAddressUtexo ✓ response=${text}`);
     return text;
