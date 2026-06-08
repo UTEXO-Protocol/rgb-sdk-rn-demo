@@ -27,7 +27,7 @@
     "@react-navigation/bottom-tabs": "^7.4.0",
     "@react-navigation/elements": "^2.6.3",
     "@react-navigation/native": "^7.1.8",
-    "@utexo/rgb-sdk-rn": "1.0.0-beta.12",
+    "@utexo/rgb-sdk-rn": "file:../rgb-sdk-rn",
     "buffer": "^6.0.3",
     "expo": "~54.0.25",
     "expo-build-properties": "~1.0.10",

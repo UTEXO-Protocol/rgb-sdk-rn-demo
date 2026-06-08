@@ -1,9 +1,8 @@
 /**
- * LSP Signet tab — full lightning_receive + P2P payment flow.
- * Flow logic: useLspFlow.ts  |  Components: components.tsx  |  Config: config.ts
+ * LSP tab — implements test_flow0_full_e2e from utexo-lsp e2e tests.
+ * Flow logic: useLspFlow.ts  |  Daemon helpers: daemons.ts  |  Config: config.ts
  *
- * Uses wallet.createLsp() with no args — peer pubkey discovered from
- * GET /get_info, host parsed from lspBaseUrl, port defaults to 9735.
+ * Prerequisites: ./scripts/start-lsp-regtest.sh
  */
 import React from 'react';
 import {
@@ -18,31 +17,40 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
 import {
-  LSP_URL, PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT,
+  ASSET_ID, FAUCET_DAEMON_URL, FAUCET_PAY_AMOUNT,
+  LSP_DAEMON_URL, LSP_URL, PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT,
   satStr, short,
 } from './config';
 import { ALL_PHASES, InfoCard, LogPane, PhaseRow, PHASES_P1, PHASES_P2 } from './components';
 import { useLspFlow } from './useLspFlow';
 
-export default function LspSignetScreen() {
+export default function LspScreen({ embedded = false }: { embedded?: boolean }) {
   const flow = useLspFlow();
 
   const isRunning = !['idle', 'done', 'error'].includes(flow.phase);
   const spA = (flow.balA?.vanilla?.spendable ?? 0) + (flow.balA?.colored?.spendable ?? 0);
   const stA = (flow.balA?.vanilla?.settled   ?? 0) + (flow.balA?.colored?.settled   ?? 0);
-  const spB = (flow.balB?.vanilla?.spendable ?? 0) + (flow.balB?.colored?.spendable ?? 0);
-  const stB = (flow.balB?.vanilla?.settled   ?? 0) + (flow.balB?.colored?.settled   ?? 0);
+  const envReady = !!ASSET_ID;
+
+  const Root = embedded ? View : SafeAreaView;
+  const rootProps = embedded
+    ? { style: s.embedded }
+    : { style: s.safe, edges: ['top', 'left', 'right'] as const };
 
   return (
-    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
-      <ScrollView style={s.scroll} contentContainerStyle={s.content}>
+    <Root {...rootProps}>
+      <ScrollView
+        style={embedded ? undefined : s.scroll}
+        contentContainerStyle={s.content}
+        scrollEnabled={!embedded}
+        nestedScrollEnabled={embedded}>
 
         <View style={s.header}>
-          <Text style={s.title}>LSP · Signet</Text>
-          <Text style={s.subtitle}>lsp-signet.utexo.com · lightning_receive + P2P payment</Text>
+          <Text style={s.title}>LSP · lightning_receive</Text>
+          <Text style={s.subtitle}>Regtest · matches e2e conftest.py fixture</Text>
           <View style={s.badge}>
-            <View style={[s.dot, { backgroundColor: flow.lspInfo ? AppColors.success : AppColors.textTertiary }]} />
-            <Text style={s.badgeTxt}>{flow.lspInfo ? `LSP connected · ${flow.lspInfo.numChannels} ch` : 'Not connected'}</Text>
+            <View style={[s.dot, { backgroundColor: envReady ? AppColors.success : AppColors.error }]} />
+            <Text style={s.badgeTxt}>{envReady ? 'LSP configured' : 'Run start-lsp-regtest.sh first'}</Text>
           </View>
         </View>
 
@@ -56,9 +64,9 @@ export default function LspSignetScreen() {
         {/* Idle */}
         {flow.phase === 'idle' && (
           <View style={s.card}>
-            <Text style={s.cardTitle}>Full LSP flow — Signet</Text>
+            <Text style={s.cardTitle}>test_flow0_full_e2e — LSP Regtest</Text>
             <Text style={s.cardDesc}>
-              {'Mirrors the regtest e2e flow on live signet.\n\n' +
+              {'Regtest e2e flow — test_flow0_full_e2e.py on-device.\n\n' +
                'Setup:\n' +
                'LSP opens RGB channels to both Node A and Node B after connectPeer. ' +
                'Channel confirmation takes ~10 min (6 blocks × 100s).\n\n' +
@@ -70,57 +78,74 @@ export default function LspSignetScreen() {
                'After outbound liquidity is confirmed, Node A pays Node B\'s LN invoice ' +
                'via the LSP as routing node.'}
             </Text>
+
+            {!envReady && (
+              <View style={s.warnCard}>
+                <Text style={s.warnTxt}>
+                  {'Run the setup script first:\n\n  ./scripts/start-lsp-regtest.sh\n\nThen rebuild the app to pick up .env.lsp.local'}
+                </Text>
+              </View>
+            )}
+
             <View style={s.paramCard}>
-              <Text style={s.paramTitle}>Config</Text>
-              <Text style={s.paramLine}>LSP      {LSP_URL}</Text>
-              <Text style={s.paramLine}>Payment  {PAYMENT_MSAT / 1000} sat + {PAYMENT_ASSET_AMOUNT} UTST</Text>
-              <Text style={s.paramLine}>Peer     discovered from GET /get_info</Text>
+              <Text style={s.paramTitle}>Config from env</Text>
+              <Text style={s.paramLine}>LSP API     {LSP_URL}</Text>
+              <Text style={s.paramLine}>LSP daemon  {LSP_DAEMON_URL}</Text>
+              <Text style={s.paramLine}>Faucet      {FAUCET_DAEMON_URL}</Text>
+              <Text style={s.paramLine}>Asset ID    {ASSET_ID ? short(ASSET_ID, 28) : '(not set)'}</Text>
+              <Text style={s.paramLine}>Payment     {PAYMENT_MSAT / 1000} sat + {PAYMENT_ASSET_AMOUNT} RGB unit</Text>
             </View>
-            <TouchableOpacity style={s.startBtn} onPress={flow.run} activeOpacity={0.8}>
-              <Text style={s.startBtnTxt}>▶  Run on Signet</Text>
+
+            <TouchableOpacity
+              style={[s.startBtn, !envReady && { opacity: 0.4 }]}
+              onPress={flow.run}
+              disabled={!envReady}
+              activeOpacity={0.8}>
+              <Text style={s.startBtnTxt}>▶  Run Full E2E Flow</Text>
             </TouchableOpacity>
           </View>
         )}
 
         {/* Spinners */}
-        {isRunning && ['init', 'utxos', 'asset', 'lsp_flow'].includes(flow.phase) && (
+        {isRunning && ['preflight', 'init', 'utxos'].includes(flow.phase) && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>
-              {flow.phase === 'init'     ? 'Initializing Node A + B on signet …'
-                : flow.phase === 'utxos'  ? 'Creating UTXOs on both nodes …'
-                : flow.phase === 'asset'  ? 'Node B issuing RGB asset (UTST) …'
-                : 'lspA.receiveAsset → LN + RGB invoice …'}
+              {flow.phase === 'preflight' ? 'Checking LSP + Faucet daemons …'
+                : flow.phase === 'init'   ? 'Creating User A node on regtest …'
+                : 'Creating UTXOs …'}
             </Text>
           </View>
         )}
         {flow.phase === 'fund' && (
-          <View style={s.card}>
-            <ActivityIndicator size="large" color={AppColors.primary} style={{ marginBottom: 12 }} />
-            <Text style={s.cardTitle}>Funding via faucet</Text>
-            <Text style={s.cardDesc}>Polling every 20s for confirmed balance …</Text>
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>Funding User A (sendToAddress + mine 6) …</Text>
+            {flow.addrA ? <Text style={[s.spinnerTxt, { marginTop: 8, fontSize: 11, fontFamily: AppColors.mono }]}>{flow.addrA}</Text> : null}
           </View>
         )}
-        {(flow.phase === 'channel' || flow.phase === 'b_channel') && (
+        {flow.phase === 'channel' && (
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>Waiting for LSP to open RGB channel …</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>(mining blocks, LSP cron = 30s)</Text>
+          </View>
+        )}
+        {['b_init', 'b_channel'].includes(flow.phase) && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>
-              {flow.phase === 'channel'
-                ? 'Waiting for LSP → Node A RGB channel (~10 min) …'
-                : 'Waiting for LSP → Node B RGB channel (~10 min) …'}
-            </Text>
-            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>
-              LSP cron 30s · channel needs 6 confirmations
+              {flow.phase === 'b_init' ? 'Creating User B node …' : 'Waiting for LSP → User B RGB channel …'}
             </Text>
           </View>
         )}
-        {['rgb_send', 'settle'].includes(flow.phase) && (
+        {['lsp_flow', 'rgb_send', 'settle'].includes(flow.phase) && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>
-              {flow.phase === 'rgb_send'
-                ? 'Node B sending RGB on-chain to LSP …'
-                : `Part 1 settling … nodeA invoice: ${flow.invoiceStatus || 'Pending'}`}
+              {flow.phase === 'lsp_flow' ? 'LSP lightningReceive …'
+                : flow.phase === 'rgb_send' ? 'Faucet sending RGB to LSP …'
+                : `Part 1: waiting for User A invoice … ${flow.invoiceStatus || 'Pending'}`}
             </Text>
           </View>
         )}
@@ -128,76 +153,76 @@ export default function LspSignetScreen() {
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>
-              {flow.phase === 'p2_pay'
-                ? 'Part 2: Node A sending payment to Node B …'
-                : `Part 2 settling … nodeB invoice: ${flow.invoiceStatusB || 'Pending'}`}
+              {flow.phase === 'p2_pay' ? 'Part 2: User A sending payment to User B …'
+                : `Part 2: waiting for User B invoice … ${flow.invoiceStatusB || 'Pending'}`}
             </Text>
           </View>
         )}
 
         {/* Info cards */}
         {flow.lspInfo && (
-          <InfoCard title="LSP (utexo-lsp signet)" accent={AppColors.success} rows={[
+          <InfoCard title="LSP (utexo-lsp)" accent={AppColors.success} rows={[
+            ['API',      LSP_URL],
             ['Pubkey',   short(flow.lspInfo.pubkey, 28)],
             ['Channels', `${flow.lspInfo.numChannels} total · ${flow.lspInfo.numUsableChannels} usable`],
           ]} />
         )}
-        {(flow.addrA || flow.addrB) && (
-          <View>
-            {flow.addrA ? <View style={nc.card}><Text style={[nc.label, { color: AppColors.primary }]}>Node A — Recipient</Text><Text selectable style={nc.addr}>{flow.addrA}</Text><Text style={nc.stat}>Settled: {satStr(stA)}  Spendable: {satStr(spA)}</Text></View> : null}
-            {flow.addrB ? <View style={nc.card}><Text style={[nc.label, { color: AppColors.running }]}>Node B — RGB Sender</Text><Text selectable style={nc.addr}>{flow.addrB}</Text><Text style={nc.stat}>Settled: {satStr(stB)}  Spendable: {satStr(spB)}</Text></View> : null}
-          </View>
-        )}
-        {flow.assetInfo && (
-          <InfoCard title="RGB Asset (Node B issued)" accent={AppColors.running} rows={[
-            ['Asset ID', short(flow.assetInfo.assetId, 28)],
-            ['Ticker',   flow.assetInfo.ticker],
-            ['Supply',   String(flow.assetInfo.issuedSupply)],
+        {flow.addrA && (
+          <InfoCard title="User A (embedded SDK)" rows={[
+            ['Address',   flow.addrA],
+            ['Settled',   satStr(stA)],
+            ['Spendable', satStr(spA)],
           ]} />
         )}
-        {flow.channelA && (
-          <InfoCard title="RGB Channel (LSP → Node A)" accent={AppColors.primary} rows={[
-            ['Capacity', `${flow.channelA.capacitySat} sat`],
-            ['Outbound', `${flow.channelA.outboundBalanceMsat} msat`],
-            ['Status',   'Usable ✓'],
-          ]} />
-        )}
-        {flow.channelB && (
-          <InfoCard title="RGB Channel (LSP → Node B)" accent={AppColors.primary} rows={[
-            ['Capacity', `${flow.channelB.capacitySat} sat`],
+        {flow.channelInfo && (
+          <InfoCard title="RGB Channel (LSP → User A)" accent={AppColors.primary} rows={[
+            ['Asset',    short(ASSET_ID, 28)],
+            ['Capacity', `${flow.channelInfo.capacitySat ?? flow.channelInfo.capacity_sat ?? '?'} sat`],
             ['Status',   'Usable ✓'],
           ]} />
         )}
         {flow.lnInvoiceA && (
-          <InfoCard title="Node A — LN Invoice" rows={[
+          <InfoCard title="User A — LN Invoice" rows={[
             ['BOLT11',  short(flow.lnInvoiceA, 32)],
-            ['Amount',  `${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} UTST`],
+            ['Amount',  `${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} RGB`],
             ['Status',  flow.invoiceStatus || 'Pending'],
           ]} />
         )}
         {flow.rgbInvoiceLsp && (
-          <InfoCard title="LSP RGB Invoice (Node B pays this)" rows={[
+          <InfoCard title="LSP → RGB Invoice (Faucet pays this)" rows={[
             ['RGB Invoice', short(flow.rgbInvoiceLsp, 32)],
-            ['Send amount', `${PAYMENT_ASSET_AMOUNT} UTST`],
+            ['Send amount', `${FAUCET_PAY_AMOUNT} RGB unit`],
+          ]} />
+        )}
+        {flow.addrB && (
+          <InfoCard title="User B (embedded SDK)" rows={[['Address', flow.addrB]]} />
+        )}
+        {flow.channelInfoB && (
+          <InfoCard title="RGB Channel (LSP → User B)" accent={AppColors.primary} rows={[
+            ['Asset',    short(ASSET_ID, 28)],
+            ['Capacity', `${flow.channelInfoB.capacitySat ?? flow.channelInfoB.capacity_sat ?? '?'} sat`],
+            ['Status',   'Usable ✓'],
           ]} />
         )}
         {flow.lnInvoiceB && (
-          <InfoCard title="Node B — LN Invoice (Part 2)" rows={[
+          <InfoCard title="User B — LN Invoice" rows={[
             ['BOLT11',  short(flow.lnInvoiceB, 32)],
-            ['Amount',  `${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} UTST`],
+            ['Amount',  `${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} RGB`],
             ['Status',  flow.invoiceStatusB || 'Pending'],
           ]} />
         )}
 
         {/* Done */}
         {flow.phase === 'done' && (
-          <View style={[s.card, { borderColor: AppColors.successBorder }]}>
-            <Text style={[s.cardTitle, { color: AppColors.success }]}>✓ Full LSP Flow Complete</Text>
+          <View style={[s.card, { borderColor: flow.invoiceStatusB === 'Settled' ? AppColors.successBorder : AppColors.border }]}>
+            <Text style={[s.cardTitle, { color: flow.invoiceStatusB === 'Settled' ? AppColors.success : AppColors.textPrimary }]}>
+              {flow.invoiceStatusB === 'Settled' ? '✓ Full E2E Flow Complete' : '⚠ Flow done — check settlement'}
+            </Text>
             <Text style={s.cardDesc}>
-              {'Part 1: Node B → LSP → Node A via RGB Lightning channel\n' +
-               'Part 2: Node A → LSP → Node B via RGB Lightning\n\n' +
-               `Node A offchain inbound: ${flow.finalBalA?.offchainInbound ?? 0}\n` +
-               `Node B offchain inbound: ${flow.finalBalB?.offchainInbound ?? 0}`}
+              {'Part 1: Faucet → LSP → User A via RGB Lightning channel\n' +
+               'Part 2: User A → LSP → User B via RGB Lightning\n\n' +
+               `User A offchain inbound: ${flow.finalBalA?.offchainInbound ?? 0} → outbound: ${flow.finalBalA?.offchainOutbound ?? 0}\n` +
+               `User B offchain inbound: ${flow.finalBalB?.offchainInbound ?? 0}`}
             </Text>
           </View>
         )}
@@ -224,11 +249,12 @@ export default function LspSignetScreen() {
         {flow.log.length > 0 && <LogPane entries={flow.log} />}
 
       </ScrollView>
-    </SafeAreaView>
+    </Root>
   );
 }
 
 const s = StyleSheet.create({
+  embedded:    { backgroundColor: AppColors.bgBase },
   safe:        { flex: 1, backgroundColor: AppColors.bgBase },
   scroll:      { flex: 1 },
   content:     { padding: 16, paddingBottom: 60 },
@@ -241,7 +267,9 @@ const s = StyleSheet.create({
   card:        { backgroundColor: AppColors.bgCard, borderRadius: 12, padding: 20, borderWidth: 1, borderColor: AppColors.border, marginBottom: 16 },
   cardTitle:   { fontSize: 15, fontWeight: '700', color: AppColors.textPrimary, marginBottom: 8 },
   cardDesc:    { fontSize: 13, color: AppColors.textSecondary, lineHeight: 22 },
-  paramCard:   { backgroundColor: AppColors.bgCardElevated, borderRadius: 8, padding: 12, marginVertical: 14 },
+  warnCard:    { backgroundColor: AppColors.errorBg, borderRadius: 8, padding: 12, marginVertical: 12, borderWidth: 1, borderColor: AppColors.errorBorder },
+  warnTxt:     { fontSize: 12, color: '#FCA5A5', fontFamily: AppColors.mono, lineHeight: 20 },
+  paramCard:   { backgroundColor: AppColors.bgCardElevated, borderRadius: 8, padding: 12, marginVertical: 12 },
   paramTitle:  { fontSize: 11, color: AppColors.textTertiary, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.8 },
   paramLine:   { fontSize: 12, color: AppColors.textSecondary, fontFamily: AppColors.mono, marginBottom: 2 },
   startBtn:    { backgroundColor: AppColors.primary, borderRadius: 10, paddingVertical: 14, alignItems: 'center', marginTop: 4 },
@@ -252,11 +280,4 @@ const s = StyleSheet.create({
   resetBtnTxt: { fontSize: 14, fontWeight: '600', color: AppColors.primary },
   cancelBtn:   { borderWidth: 1, borderColor: AppColors.error, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginBottom: 16 },
   cancelBtnTxt:{ fontSize: 13, color: AppColors.error },
-});
-
-const nc = StyleSheet.create({
-  card:  { backgroundColor: AppColors.bgCard, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: AppColors.border, marginBottom: 10 },
-  label: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 },
-  addr:  { fontSize: 11, color: AppColors.textAccent, fontFamily: AppColors.mono, marginBottom: 8 },
-  stat:  { fontSize: 12, color: AppColors.textTertiary },
 });
