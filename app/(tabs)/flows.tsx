@@ -12,6 +12,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 
 import { AppColors } from '@/constants/theme';
+import VirtualChannelScreen from '@/screens/virtual-channel/index';
+import VirtualChannelSignetScreen from '@/screens/virtual-channel-signet/index';
 import {
   buildRegtestConfig,
   buildUtexoConfig,
@@ -1051,10 +1053,13 @@ export default function FlowsScreen() {
                 );
               })}
             </FlowCard>
+
+            <VirtualChannelScreen embedded />
           </>
         )}
 
         {activeTab === 'utexo' && (
+          <>
           <FlowCard
             title="VSS Backup & Restore"
             funcName="runRlnUtexoVssFlow"
@@ -1081,6 +1086,8 @@ export default function FlowsScreen() {
               );
             })}
           </FlowCard>
+          <VirtualChannelSignetScreen embedded />
+          </>
         )}
 
         <View style={styles.footer} />

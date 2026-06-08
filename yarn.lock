@@ -1532,22 +1532,10 @@
     "@emnapi/runtime" "^1.4.3"
     "@tybys/wasm-util" "^0.10.0"
 
-"@noble/curves@~2.2.0", "@noble/curves@2.2.0":
-  version "2.2.0"
-  resolved "https://registry.npmjs.org/@noble/curves/-/curves-2.2.0.tgz"
-  integrity sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==
-  dependencies:
-    "@noble/hashes" "2.2.0"
-
-"@noble/hashes@^2.0.1", "@noble/hashes@~2.2.0", "@noble/hashes@2.2.0":
+"@noble/hashes@2.2.0":
   version "2.2.0"
   resolved "https://registry.npmjs.org/@noble/hashes/-/hashes-2.2.0.tgz"
   integrity sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==
-
-"@noble/secp256k1@3.0.0":
-  version "3.0.0"
-  resolved "https://registry.npmjs.org/@noble/secp256k1/-/secp256k1-3.0.0.tgz"
-  integrity sha512-NJBaR352KyIvj3t6sgT/+7xrNyF9Xk9QlLSIqUGVUYlsnDTAUqY8LOmwpcgEx4AMJXRITQ5XEVHD+mMaPfr3mg==
 
 "@nolyfill/is-core-module@1.0.39":
   version "1.0.39"
@@ -1939,19 +1927,10 @@
   resolved "https://registry.npmjs.org/@rtsao/scc/-/scc-1.1.0.tgz"
   integrity sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==
 
-"@scure/base@^2.0.0", "@scure/base@~2.2.0", "@scure/base@2.2.0":
+"@scure/base@2.2.0":
   version "2.2.0"
   resolved "https://registry.npmjs.org/@scure/base/-/base-2.2.0.tgz"
   integrity sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==
-
-"@scure/bip32@^2.0.1":
-  version "2.2.0"
-  resolved "https://registry.npmjs.org/@scure/bip32/-/bip32-2.2.0.tgz"
-  integrity sha512-zFr7t2F+a9+5tB7QbarF2HQNYrgjCNaoLAupZdKkrFMYMozJf5zqH2WJCQibMzm1qQ0QogrxVGO3qXfQDYMaQg==
-  dependencies:
-    "@noble/curves" "2.2.0"
-    "@noble/hashes" "2.2.0"
-    "@scure/base" "2.2.0"
 
 "@scure/bip39@^2.0.1":
   version "2.2.0"
@@ -1960,16 +1939,6 @@
   dependencies:
     "@noble/hashes" "2.2.0"
     "@scure/base" "2.2.0"
-
-"@scure/btc-signer@^2.0.1":
-  version "2.2.0"
-  resolved "https://registry.npmjs.org/@scure/btc-signer/-/btc-signer-2.2.0.tgz"
-  integrity sha512-ZXZ08sZqSZKEcOuEQnxTF66ouHtl6+UA6U/QfQM06K9WiOlEkXF4LviZCaSgkdiFh9cyMt9+xdup7JtEv3p0fw==
-  dependencies:
-    "@noble/curves" "~2.2.0"
-    "@noble/hashes" "~2.2.0"
-    "@scure/base" "~2.2.0"
-    micro-packed "~0.9.0"
 
 "@sinclair/typebox@^0.27.8":
   version "0.27.10"
@@ -2340,20 +2309,9 @@
     "@urql/core" "^5.1.2"
     wonka "^6.3.2"
 
-"@utexo/rgb-sdk-core@1.0.0-beta.4":
-  version "1.0.0-beta.4"
-  resolved "https://registry.npmjs.org/@utexo/rgb-sdk-core/-/rgb-sdk-core-1.0.0-beta.4.tgz"
-  integrity sha512-2CXOX8+6N2B/71smay/pJmlnYfYiGTyNFuemkeouSFGWMhCa9bcpq19y5kno608TC+A0JsO4vHFgQUXocn/Gyw==
-  dependencies:
-    "@noble/hashes" "^2.0.1"
-    "@noble/secp256k1" "3.0.0"
-    "@scure/bip32" "^2.0.1"
-    "@scure/bip39" "^2.0.1"
-
-"@utexo/rgb-sdk-rn@1.0.0-beta.12":
+"@utexo/rgb-sdk-rn@file:../rgb-sdk-rn":
   version "1.0.0-beta.12"
-  resolved "https://registry.npmjs.org/@utexo/rgb-sdk-rn/-/rgb-sdk-rn-1.0.0-beta.12.tgz"
-  integrity sha512-E3izdcMCD65S6FHDpzHaoHgWTJcM7fwgUv54H4xzKqh3+oisLM8/gl2XuJZvw6KyN5L4bKS9qaLpt53VXy781A==
+  resolved "file:../rgb-sdk-rn"
   dependencies:
     "@noble/hashes" "^2.0.1"
     "@noble/secp256k1" "3.0.0"
@@ -5979,13 +5937,6 @@ metro@^0.83.1, metro@0.83.3:
     throat "^5.0.0"
     ws "^7.5.10"
     yargs "^17.6.2"
-
-micro-packed@~0.9.0:
-  version "0.9.0"
-  resolved "https://registry.npmjs.org/micro-packed/-/micro-packed-0.9.0.tgz"
-  integrity sha512-gFdaWTxEXOwtSOcpxulO4AuXVtp3HWIRmB8eq8+3m1Zku0ubgva0UGpi03YhcvsTJasHngG9gTIUK5kHNKdesg==
-  dependencies:
-    "@scure/base" "~2.2.0"
 
 micromatch@^4.0.4:
   version "4.0.8"

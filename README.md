@@ -1,6 +1,6 @@
 # rgb-sdk-rn Demo
 
-End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet), and two **LSP** flows demonstrating inbound RGB liquidity via a Liquidity Service Provider (regtest and UTEXO signet).
+End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, a **Virtual Channel** flow (regtest and UTEXO signet) demonstrating `trusted_no_broadcast` RGB Lightning channels, a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet), and two **LSP** flows demonstrating inbound RGB liquidity via a Liquidity Service Provider (regtest and UTEXO signet).
 
 ---
 
@@ -176,6 +176,8 @@ Ranges used per flow:
 - Flow 2 (3-node payment): 21000–26000
 - Flow 3 (Ext signer asset channel): 20000–30000
 - Flow 4 (Ext signer 3-node): 22000–27000
+- Virtual Channel Regtest: 20000–30000
+- Virtual Channel Signet: 43000–44000 (`43000 + random(0–999)`)
 
 Make sure nothing else on your machine binds these ranges, or firewall rules don't block localhost loopback on them.
 
@@ -186,8 +188,12 @@ Make sure nothing else on your machine binds these ranges, or firewall rules don
 Each node gets its own directory inside the app's `documentDirectory`:
 
 ```
-<documentDirectory>/rln_wallet_chan_a_<timestamp>/   ← nodeA state
-<documentDirectory>/rln_wallet_chan_b_<timestamp>/   ← nodeB state
+<documentDirectory>/rln_wallet_chan_a_<timestamp>/   ← Flows tab nodes
+<documentDirectory>/rln_wallet_chan_b_<timestamp>/
+<documentDirectory>/vc_na_<timestamp>/               ← Virtual Channel regtest
+<documentDirectory>/vc_nb_<timestamp>/
+<documentDirectory>/vc_sig_na_<timestamp>/           ← Virtual Channel signet
+<documentDirectory>/vc_sig_nb_<timestamp>/
 ```
 
 These directories are created by the demo using `expo-file-system` before the SDK node is initialized. The SDK persists all node state (channels, keys, transfers) in these directories. Re-running a flow creates fresh directories with a new timestamp — the old ones remain on disk and must be cleaned manually if disk space is a concern.
@@ -314,6 +320,111 @@ Identical scenario to Flow 2 (3-node, 1000 USDT, 4 payments, close, on-chain sen
 - Everything else is the same SDK API surface
 
 **Final balances:** A=25, B=25, C=950 (same as Flow 2)
+
+---
+
+## Virtual Channel Flows
+
+Virtual channels use `trusted_no_broadcast` mode: the RLN daemon negotiates a channel with the counterparty and sets up the Lightning/RGB state machine, but the Bitcoin funding transaction is **never broadcast**. The channel exists purely in the nodes' in-memory state and is useful for off-chain asset transfers that settle without touching the chain.
+
+**New SDK params required for virtual channels:**
+
+```typescript
+// Node that accepts inbound virtual channel opens must list the opener's pubkey
+const nodeBWallet = new UTEXOWallet(
+  {
+    ...,
+    enableVirtualChannelsV0: true,
+    virtualPeerPubkeys: [nodaAPubkey],   // allow nodeA to open virtual channels
+  },
+  signer,
+);
+
+// Opener passes the virtual mode when calling openChannel
+await nodeA.openChannel({
+  peerPubkeyAndOptAddr: peerUri,
+  capacitySat: 100_000,
+  ...,
+  assetId,
+  assetAmount: 200,
+  virtualOpenMode: 'trusted_no_broadcast',
+});
+```
+
+`virtualPeerPubkeys` is `string[] | null`. Both nodes need `enableVirtualChannelsV0: true`; the acceptor additionally needs the opener's pubkey listed so it allows the channel. Without it LDK force-closes with `unsupported_scid_alias`.
+
+---
+
+### Virtual Channel — Regtest
+
+**Files:** `screens/virtual-channel/config.ts`, `screens/virtual-channel/useVirtualChannelFlow.ts`, `screens/virtual-channel/index.tsx`
+
+**Location in app:** Flows tab → Regtest sub-tab (bottom card)
+
+**Infrastructure:** Same as the four regtest flows — `./regtest.sh start` + `local-node-bridge.js` on port `5000`.
+
+**What it demonstrates:** Two nodes on the same device execute the full virtual channel lifecycle: issue RGB asset, connect peers, open a `trusted_no_broadcast` RGB channel, pay A→B, pay B→A. No funding transaction appears on-chain.
+
+**Flow steps:**
+
+| Phase | What happens |
+|-------|-------------|
+| `init` | Create Node A: `createWallet` + `UTEXOWallet` + `enableVirtualChannelsV0: true` |
+| `init_b` | Create Node B: same + `virtualPeerPubkeys: [pubkeyA]` |
+| `fund` | `sendToAddress(A, 0.3 BTC)` + `sendToAddress(B, 0.3 BTC)` + `mine(6)` + `createUtxos` on both |
+| `issue` | Node A issues 1 000 VTST (NIA), polls until `settled > 0` |
+| `connect` | `nodeA.connectPeer(nodeB)` |
+| `open_channel` | `nodeA.openChannel({ capacitySat: 100 000, assetAmount: 200, virtualOpenMode: 'trusted_no_broadcast' })` |
+| `wait_channel` | Poll `listChannels()` until both nodes see the channel as usable |
+| `pay_ab` | Node B creates invoice (3 000 sat + 1 VTST); Node A pays |
+| `settle_ab` | Poll until invoice `Succeeded` |
+| `pay_ba` | Node A creates reverse invoice; Node B pays |
+| `settle_ba` | Poll until reverse invoice `Succeeded` |
+
+**Parameters:** `CHANNEL_CAPACITY_SAT = 100 000`, `CHANNEL_ASSET_AMOUNT = 200`, `PAYMENT_MSAT = 3 000 000`, `PAYMENT_ASSET_AMOUNT = 1`, `VIRTUAL_OPEN_MODE = 'trusted_no_broadcast'`
+
+---
+
+### Virtual Channel — UTEXO Signet
+
+**Files:** `screens/virtual-channel-signet/config.ts`, `screens/virtual-channel-signet/useVirtualChannelSignetFlow.ts`, `screens/virtual-channel-signet/index.tsx`
+
+**Location in app:** Flows tab → UTEXO sub-tab (bottom card)
+
+**Infrastructure:** No local stack needed. Requires UTEXO signet credentials in `.env.local` (`EXPO_PUBLIC_UTEXO_*`) and two env vars for the automatic faucet:
+
+```bash
+EXPO_PUBLIC_FAUCET_URL=https://faucet.utexo.com/...
+EXPO_PUBLIC_FAUCET_BEARER_TOKEN=<token>
+```
+
+**What it demonstrates:** Same virtual channel lifecycle as the regtest variant, but on UTEXO signet. Nodes are funded automatically via `sendToAddressUtexo()` (faucet API). No `mine()` calls — blocks arrive every ~100 s. All steps use polling with generous timeouts (up to 30 min for some phases).
+
+**Flow steps:**
+
+| Phase | What happens |
+|-------|-------------|
+| `init` | Create Node A: `createWallet('utexo')` + `UTEXOWallet(network: 'utexo', enableVirtualChannelsV0: true)` |
+| `init_b` | Create Node B: same + `virtualPeerPubkeys: [pubkeyA]` |
+| `fund` | Faucet → both addresses (60 000 sat each); poll until `settled > 0` (up to 15 min) |
+| `utxos` | `createUtxos({ num: 5, size: 7 000, feeRate: 2 })` on both; poll until `spendable > 0` (up to 15 min) |
+| `issue` | Node A issues 1 000 VTST; poll until `settled > 0` (up to 30 min) |
+| `connect` | `nodeA.connectPeer(nodeB)` |
+| `open_channel` | `nodeA.openChannel({ capacitySat: 31 000, assetAmount: 200, virtualOpenMode: 'trusted_no_broadcast' })` |
+| `wait_channel` | Poll `listChannels()` (up to 30 min) |
+| `pay_ab` | Node B invoices; Node A pays |
+| `settle_ab` | Poll until `Succeeded` (up to 5 min) |
+| `pay_ba` | Reverse payment B→A |
+| `settle_ba` | Poll until `Succeeded` |
+
+**Key signet-specific details:**
+
+- `CHANNEL_CAPACITY_SAT = 31 000` (instead of 100 000) — rgb-lib's `send_begin` creates a PSBT with a `capacity_sat`-sized output using **only colored UTXOs** as inputs (`manually_selected_only`). With `size: 7 000` and 5 UTXOs = 35 000 sat colored BTC, the 31 000 sat output + ~2 000 sat fees fits; a 100 000 sat channel would not.
+- `FAUCET_AMOUNT_SAT = 60 000` per node — funds `createUtxos` (~36 500 sat) with ~23 500 sat headroom.
+- Faucet responses may timeout (HTTP) but BTC still arrives; the flow logs the timeout and continues to `pollFunded`.
+- Both nodes store state in `<documentDirectory>/vc_sig_na_<ts>/` and `vc_sig_nb_<ts>/`.
+
+**Parameters:** `CHANNEL_CAPACITY_SAT = 31 000`, `CHANNEL_ASSET_AMOUNT = 200`, `PAYMENT_MSAT = 3 000 000`, `PAYMENT_ASSET_AMOUNT = 1`, `FAUCET_AMOUNT_SAT = 60 000`, `VIRTUAL_OPEN_MODE = 'trusted_no_broadcast'`
 
 ---
 
@@ -453,7 +564,8 @@ The LSP cron fires every 5 s and calls `/openchannel` for every connected peer. 
 - Key derivation: `createWallet()` → mnemonic, xpubVan, xpubCol, masterFingerprint
 - BTC balance, address, UTXO management
 - RGB asset issuance (NIA, CFA, IFA, UDA)
-- Lightning channel open / close / keysend
+- Lightning channel open / close / keysend — including `virtualOpenMode: 'trusted_no_broadcast'`
+- Virtual channel negotiation (`enableVirtualChannelsV0`, `virtualPeerPubkeys`)
 - Lightning invoice create + pay + poll
 - RGB Lightning payments (asset over LN)
 - RGB on-chain send: `send()`, `blindReceive()`, `witnessReceive()`

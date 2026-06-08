@@ -169,7 +169,7 @@ function LogPane({ entries }: { entries: LogEntry[] }) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-export default function AsyncPayScreen() {
+export default function AsyncPayScreen({ embedded = false }: { embedded?: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [log, setLog]     = useState<LogEntry[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
@@ -608,9 +608,18 @@ export default function AsyncPayScreen() {
   const isRunning  = !['idle', 'done', 'error'].includes(phase);
   const envReady   = !!ASSET_ID;
 
+  const Root = embedded ? View : SafeAreaView;
+  const rootProps = embedded
+    ? { style: s.embedded }
+    : { style: s.safe, edges: ['top', 'left', 'right'] as const };
+
   return (
-    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
-      <ScrollView style={s.scroll} contentContainerStyle={s.content}>
+    <Root {...rootProps}>
+      <ScrollView
+        style={embedded ? undefined : s.scroll}
+        contentContainerStyle={s.content}
+        scrollEnabled={!embedded}
+        nestedScrollEnabled={embedded}>
 
         <View style={s.header}>
           <Text style={s.title}>Async Payment (apay)</Text>
@@ -803,13 +812,14 @@ export default function AsyncPayScreen() {
 
         {log.length > 0 && <LogPane entries={log} />}
       </ScrollView>
-    </SafeAreaView>
+    </Root>
   );
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
+  embedded:       { backgroundColor: AppColors.bgBase },
   safe:           { flex: 1, backgroundColor: AppColors.bgBase },
   scroll:         { flex: 1 },
   content:        { padding: 16, paddingBottom: 60 },
