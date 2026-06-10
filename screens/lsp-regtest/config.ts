@@ -33,6 +33,8 @@ export const CHANNEL_TIMEOUT_S    = 120;
 export const PAYMENT_TIMEOUT_S    = 60;
 export const POLL_INTERVAL_S      = 2;
 
+export type LspChannelMode = 'regular' | 'virtual';
+
 export type Phase =
   | 'idle' | 'preflight' | 'init' | 'fund' | 'utxos'
   | 'channel' | 'b_init' | 'b_channel'

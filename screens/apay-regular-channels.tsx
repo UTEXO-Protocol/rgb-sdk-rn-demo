@@ -1,24 +1,11 @@
 /**
- * Async Payment tab — demonstrates the full apay flow:
+ * APay Cart Checkout — cart scenario on virtual RGB channels (trusted_no_broadcast).
  *
- * Phase 1 — Recipient (User B) registers a hash pool with the LSP:
- *   wallet.apayNew(lspNodePubkey)
- *   Internally: Recipient RLN → Host RLN (P2P) → utexo-lsp /internal/async_order/new
- *   GET ${LSP_URL}/lightning_address/by_pubkey/${userBPubkey} → username + domain
- *
- * Phase 2 — Sender (User A) discovers User B's Lightning Address and pays:
- *   GET ${LSP_URL}/.well-known/lnurlp/${username}   → LNURL callback
- *   GET ${callback}?amount=${amtMsat}                   → HODL BOLT11
- *   wallet.payLightningInvoice({ lnInvoice: hodlBolt11, assetId, assetAmount })
- *   → HTLC is held at the LSP (payment NOT yet settled)
- *
- * Phase 3 — User B comes online and claims:
- *   wallet.listPaymentsRaw() → filter InboundHodl + Claimable
- *   wallet.claimHodlInvoice(paymentHash, preimage)
- *   → LSP receives preimage, settles inbound HTLC from sender
+ * Same APay protocol as Async Payment, different UX (shop cart narrative +
+ * LSP auto-settlement verify instead of manual claimHodlInvoice).
  *
  * Prerequisites:
- *   cd rgb-sdk-rn-demo && ./scripts/start-lsp-regtest.sh
+ *   ./scripts/start-lsp-local.sh  (virtual LSP + utexo-lsp)
  */
 import * as FileSystem from 'expo-file-system/legacy';
 import { documentDirectory } from 'expo-file-system/legacy';
@@ -39,7 +26,6 @@ import { mine, sendToAddress } from '@/utils/wallet-flow';
 import {
   createWallet,
   PasswordRLNSigner,
-  UtexoLsp,
   UTEXOWallet,
   type LspPeer,
 } from '@utexo/rgb-sdk-rn';
@@ -51,10 +37,8 @@ const _host = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
 const LSP_URL        = `http://${_host}:8080`;
 const LSP_DAEMON_URL = `http://${_host}:3005`;
 
-const ASSET_ID    = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID ?? '';
+const ASSET_ID     = process.env.EXPO_PUBLIC_LSP_REGTEST_ASSET_ID ?? '';
 const LSP_LDK_PORT = Number(process.env.EXPO_PUBLIC_LSP_REGTEST_LDK_PORT ?? '9737');
-// LSP pubkey is fetched at runtime from /nodeinfo so no rebuild is needed
-// after restarting the LSP stack (each restart generates a new identity).
 let LSP_PEER_PUBKEY = process.env.EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY ?? '';
 
 const REGTEST_UNLOCK = {
@@ -68,11 +52,13 @@ const REGTEST_UNLOCK = {
   announceAlias: null as string | null,
 };
 
+const CART_ITEM            = '1× RGB Token (UTST)';
 const PAYMENT_MSAT         = 3_000_000;
 const PAYMENT_ASSET_AMOUNT = 1;
-const CHANNEL_TIMEOUT_S    = 120;
-const CLAIM_TIMEOUT_S      = 90;
-const POLL_INTERVAL_MS     = 3_000;
+const CHANNEL_TIMEOUT_S       = 180;
+const SETTLE_TIMEOUT_S        = 120;
+const POLL_INTERVAL_MS          = 3_000;
+const MERCHANT_KEEPALIVE_MS     = 15_000;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,24 +66,122 @@ type Phase =
   | 'idle'
   | 'b_init' | 'b_fund' | 'b_utxos' | 'b_channel' | 'register'
   | 'a_init' | 'a_fund' | 'a_utxos' | 'a_channel'
-  | 'lnurlp' | 'send' | 'poll' | 'claim'
+  | 'lnurlp' | 'send' | 'settle'
   | 'done' | 'error';
 
 interface LogEntry { time: string; msg: string; type: 'info' | 'success' | 'error' }
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 const short = (s: string, n = 24) => (s || '').slice(0, n) + ((s || '').length > n ? '…' : '');
+const normHash = (h: string) => (h || '').toLowerCase().replace(/^0x/, '');
+
+function chanField<T>(c: Record<string, unknown>, camel: string, snake: string): T | undefined {
+  return (c[camel] ?? c[snake]) as T | undefined;
+}
+
+/** Settlement-time snapshot — merchant inbound HTLC / claim state vs buyer outbound. */
+async function logSettlementDiagnostics(
+  wA: UTEXOWallet,
+  wB: UTEXOWallet,
+  paymentHash: string,
+  lspPubkey: string,
+  addLog: (msg: string, type?: LogEntry['type']) => void,
+): Promise<void> {
+  try {
+    const [buyerPays, merchantPays, buyerChans, merchantChans, peers] = await Promise.all([
+      wA.listPaymentsRaw().catch(() => []),
+      wB.listPaymentsRaw().catch(() => []),
+      wA.listChannels().catch(() => []),
+      wB.listChannels().catch(() => []),
+      wB.listPeers().catch(() => []),
+    ]);
+
+    const n = normHash(paymentHash);
+    const bp = buyerPays.find(p => normHash(p.paymentHash) === n);
+    const mp = merchantPays.find(p => normHash(p.paymentHash) === n);
+
+    addLog(
+      `diag buyer outbound: ${bp
+        ? `${bp.status}/${bp.paymentType ?? '?'} msat=${bp.amtMsat ?? '?'} rgb=${bp.assetAmount ?? '?'}`
+        : 'not in listPayments'}`,
+    );
+    addLog(
+      `diag merchant inbound (hash): ${mp
+        ? `${mp.status}/${mp.paymentType ?? '?'} preimage=${mp.preimage ? 'yes' : 'no'}`
+        : 'not in listPayments'}`,
+    );
+
+    const inbound = merchantPays.filter(p =>
+      String(p.paymentType ?? '').toLowerCase().includes('inbound'),
+    );
+    if (inbound.length) {
+      const brief = inbound
+        .slice(0, 4)
+        .map(p => `${short(p.paymentHash, 8)}=${p.status}/${p.paymentType ?? '?'}`)
+        .join(' ');
+      addLog(`diag merchant inbound (${inbound.length}): ${brief}`);
+    } else {
+      addLog('diag merchant inbound: none in listPayments');
+    }
+
+    const pickLspChan = (chans: typeof buyerChans) =>
+      chans.find(c => {
+        const peer = String(chanField<string>(c as any, 'peerPubkey', 'peer_pubkey') ?? '');
+        const asset = String(chanField<string>(c as any, 'assetId', 'asset_id') ?? '');
+        return peer === lspPubkey && asset === ASSET_ID;
+      });
+
+    const mChan = pickLspChan(merchantChans);
+    const aChan = pickLspChan(buyerChans);
+    if (mChan) {
+      addLog(
+        `diag merchant→LSP chan: localRgb=${chanField<number>(mChan as any, 'assetLocalAmount', 'asset_local_amount') ?? '?'} ` +
+        `remoteRgb=${chanField<number>(mChan as any, 'assetRemoteAmount', 'asset_remote_amount') ?? '?'} ` +
+        `usable=${chanField<boolean>(mChan as any, 'isUsable', 'is_usable') ?? '?'}`,
+      );
+    } else {
+      addLog('diag merchant→LSP RGB channel: not found');
+    }
+    if (aChan) {
+      addLog(
+        `diag buyer→LSP chan: localRgb=${chanField<number>(aChan as any, 'assetLocalAmount', 'asset_local_amount') ?? '?'} ` +
+        `remoteRgb=${chanField<number>(aChan as any, 'assetRemoteAmount', 'asset_remote_amount') ?? '?'}`,
+      );
+    }
+
+    addLog(`diag merchant peers connected: ${peers.length}`);
+  } catch (e: any) {
+    addLog(`diag error: ${e?.message ?? String(e)}`);
+  }
+}
+
+/** Keep merchant→LSP P2P warm so APay outbox can deliver async_order.request_invoice + payout. */
+function startMerchantPeerKeepalive(
+  wallet: UTEXOWallet,
+  peerUri: string,
+  isAborted: () => boolean,
+): () => void {
+  let active = true;
+  (async () => {
+    while (active && !isAborted()) {
+      await sleep(MERCHANT_KEEPALIVE_MS);
+      if (!active || isAborted()) break;
+      try { await wallet.connectPeer(peerUri); } catch { /* already connected */ }
+    }
+  })();
+  return () => { active = false; };
+}
 
 const PHASE_LABELS: Record<Phase, string> = {
   idle: 'Idle',
-  b_init: 'B Init', b_fund: 'B Fund', b_utxos: 'B UTXOs', b_channel: 'B Chan', register: 'Register',
-  a_init: 'A Init', a_fund: 'A Fund', a_utxos: 'A UTXOs', a_channel: 'A Chan',
-  lnurlp: 'LNURL', send: 'Send', poll: 'Poll', claim: 'Claim',
+  b_init: 'Shop Init', b_fund: 'Shop Fund', b_utxos: 'Shop UTXOs', b_channel: 'Shop Chan', register: 'Register',
+  a_init: 'Buyer Init', a_fund: 'Buyer Fund', a_utxos: 'Buyer UTXOs', a_channel: 'Buyer Chan',
+  lnurlp: 'Checkout', send: 'Pay', settle: 'Settle',
   done: 'Done', error: 'Error',
 };
 
 const PHASES_P1: Phase[] = ['b_init', 'b_fund', 'b_utxos', 'b_channel', 'register'];
-const PHASES_P2: Phase[] = ['a_init', 'a_fund', 'a_utxos', 'a_channel', 'lnurlp', 'send', 'poll', 'claim', 'done'];
+const PHASES_P2: Phase[] = ['a_init', 'a_fund', 'a_utxos', 'a_channel', 'lnurlp', 'send', 'settle', 'done'];
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
@@ -169,25 +253,20 @@ function LogPane({ entries }: { entries: LogEntry[] }) {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-export default function AsyncPayScreen({ embedded = false }: { embedded?: boolean }) {
+export default function ApayRegularChannelsScreen({ embedded = false }: { embedded?: boolean }) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [log, setLog]     = useState<LogEntry[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Recipient (User B) state
   const [pubkeyB, setPubkeyB] = useState('');
   const [lnaddrUsername, setLnaddrUsername] = useState('');
   const [lnaddrDomain, setLnaddrDomain] = useState('');
   const [hashPoolInfo, setHashPoolInfo] = useState<any>(null);
   const [channelB, setChannelB] = useState<any>(null);
-
-  // Sender (User A) state
   const [channelA, setChannelA] = useState<any>(null);
   const [hodlBolt11, setHodlBolt11] = useState('');
   const [paymentHash, setPaymentHash] = useState('');
-
-  // Claim state
-  const [claimResult, setClaimResult] = useState<any>(null);
+  const [sendStatus, setSendStatus] = useState('');
   const [finalBalB, setFinalBalB] = useState<any>(null);
 
   const walletARef = useRef<UTEXOWallet | null>(null);
@@ -197,7 +276,7 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const time = new Date().toLocaleTimeString('en', { hour12: false });
     setLog(prev => [...prev.slice(-500), { time, msg, type }]);
-    console.log(`[apay][${type}] ${msg}`);
+    console.log(`[apay-reg][${type}] ${msg}`);
   }, []);
 
   const run = useCallback(async () => {
@@ -206,7 +285,7 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
     setPubkeyB(''); setLnaddrUsername(''); setLnaddrDomain('');
     setHashPoolInfo(null); setChannelB(null);
     setChannelA(null); setHodlBolt11(''); setPaymentHash('');
-    setClaimResult(null); setFinalBalB(null);
+    setSendStatus(''); setFinalBalB(null);
 
     const req = (label: string, p?: Record<string, any>) =>
       addLog(`→ ${label}${p ? '  ' + Object.entries(p).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''}`);
@@ -214,21 +293,17 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
       addLog(`← ${label}${d ? '  ' + Object.entries(d).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''}`, 'success');
 
     try {
-      // ─────────────────────────────────────────────────────────────────────
-      // PHASE 1 — Recipient (User B)
-      // ─────────────────────────────────────────────────────────────────────
-
+      // ── Merchant (User B) — shop setup ─────────────────────────────────────
       setPhase('b_init');
       addLog(`Platform=${Platform.OS}  host=${_host}`);
       addLog(`LSP_URL=${LSP_URL}`);
-      if (!ASSET_ID) throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID not set — run start-lsp-regtest.sh');
+      if (!ASSET_ID) throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID not set — run ./scripts/start-lsp-local.sh');
 
-      // Fetch LSP pubkey at runtime so no app rebuild is needed after LSP restarts.
       addLog('Fetching LSP pubkey from /nodeinfo…');
       const lspNodeInfo = await fetch(`${LSP_DAEMON_URL}/nodeinfo`).then(r => r.json()) as any;
       LSP_PEER_PUBKEY = lspNodeInfo?.pubkey ?? LSP_PEER_PUBKEY;
       if (!LSP_PEER_PUBKEY) throw new Error('Could not fetch LSP pubkey — is the LSP daemon running?');
-      addLog(`LSP pubkey (full): ${LSP_PEER_PUBKEY}`, 'success');
+      addLog(`LSP pubkey: ${LSP_PEER_PUBKEY}`, 'success');
 
       const LSP_PEER: LspPeer = {
         baseUrl:    LSP_URL,
@@ -239,14 +314,10 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
 
       const keysB = await createWallet('regtest' as any);
       const tsB   = Date.now();
-      const portB = 40000 + Math.floor(Math.random() * 2000);
-      const dirB  = `${documentDirectory ?? ''}apay_b_${tsB}`;
+      const portB = 44000 + Math.floor(Math.random() * 2000);
+      const dirB  = `${documentDirectory ?? ''}apay_reg_b_${tsB}`;
       await FileSystem.makeDirectoryAsync(dirB, { intermediates: true });
 
-      // enableVirtualChannelsV0: required so User B accepts the 0-conf virtual
-      // channel offer from the LSP (DEFAULT_VIRTUAL_OPEN_MODE=trusted_no_broadcast).
-      // Without it the LSP's FundingGenerationReady fails with
-      // "ChannelFundingType::Virtual requires a negotiated 0-conf channel".
       const wB = new UTEXOWallet(
         {
           storageDirPath: dirB.replace('file://', ''),
@@ -255,135 +326,102 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
           network: 'regtest',
           maxMediaUploadSizeMb: 20,
           enableVirtualChannelsV0: true,
-          // Must allowlist the LSP so User B accepts the virtual channel offer.
-          // Without this, the LSP's trusted_no_broadcast open is rejected.
           virtualPeerPubkeys: [LSP_PEER_PUBKEY],
         },
-        new PasswordRLNSigner('apaypassB', keysB.mnemonic),
+        new PasswordRLNSigner('apayregB', keysB.mnemonic),
       );
       walletBRef.current = wB;
       const lspB = await wB.createLsp(LSP_PEER);
       await wB.init();
       await wB.unlock(REGTEST_UNLOCK);
 
-      const nodeInfoB = await wB.getNodeInfo();
-      const bPubkey   = String(nodeInfoB?.pubkey ?? '');
+      const bPubkey = String((await wB.getNodeInfo())?.pubkey ?? '');
       setPubkeyB(bPubkey);
-      res('userB.init', { pubkey: short(bPubkey) });
+      res('merchant.init', { pubkey: short(bPubkey) });
 
-      // ── Fund User B ───────────────────────────────────────────────────────
       setPhase('b_fund');
-
       const addrB = await wB.getAddress();
-      req('sendToAddress userB 1 BTC');
+      req('sendToAddress merchant 1 BTC');
       await sendToAddress(addrB, 1);
       await mine(6);
       await sleep(3000);
       await wB.syncWallet();
-      res('userB.funded');
+      res('merchant.funded');
 
-      // ── UTXOs ─────────────────────────────────────────────────────────────
       setPhase('b_utxos');
-
-      req('userB.createUtxos');
+      req('merchant.createUtxos');
       await wB.syncWallet();
       await wB.refreshWallet();
       await wB.createUtxos({ upTo: false, num: 10, feeRate: 7 });
       await mine(1);
       await wB.syncWallet();
-      res('userB.createUtxos');
+      res('merchant.createUtxos');
 
-      // ── Connect User B to LSP, wait for RGB channel ───────────────────────
       setPhase('b_channel');
-
       const lspPeerUri = `${LSP_PEER_PUBKEY}@${_host}:${LSP_LDK_PORT}`;
       req('lspB.connect');
       await lspB.connect();
       res('lspB.connect');
 
-      addLog('Mining 2 blocks to trigger LSP channel open for User B…');
+      addLog('Mining blocks to trigger virtual RGB channel LSP → merchant…');
       await mine(2);
       await sleep(6000);
 
-      addLog('Waiting for RGB channel usable on User B…');
+      addLog('Waiting for virtual RGB channel usable on merchant…');
       const chanB = await lspB.waitForChannel(ASSET_ID, {
         timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
-        pollIntervalMs: 3_000,
-        onProgress:  (msg) => addLog(`userB ${msg}`),
-        onEachPoll:  () => mine(1),
+        pollIntervalMs: POLL_INTERVAL_MS,
+        onProgress: (msg) => addLog(`merchant ${msg}`),
+        onEachPoll: () => mine(1),
       });
       setChannelB(chanB);
-      addLog('User B RGB channel usable ✓', 'success');
+      addLog('Merchant virtual RGB channel usable ✓', 'success');
 
-      // Give the node a moment to stabilise onion messaging after channel open.
       addLog('Syncing and waiting for P2P onion path to stabilise (5s)…');
       await wB.syncWallet();
       await mine(2);
       await sleep(5000);
       await wB.syncWallet();
 
-      // ── Register hash pool with LSP ───────────────────────────────────────
-      // Triggers: Recipient RLN → Host RLN (P2P) → utexo-lsp /internal/async_order/new
-      // Result:   LSP creates Lightning Address for User B keyed by their pubkey.
       setPhase('register');
-
-      const nodeInfoBeforeApay = await wB.getNodeInfo();
-      addLog(`nodeInfoB: ${JSON.stringify(nodeInfoBeforeApay)}`);
-      addLog(`hostNodeId (LSP pubkey fetched at runtime): ${LSP_PEER_PUBKEY}`);
-      // Log actual LDK peer list to verify the connection is live
-      const peers = await (wB as any).rln.rlnListPeers();
-      addLog(`LDK peers: ${JSON.stringify(peers)}`);
-      addLog(`peers match: ${(nodeInfoBeforeApay as any)?.numPeers} peers connected`);
-
-      // Re-connect right before apay to ensure live TCP peer connection.
-      // Virtual (0-conf trusted) channels may not maintain active TCP after handshake.
       addLog('Re-connecting to LSP peer before apayNew…');
-      const lspPeerUriForApay = `${LSP_PEER_PUBKEY}@${_host}:${LSP_LDK_PORT}`;
-      try { await wB.connectPeer(lspPeerUriForApay); addLog('re-connect ok', 'success'); }
-      catch (e: any) { addLog(`re-connect (ignored): ${e?.message ?? String(e)}`); }
+      try { await wB.connectPeer(lspPeerUri); addLog('merchant re-connect ok', 'success'); }
+      catch (e: any) { addLog(`merchant re-connect: ${e?.message ?? String(e)}`); }
       await sleep(1000);
 
-      req('userB.apayNew', { hostNodeId: short(LSP_PEER_PUBKEY) });
-
-      let pool: any;
-      try {
-        pool = await wB.apayNew(LSP_PEER_PUBKEY);
-      } catch (apayErr: any) {
-        addLog(`apayNew error: code=${apayErr?.code} name=${apayErr?.name} msg=${apayErr?.message ?? String(apayErr)}`, 'error');
-        addLog(`apayNew keys: ${Object.keys(apayErr ?? {}).join(', ')}`, 'error');
-        addLog(`apayNew full: ${JSON.stringify(apayErr)}`, 'error');
-        throw apayErr;
-      }
+      req('merchant.apayNew', { hostNodeId: short(LSP_PEER_PUBKEY) });
+      const pool = await wB.apayNew(LSP_PEER_PUBKEY);
       setHashPoolInfo(pool);
       res('apayNew', {
-        orderId:              short(pool.orderId),
-        status:               pool.status,
-        unusedHashes:         pool.unusedHashes,
-        firstHash:            short(pool.hashes[0]?.paymentHash ?? '', 16),
-        acceptedThroughIndex: pool.acceptedThroughIndex,
+        orderId:      short(pool.orderId),
+        unusedHashes: pool.unusedHashes,
       });
-      addLog(`Hash pool registered ✓  ${pool.hashes.length} hashes issued to LSP`, 'success');
+      addLog(`Shop registered ${pool.hashes.length} payment slots with LSP`, 'success');
 
-      req('GET /lightning_address/by_pubkey/{pubkey}', { pubkey: short(bPubkey) });
+      req('GET /lightning_address/by_pubkey/{pubkey}');
       const lnaddr = await lspB.http.getLightningAddressByPubkey(bPubkey);
       setLnaddrUsername(lnaddr.username);
       setLnaddrDomain(lnaddr.domain);
-      res('lightningAddressByPubkey', {
-        username: lnaddr.username,
-        domain: lnaddr.domain,
-      });
-      addLog(`Lightning Address for User B: ${lnaddr.username}@${lnaddr.domain}`, 'success');
+      res('lightningAddressByPubkey', { username: lnaddr.username, domain: lnaddr.domain });
+      addLog(`Shop Lightning Address: ${lnaddr.username}@${lnaddr.domain}`, 'success');
+      addLog(
+        'Shop idle (UI) — merchant node stays peer-connected to LSP for APay settlement',
+        'info',
+      );
+      const stopMerchantKeepalive = startMerchantPeerKeepalive(
+        wB,
+        lspPeerUri,
+        () => abortRef.current,
+      );
 
-      // ─────────────────────────────────────────────────────────────────────
-      // PHASE 2 — Sender (User A)
-      // ─────────────────────────────────────────────────────────────────────
-
+      try {
+      // ── Customer (User A) — checkout ─────────────────────────────────────
       setPhase('a_init');
 
       const keysA = await createWallet('regtest' as any);
       const tsA   = Date.now();
-      const portA = 42000 + Math.floor(Math.random() * 2000);
-      const dirA  = `${documentDirectory ?? ''}apay_a_${tsA}`;
+      const portA = 46000 + Math.floor(Math.random() * 2000);
+      const dirA  = `${documentDirectory ?? ''}apay_reg_a_${tsA}`;
       await FileSystem.makeDirectoryAsync(dirA, { intermediates: true });
 
       const wA = new UTEXOWallet(
@@ -393,90 +431,84 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
           ldkPeerListeningPort: portA + 1,
           network: 'regtest',
           maxMediaUploadSizeMb: 20,
-          // Same as User B — LSP opens 0-conf virtual channels (trusted_no_broadcast).
           enableVirtualChannelsV0: true,
           virtualPeerPubkeys: [LSP_PEER_PUBKEY],
         },
-        new PasswordRLNSigner('apaypassA', keysA.mnemonic),
+        new PasswordRLNSigner('apayregA', keysA.mnemonic),
       );
       walletARef.current = wA;
       const lspA = await wA.createLsp(LSP_PEER);
       await wA.init();
       await wA.unlock(REGTEST_UNLOCK);
-      res('userA.init', { pubkey: short(String((await wA.getNodeInfo())?.pubkey ?? '')) });
+      res('buyer.init', { pubkey: short(String((await wA.getNodeInfo())?.pubkey ?? '')) });
 
-      // ── Fund User A ───────────────────────────────────────────────────────
       setPhase('a_fund');
-
       const addrA = await wA.getAddress();
-      req('sendToAddress userA 1 BTC');
+      req('sendToAddress buyer 1 BTC');
       await sendToAddress(addrA, 1);
       await mine(6);
       await sleep(3000);
       await wA.syncWallet();
-      res('userA.funded');
+      res('buyer.funded');
 
-      // ── UTXOs ─────────────────────────────────────────────────────────────
       setPhase('a_utxos');
-
-      req('userA.createUtxos');
+      req('buyer.createUtxos');
       await wA.syncWallet();
       await wA.refreshWallet();
       await wA.createUtxos({ upTo: false, num: 10, feeRate: 7 });
       await mine(1);
       await wA.syncWallet();
-      res('userA.createUtxos');
+      res('buyer.createUtxos');
 
-      // ── Connect User A to LSP, wait for channel ───────────────────────────
       setPhase('a_channel');
-
       req('lspA.connect');
       await lspA.connect();
       res('lspA.connect');
 
-      addLog('Mining 2 blocks to trigger LSP channel open for User A…');
+      addLog('Mining blocks to trigger virtual RGB channel LSP → buyer…');
       await mine(2);
       await sleep(6000);
 
-      addLog('Waiting for RGB channel usable on User A…');
+      addLog('Waiting for virtual RGB channel usable on buyer…');
       const chanA = await lspA.waitForChannel(ASSET_ID, {
         timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
-        pollIntervalMs: 3_000,
-        onProgress:  (msg) => addLog(`userA ${msg}`),
-        onEachPoll:  () => mine(1),
+        pollIntervalMs: POLL_INTERVAL_MS,
+        onProgress: (msg) => addLog(`buyer ${msg}`),
+        onEachPoll: () => mine(1),
       });
       setChannelA(chanA);
-      addLog('User A RGB channel usable ✓', 'success');
+      addLog('Buyer RGB channel usable ✓', 'success');
 
-      // ─────────────────────────────────────────────────────────────────────
-      // PHASE 3 — LNURL-pay: discover User B's Lightning Address at LSP
-      // ─────────────────────────────────────────────────────────────────────
+      let balBefore = 0;
+      try {
+        const b0 = await wB.getAssetBalance(ASSET_ID);
+        balBefore = Number(b0?.offchainInbound ?? 0);
+      } catch {}
+
       setPhase('lnurlp');
-
       const username = lnaddr.username;
-      if (!username) {
-        throw new Error('Lightning Address username missing — hash pool registration may have failed');
-      }
+      if (!username) throw new Error('Lightning Address username missing');
 
-      if (!ASSET_ID) {
-        throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID is required for async-pay (RGB legs avoid Host sendpayment hash collision)');
-      }
-      req('GET /.well-known/lnurlp/{username} → callback', { username, amtMsat: PAYMENT_MSAT, assetId: ASSET_ID, assetAmount: PAYMENT_ASSET_AMOUNT });
-      const callbackData = await lspA.http.resolveAddress(username, PAYMENT_MSAT, ASSET_ID, PAYMENT_ASSET_AMOUNT);
+      req('GET /.well-known/lnurlp/{username} → callback', {
+        username,
+        cart: CART_ITEM,
+        amtMsat: PAYMENT_MSAT,
+        assetAmount: PAYMENT_ASSET_AMOUNT,
+      });
+      const callbackData = await lspA.http.resolveAddress(
+        username, PAYMENT_MSAT, ASSET_ID, PAYMENT_ASSET_AMOUNT,
+      );
       if (!callbackData.pr) throw new Error('LNURL callback returned no invoice (pr)');
 
       setHodlBolt11(callbackData.pr);
-      res('HODL BOLT11', { invoice: short(callbackData.pr, 32) });
-      addLog('LSP created HODL invoice for User B using registered hash pool ✓', 'success');
+      res('checkout HODL BOLT11', { invoice: short(callbackData.pr, 32) });
 
-      // ── User A pays the HODL BOLT11 ───────────────────────────────────────
-      // LSP holds the HTLC — does NOT settle yet (User B is "offline").
+      addLog('Merchant peer refresh before buyer checkout payment…');
+      try { await wB.connectPeer(lspPeerUri); await wB.syncWallet(); }
+      catch (e: any) { addLog(`merchant pre-pay connect: ${e?.message ?? String(e)}`); }
+
       setPhase('send');
-
-      req('userA.payLightningInvoice → HODL', {
-        assetId: ASSET_ID,
-        assetAmount: PAYMENT_ASSET_AMOUNT,
-      });
+      req('buyer.payLightningInvoice (cart checkout)');
       const payRes = await wA.payLightningInvoice({
         lnInvoice: callbackData.pr,
         assetId: ASSET_ID,
@@ -485,113 +517,95 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
       const pHash = payRes.txid ?? '';
       const payStatus = String(payRes.status ?? '').toLowerCase();
       setPaymentHash(pHash);
-      res('userA.payLightningInvoice', {
-        status: payRes.status ?? 'unknown',
-        paymentHash: short(pHash),
-      });
+      res('buyer.payLightningInvoice', { status: payRes.status, paymentHash: short(pHash) });
+
       if (payStatus === 'failed') {
         throw new Error(
-          `userA.payLightningInvoice failed for RGB HODL invoice (hash=${short(pHash)}). ` +
-            'Check User A RGB channel balance and that asset_id/asset_amount match the LNURL callback.',
+          'Checkout payment failed — buyer has no RGB on LSP channel (push_asset_amount=0). ' +
+          'Restart LSP: ./scripts/start-lsp-local.sh (needs DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT=1).',
         );
       }
-      if (payStatus !== 'pending') {
-        addLog(`userA pay status is ${payRes.status} (expected Pending for hodl at LSP)`, 'info');
-      }
-      addLog('HTLC held at LSP — User B is "offline" (payment not yet settled)', 'success');
-
-      // Give LSP time to process the HTLC
+      addLog('Cart paid — LSP holds HODL HTLC; waiting for LSP outbox settlement…', 'success');
       await sleep(3000);
 
-      // ─────────────────────────────────────────────────────────────────────
-      // PHASE 4 — User B "comes online" and claims the pending HODL payment
-      // ─────────────────────────────────────────────────────────────────────
-      setPhase('poll');
-      addLog('User B coming online — reconnecting to LSP peer to signal presence…');
+      // ── LSP-driven settlement (steps ⑤⑥ — no manual claim) ─────────────
+      setPhase('settle');
+      addLog('Waiting for LSP outbox (merchant peer kept warm)…');
 
-      // Re-establish peer connection so the LSP detects User B is online and
-      // forwards the held HTLC. The TCP connection may have dropped since the
-      // channel was opened (LDK does not keep it alive indefinitely).
-      try { await wB.connectPeer(lspPeerUri); addLog('User B peer reconnect ok', 'success'); }
-      catch (e: any) { addLog(`User B peer reconnect (ignored): ${e?.message ?? String(e)}`); }
-      await sleep(2000);
+      try { await wB.connectPeer(lspPeerUri); addLog('merchant peer reconnect ok', 'success'); }
+      catch (e: any) { addLog(`merchant reconnect: ${e?.message ?? String(e)}`); }
+      await wB.syncWallet();
+      await wB.refreshWallet();
+      await mine(1);
+      await logSettlementDiagnostics(wA, wB, pHash, LSP_PEER_PUBKEY, addLog);
 
-      addLog('Polling for INBOUND_HODL Claimable payment…');
-
-      const claimDeadline = Date.now() + CLAIM_TIMEOUT_S * 1000;
-      let hodlPayment: any = null;
+      const deadline = Date.now() + SETTLE_TIMEOUT_S * 1000;
+      let settled = false;
       let reconnectEvery = 0;
+      let diagEvery = 0;
 
-      while (Date.now() < claimDeadline) {
+      while (Date.now() < deadline) {
         if (abortRef.current) throw new Error('Cancelled');
         await sleep(POLL_INTERVAL_MS);
+        await mine(1);
 
-        // Reconnect every ~15 s to keep signalling presence to the LSP
         reconnectEvery += POLL_INTERVAL_MS;
-        if (reconnectEvery >= 15000) {
+        if (reconnectEvery >= MERCHANT_KEEPALIVE_MS) {
           reconnectEvery = 0;
-          try { await wB.connectPeer(lspPeerUri); } catch {}
+          try {
+            await wB.connectPeer(lspPeerUri);
+            addLog('merchant peer keepalive reconnect');
+          } catch {}
         }
-
+        await wA.syncWallet();
         await wB.syncWallet();
+        await wB.refreshWallet();
 
-        const payments = await wB.listPaymentsRaw();
-        const isInboundHodl = (t?: string) =>
-          (t ?? '').toLowerCase().replace(/_/g, '') === 'inboundhodl';
-        const isClaimable = (s?: string) =>
-          (s ?? '').toLowerCase() === 'claimable';
-        const claimable = payments.find(
-          (p) => isInboundHodl(p.paymentType) && isClaimable(p.status),
-        );
-        if (payments.length > 0 && !claimable) {
-          const sample = payments.slice(0, 3).map(
-            (p) => `${p.paymentType}/${p.status}`,
-          ).join(', ');
-          addLog(`userB payment sample: ${sample}`, 'info');
+        const status = pHash ? await wA.getLightningSendRequest(pHash) : 'Pending';
+        setSendStatus(status ?? 'Pending');
+        addLog(`buyer payment status: ${status}`);
+
+        let balAfter = balBefore;
+        try {
+          const b1 = await wB.getAssetBalance(ASSET_ID);
+          balAfter = Number(b1?.offchainInbound ?? 0);
+          setFinalBalB(b1);
+          addLog(`merchant offchainInbound: ${balAfter} (was ${balBefore})`);
+        } catch {}
+
+        diagEvery += POLL_INTERVAL_MS;
+        if (diagEvery >= MERCHANT_KEEPALIVE_MS) {
+          diagEvery = 0;
+          await logSettlementDiagnostics(wA, wB, pHash, LSP_PEER_PUBKEY, addLog);
         }
-        addLog(`userB payments: ${payments.length} total  InboundHodl/Claimable: ${claimable ? 'FOUND' : 'none yet'}`);
 
-        if (claimable) {
-          hodlPayment = claimable;
+        if (status === 'Settled' && balAfter > balBefore) {
+          settled = true;
+          addLog(`merchant received +${balAfter - balBefore} RGB (offchain inbound)`, 'success');
           break;
+        }
+        if (status === 'Failed') {
+          throw new Error('Buyer payment failed during LSP settlement');
         }
       }
 
-      if (!hodlPayment) throw new Error('Timeout: no Claimable InboundHodl payment appeared for User B');
-      addLog(`Found Claimable HODL payment: hash=${short(hodlPayment.paymentHash)}  preimage=${short(hodlPayment.preimage ?? '', 16)}`, 'success');
-
-      // ── Claim ─────────────────────────────────────────────────────────────
-      setPhase('claim');
-
-      if (!hodlPayment.preimage) throw new Error('InboundHodl payment missing preimage — cannot claim');
-
-      req('userB.claimHodlInvoice', {
-        paymentHash: short(hodlPayment.paymentHash),
-        preimage:    short(hodlPayment.preimage, 16),
-      });
-      const claim = await wB.claimHodlInvoice(hodlPayment.paymentHash, hodlPayment.preimage);
-      setClaimResult(claim);
-      res('claimHodlInvoice', { changed: claim.changed });
-      addLog('User B revealed preimage → LSP settled inbound HTLC from User A ✓', 'success');
-
-      // Final balance check
-      try {
-        await wB.syncWallet();
-        const bal = await wB.getAssetBalance(ASSET_ID);
-        setFinalBalB(bal);
-        addLog(
-          `userB final balance: offchainInbound=${bal?.offchainInbound ?? 0}  ` +
-          `offchainOutbound=${bal?.offchainOutbound ?? 0}`,
-          'success',
+      if (!settled) {
+        throw new Error(
+          'Timeout waiting for LSP settlement — buyer should be Settled and merchant RGB balance up. ' +
+          'Check utexo-lsp DB (outbound_paid without claim_inbound_invoice) and rln-lsp.log for PaymentSent.',
         );
-      } catch {}
+      }
 
+      addLog('LSP claimed buyer HTLC with preimage — cart checkout complete ✓', 'success');
       setPhase('done');
+
+      } finally {
+        stopMerchantKeepalive();
+      }
 
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       addLog(`Fatal: ${msg}`, 'error');
-      addLog(`  code=${e?.code}  name=${e?.name}  keys=${Object.keys(e ?? {}).join(',')}`, 'error');
       setErrorMsg(msg);
       setPhase('error');
     }
@@ -606,11 +620,14 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
     setPubkeyB(''); setLnaddrUsername(''); setLnaddrDomain('');
     setHashPoolInfo(null); setChannelB(null);
     setChannelA(null); setHodlBolt11(''); setPaymentHash('');
-    setClaimResult(null); setFinalBalB(null);
+    setSendStatus(''); setFinalBalB(null);
   }, []);
 
-  const isRunning  = !['idle', 'done', 'error'].includes(phase);
-  const envReady   = !!ASSET_ID;
+  const isRunning = !['idle', 'done', 'error'].includes(phase);
+  const envReady  = !!ASSET_ID;
+  const lnAddress = lnaddrUsername && lnaddrDomain
+    ? `${lnaddrUsername}@${lnaddrDomain}`
+    : lnaddrUsername ? `${lnaddrUsername}@…` : '';
 
   const Root = embedded ? View : SafeAreaView;
   const rootProps = embedded
@@ -626,11 +643,11 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
         nestedScrollEnabled={embedded}>
 
         <View style={s.header}>
-          <Text style={s.title}>Async Payment (apay)</Text>
-          <Text style={s.subtitle}>Regtest · HODL invoice + hash pool protocol</Text>
+          <Text style={s.title}>APay Cart Checkout</Text>
+          <Text style={s.subtitle}>Regtest · cart scenario · virtual RGB channels</Text>
           <View style={s.badge}>
             <View style={[s.dot, { backgroundColor: envReady ? AppColors.success : AppColors.error }]} />
-            <Text style={s.badgeTxt}>{envReady ? 'LSP configured' : 'Run start-lsp-regtest.sh first'}</Text>
+            <Text style={s.badgeTxt}>{envReady ? 'LSP configured' : 'Run start-lsp-local.sh first'}</Text>
           </View>
         </View>
 
@@ -641,43 +658,56 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
           </>
         )}
 
-        {/* Idle */}
         {phase === 'idle' && (
           <View style={s.card}>
-            <Text style={s.cardTitle}>Full Async Payment Flow</Text>
+            <Text style={s.cardTitle}>Cart Checkout Scenario</Text>
             <Text style={s.cardDesc}>
-              {'Demonstrates the complete async payment (apay) protocol — three parts:\n\n' +
-               'Part 1 — Recipient (User B) registers a hash pool:\n' +
-               'User B creates an RGB channel with the LSP, then calls\n' +
-               'apayNew(lspNodePubkey). Internally the RLN node\n' +
-               'sends hashes to the Host RLN via P2P onion messages. The LSP\n' +
-               'stores the pool and creates a Lightning Address for User B.\n\n' +
-               'Part 2 — Sender (User A) pays via LNURL-pay:\n' +
-               'User A discovers User B\'s Lightning Address at the LSP, gets\n' +
-               'a HODL BOLT11 invoice, and pays it. The LSP holds the HTLC —\n' +
-               'the payment is NOT yet settled. User B is "offline".\n\n' +
-               'Part 3 — User B comes online and claims:\n' +
-               'User B polls listPaymentsRaw() for InboundHodl + Claimable.\n' +
-               'Once found, calls claimHodlInvoice(hash, preimage). The LSP\n' +
-               'receives the preimage, settles the inbound HTLC from User A,\n' +
-               'and the payment completes end-to-end.'}
+              {'This flow models an RGB shop checkout with async delivery:\n\n' +
+               '🛒 Cart — Customer (Alice / User A) buys:\n' +
+               `   ${CART_ITEM}\n` +
+               `   Total: ${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} RGB unit\n\n` +
+               '🏪 Merchant (Bob / User B):\n' +
+               '   Opens a virtual RGB channel (trusted_no_broadcast) with the LSP.\n' +
+               '   Calls apayNew → GET /lightning_address/by_pubkey to get\n' +
+               '   shop address (e.g. brisk-river-0421@lsp.local).\n' +
+               '   Node keeps P2P to LSP (required for APay outbox).\n\n' +
+               '💳 Checkout — Customer:\n' +
+               '   GET /.well-known/lnurlp/{username} → callback → HODL BOLT11\n' +
+               '   Pays invoice. LSP holds HODL HTLC.\n\n' +
+               '📦 Delivery — LSP automatic (steps ⑤⑥):\n' +
+               '   LSP outbox requests outbound invoice, pays merchant,\n' +
+               '   claims buyer HTLC. No claimHodlInvoice on merchant.\n\n' +
+               'Run ./scripts/start-lsp-local.sh before starting (virtual LSP stack).'}
             </Text>
+
+            <View style={s.cartCard}>
+              <Text style={s.cartTitle}>Your cart</Text>
+              <View style={s.cartRow}>
+                <Text style={s.cartItem}>{CART_ITEM}</Text>
+                <Text style={s.cartPrice}>{PAYMENT_ASSET_AMOUNT} UTST</Text>
+              </View>
+              <View style={s.cartDivider} />
+              <View style={s.cartRow}>
+                <Text style={s.cartTotalLabel}>LN fee (msat)</Text>
+                <Text style={s.cartTotalVal}>{PAYMENT_MSAT.toLocaleString()}</Text>
+              </View>
+            </View>
 
             {!envReady && (
               <View style={s.warnCard}>
                 <Text style={s.warnTxt}>
-                  {'Run the setup script first:\n\n  ./scripts/start-lsp-regtest.sh\n\nThen rebuild the app.'}
+                  {'Run the local setup script first:\n\n' +
+                   '  ./scripts/start-lsp-local.sh'}
                 </Text>
               </View>
             )}
 
             <View style={s.paramCard}>
               <Text style={s.paramTitle}>Config</Text>
+              <Text style={s.paramLine}>Channels    virtual trusted_no_broadcast</Text>
               <Text style={s.paramLine}>LSP API     {LSP_URL}</Text>
-              <Text style={s.paramLine}>LSP daemon  {LSP_DAEMON_URL}</Text>
               <Text style={s.paramLine}>Asset ID    {ASSET_ID ? short(ASSET_ID, 28) : '(not set)'}</Text>
-              <Text style={s.paramLine}>LSP pubkey  {LSP_PEER_PUBKEY ? short(LSP_PEER_PUBKEY, 28) : '(not set)'}</Text>
-              <Text style={s.paramLine}>Payment     {PAYMENT_MSAT / 1000} sat + {PAYMENT_ASSET_AMOUNT} RGB unit</Text>
+              <Text style={s.paramLine}>Checkout    {PAYMENT_MSAT / 1000} sat + {PAYMENT_ASSET_AMOUNT} RGB</Text>
             </View>
 
             <TouchableOpacity
@@ -685,117 +715,96 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
               onPress={run}
               disabled={!envReady}
               activeOpacity={0.8}>
-              <Text style={s.startBtnTxt}>▶  Run Async Payment Flow</Text>
+              <Text style={s.startBtnTxt}>▶  Run Cart Checkout Flow</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {/* Spinner */}
         {isRunning && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>{(() => {
               switch (phase) {
-                case 'b_init':    return 'Creating User B (recipient) node…';
-                case 'b_fund':    return 'Funding User B (sendToAddress + mine 6)…';
-                case 'b_utxos':   return 'Creating UTXOs for User B…';
-                case 'b_channel': return 'Waiting for LSP → User B RGB channel…';
-                case 'register':  return 'Registering hash pool with LSP (apayNew)…';
-                case 'a_init':    return 'Creating User A (sender) node…';
-                case 'a_fund':    return 'Funding User A…';
-                case 'a_utxos':   return 'Creating UTXOs for User A…';
-                case 'a_channel': return 'Waiting for LSP → User A RGB channel…';
-                case 'lnurlp':    return 'Discovering User B Lightning Address via LNURL-pay…';
-                case 'send':      return 'User A paying HODL invoice (LSP holds HTLC)…';
-                case 'poll':      return 'User B polling for Claimable InboundHodl payment…';
-                case 'claim':     return 'User B claiming — revealing preimage to LSP…';
+                case 'b_init':    return 'Creating merchant shop node…';
+                case 'b_fund':    return 'Funding merchant wallet…';
+                case 'b_utxos':   return 'Creating merchant UTXOs…';
+                case 'b_channel': return 'Opening virtual RGB channel LSP → merchant…';
+                case 'register':  return 'Registering shop Lightning Address (apayNew)…';
+                case 'a_init':    return 'Creating buyer node…';
+                case 'a_fund':    return 'Funding buyer wallet…';
+                case 'a_utxos':   return 'Creating buyer UTXOs…';
+                case 'a_channel': return 'Opening virtual RGB channel LSP → buyer…';
+                case 'lnurlp':    return 'Checkout — LNURL-pay for cart total…';
+                case 'send':      return 'Buyer paying HODL invoice…';
+                case 'settle':    return 'Waiting for LSP auto-settlement…';
                 default: return 'Working…';
               }
             })()}</Text>
-            {phase === 'register' && (
-              <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 6, fontFamily: AppColors.mono }]}>
-                {'Recipient RLN → Host RLN (P2P) → utexo-lsp /internal/async_order/new'}
-              </Text>
-            )}
           </View>
         )}
 
-        {/* Hash pool card */}
         {hashPoolInfo && (
-          <InfoCard title="Hash Pool (apayNew)" accent={AppColors.primary} rows={[
+          <InfoCard title="Shop Registration (apayNew)" accent={AppColors.primary} rows={[
             ['Order ID',   short(hashPoolInfo.orderId, 28)],
-            ['Status',     hashPoolInfo.status],
-            ['Hashes',     `${hashPoolInfo.hashes.length} issued`],
+            ['Slots',      `${hashPoolInfo.hashes.length} hashes`],
             ['Unused',     String(hashPoolInfo.unusedHashes)],
-            ['Accepted→',  String(hashPoolInfo.acceptedThroughIndex)],
-            ['LN Address', lnaddrUsername && lnaddrDomain
-              ? `${lnaddrUsername}@${lnaddrDomain}`
-              : lnaddrUsername
-                ? `${lnaddrUsername}@…`
-                : '(pending)'],
+            ['LN Address', lnAddress || '(pending)'],
           ]} />
         )}
 
-        {/* Channels */}
         {channelB && (
-          <InfoCard title="RGB Channel (LSP → User B)" accent={AppColors.success} rows={[
+          <InfoCard title="Channel · LSP → Merchant" accent={AppColors.success} rows={[
+            ['Type',     'Virtual 0-conf'],
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${channelB.capacitySat ?? channelB.capacity_sat ?? '?'} sat`],
-            ['Status',   'Usable ✓'],
           ]} />
         )}
         {channelA && (
-          <InfoCard title="RGB Channel (LSP → User A)" accent={AppColors.success} rows={[
+          <InfoCard title="Channel · LSP → Buyer" accent={AppColors.success} rows={[
+            ['Type',     'Virtual 0-conf'],
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${channelA.capacitySat ?? channelA.capacity_sat ?? '?'} sat`],
-            ['Status',   'Usable ✓'],
           ]} />
         )}
 
-        {/* HODL invoice */}
         {hodlBolt11 && (
-          <InfoCard title="HODL BOLT11 (LSP holding HTLC)" accent={AppColors.warning} rows={[
-            ['Invoice',     short(hodlBolt11, 32)],
-            ['Amount',      `${PAYMENT_MSAT / 1000} sat`],
-            ['Pmt Hash',    short(paymentHash, 28)],
-            ['Status',      'HTLC held — User B offline'],
+          <InfoCard title="Checkout Invoice (HODL)" accent={AppColors.warning} rows={[
+            ['Item',     CART_ITEM],
+            ['Invoice',  short(hodlBolt11, 32)],
+            ['RGB',      String(PAYMENT_ASSET_AMOUNT)],
+            ['Status',   phase === 'send' ? 'Paying…' : sendStatus || 'Held at LSP'],
           ]} />
         )}
 
-        {/* Claim result */}
-        {claimResult && (
-          <InfoCard title="Claim Result" accent={AppColors.success} rows={[
-            ['Changed',  String(claimResult.changed)],
-            ['Status',   'Preimage revealed to LSP ✓'],
+        {sendStatus && (
+          <InfoCard title="Buyer Payment" accent={AppColors.primary} rows={[
+            ['Hash',   short(paymentHash, 28)],
+            ['Status', sendStatus],
           ]} />
         )}
 
-        {/* Final balance */}
         {finalBalB && (
-          <InfoCard title="User B Final Balance" accent={AppColors.success} rows={[
+          <InfoCard title="Merchant Balance After Delivery" accent={AppColors.success} rows={[
             ['Offchain In',  String(finalBalB.offchainInbound ?? 0)],
             ['Offchain Out', String(finalBalB.offchainOutbound ?? 0)],
-            ['Settled',      String(finalBalB.settled ?? 0)],
           ]} />
         )}
 
-        {/* Done */}
         {phase === 'done' && (
           <View style={[s.card, { borderColor: AppColors.successBorder }]}>
             <Text style={[s.cardTitle, { color: AppColors.success }]}>
-              ✓ Async Payment Complete
+              ✓ Cart Checkout Complete
             </Text>
             <Text style={s.cardDesc}>
-              {'1. User B registered hash pool → LSP created Lightning Address\n' +
-               '2. User A paid via LNURL-pay → LSP held HTLC\n' +
-               '3. User B came online → claimed via preimage\n' +
-               '4. LSP settled inbound HTLC from User A\n\n' +
-               'Full async payment lifecycle demonstrated end-to-end.'}
+              {'1. Merchant registered Lightning Address via by_pubkey\n' +
+               '2. Buyer checked out via LNURL-pay (lnurlp + callback)\n' +
+               '3. LSP held HODL while merchant peer stayed connected\n' +
+               '4. LSP outbox settled — buyer Settled, merchant RGB delivered\n\n' +
+               'Virtual channels + LSP auto-settlement — no manual claim.'}
             </Text>
           </View>
         )}
 
-        {/* Error */}
         {phase === 'error' && (
           <View style={[s.card, { borderColor: AppColors.errorBorder, backgroundColor: AppColors.errorBg }]}>
             <Text style={[s.cardTitle, { color: AppColors.error }]}>Flow failed</Text>
@@ -836,6 +845,14 @@ const s = StyleSheet.create({
   card:           { backgroundColor: AppColors.bgCard, borderRadius: 12, padding: 20, borderWidth: 1, borderColor: AppColors.border, marginBottom: 16 },
   cardTitle:      { fontSize: 15, fontWeight: '700', color: AppColors.textPrimary, marginBottom: 8 },
   cardDesc:       { fontSize: 13, color: AppColors.textSecondary, lineHeight: 22 },
+  cartCard:       { backgroundColor: AppColors.bgCardElevated, borderRadius: 10, padding: 14, marginVertical: 12, borderWidth: 1, borderColor: AppColors.border },
+  cartTitle:      { fontSize: 12, fontWeight: '700', color: AppColors.textTertiary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 },
+  cartRow:        { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4 },
+  cartItem:       { fontSize: 14, color: AppColors.textPrimary, flex: 1 },
+  cartPrice:      { fontSize: 14, fontWeight: '600', color: AppColors.primary, fontFamily: AppColors.mono },
+  cartDivider:    { height: 1, backgroundColor: AppColors.border, marginVertical: 8 },
+  cartTotalLabel: { fontSize: 13, color: AppColors.textSecondary },
+  cartTotalVal:   { fontSize: 13, color: AppColors.textAccent, fontFamily: AppColors.mono },
   warnCard:       { backgroundColor: AppColors.errorBg, borderRadius: 8, padding: 12, marginVertical: 12, borderWidth: 1, borderColor: AppColors.errorBorder },
   warnTxt:        { fontSize: 12, color: '#FCA5A5', fontFamily: AppColors.mono, lineHeight: 20 },
   paramCard:      { backgroundColor: AppColors.bgCardElevated, borderRadius: 8, padding: 12, marginVertical: 12 },

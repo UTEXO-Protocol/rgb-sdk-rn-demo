@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
-# start-lsp-regtest.sh
+# start-lsp-local.sh  (gitignored — local paths; not committed)
 #
-# Sets up the full LSP regtest environment matching the utexo-lsp e2e test fixture:
-#   LSP daemon  (port 3001, peer 9735) — docker RLN
-#   Faucet daemon (port 3004, peer 9738) — docker RLN
-#   utexo-lsp   (port 8080) — Go service
-#   local-node-bridge (port 5000) — bitcoin-cli helper for mine/send
+# Regtest LSP stack for APay cart checkout (apay-regular-channels.tsx):
+#   virtual RGB channels (trusted_no_broadcast) — required for apayNew P2P ACL
+#   APay bearer token + Lightning Address domain on utexo-lsp
 #
-# Run once before starting the demo app.
-# Outputs .env.lsp.local with LSP_ASSET_ID, LSP_PEER_PUBKEY, etc.
+# Services:
+#   LSP RLN     port 3005, peer 9737
+#   Faucet RLN  port 3008, peer 9740
+#   utexo-lsp   port 8080
+#   local-node-bridge  port 5000
+#
+# Use for: LSP tab → APay Cart Checkout + Async Payment (both need virtual LSP)
 #
 # Usage:
-#   ./scripts/start-lsp-regtest.sh
-#   ./scripts/start-lsp-regtest.sh stop     # kill daemons
+#   ./scripts/start-lsp-local.sh
+#   ./scripts/start-lsp-local.sh stop
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-RGBLN_REPO="${RGBLN_REPO:?Set RGBLN_REPO to your rgb-lightning-node path, e.g.: export RGBLN_REPO=~/rgb/rgb-lightning-node}"
-UTEXO_LSP_REPO="${UTEXO_LSP_REPO:?Set UTEXO_LSP_REPO to your utexo-lsp path, e.g.: export UTEXO_LSP_REPO=~/rgb/utexo-lsp}"
+RGBLN_REPO="${RGBLN_REPO:-/Users/yuriibandrivskyi/Desktop/utexo/rgb-lightning-node}"
+UTEXO_LSP_REPO="${UTEXO_LSP_REPO:-/Users/yuriibandrivskyi/Desktop/utexo/utexo-lsp}"
 RLN_BIN="$RGBLN_REPO/target/release/rgb-lightning-node"
 
 LSP_DIR="$RGBLN_REPO/data_lsp"
@@ -46,8 +49,8 @@ ENV_OUT="$DEMO_DIR/.env.lsp.local"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-log() { echo "[lsp-setup] $*"; }
-die() { echo "[lsp-setup] ERROR: $*" >&2; exit 1; }
+log() { echo "[lsp-local] $*"; }
+die() { echo "[lsp-local] ERROR: $*" >&2; exit 1; }
 
 rln_post() {
   local port=$1; local path=$2; local body=${3:-'{}'};
@@ -64,7 +67,6 @@ rln_get() {
 wait_for_port() {
   local port=$1; local label=$2; local deadline=$((SECONDS + 30))
   log "Waiting for $label on :$port …"
-  # 200 = ready, 403 = locked (not yet init'd) — both mean the daemon is listening
   while true; do
     local code
     code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port/nodeinfo" 2>/dev/null || echo "000")
@@ -116,7 +118,9 @@ fi
 # ── preflight ─────────────────────────────────────────────────────────────────
 
 log ""
-log "⚠  IMPORTANT: Reset / Cancel any running demo app flow BEFORE continuing."
+log "Mode: virtual RGB channels (trusted_no_broadcast) — APay cart + async flows"
+log ""
+log "⚠  Reset / Cancel any running demo app flow BEFORE continuing."
 log "   Active demo nodes stay connected to the LSP. If the cron fires while"
 log "   they are connected it creates stuck Initiated Sends → spendable=0."
 log ""
@@ -125,17 +129,16 @@ log ""
 command -v go >/dev/null || die "go not found — install Go"
 command -v jq >/dev/null || die "jq not found — brew install jq"
 
-# Check regtest services are running
 cd "$RGBLN_REPO"
 docker compose ps --services --status running | grep -q bitcoind || die "regtest not running — start with: ./regtest.sh start"
 log "Regtest services confirmed running"
 
-# ── local-node-bridge (mine/send helper for demo app) ─────────────────────────
+# ── local-node-bridge ─────────────────────────────────────────────────────────
 
 if ! curl -sf "http://127.0.0.1:$BRIDGE_PORT/execute" -d '{"args":"getblockcount"}' >/dev/null 2>&1; then
   log "Starting local-node-bridge on :$BRIDGE_PORT …"
-  mkdir -p "$DEMO_DIR/logs"
-  RGBLN_REPO="$RGBLN_REPO" node "$DEMO_DIR/scripts/local-node-bridge.js" >"$DEMO_DIR/logs/bridge.log" 2>&1 &
+  mkdir -p "$RGBLN_REPO/logs"
+  node "$RGBLN_REPO/local-node-bridge.js" >"$RGBLN_REPO/logs/bridge.log" 2>&1 &
   sleep 2
   curl -sf "http://127.0.0.1:$BRIDGE_PORT/execute" -d '{"args":"getblockcount"}' >/dev/null || die "local-node-bridge failed to start"
   log "local-node-bridge ready"
@@ -143,21 +146,17 @@ else
   log "local-node-bridge already running"
 fi
 
-# ── start LSP daemon ─────────────────────────────────────────────────────────
+# ── start LSP daemon (virtual channels) ───────────────────────────────────────
 
 pkill -f "rgb-lightning-node.*data_lsp" 2>/dev/null || true
 sleep 1
-# Always start fresh (mirrors test fixture: new artifact_dir per run)
 rm -rf "$LSP_DIR"
-mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs" "$DEMO_DIR/logs"
+mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs"
 APAY_BEARER_TOKEN="apay-regtest-secret"
 
 log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
-# --lsp-base-url: host node forwards async_order.new P2P messages to utexo-lsp
-# --lsp-bearer-token: must match APAY_BEARER_TOKEN in utexo-lsp (fail-closed if empty)
-# --enable-virtual-channels-v0: required for async-pay.tsx — User B nodes are created with
-#   enableVirtualChannelsV0:true and reject standard anchor channels with "unsupported_scid_alias".
-#   Virtual channels (trusted_no_broadcast) avoid the SCID-alias negotiation entirely.
+# --lsp-base-url / --lsp-bearer-token: apayNew P2P → utexo-lsp
+# --enable-virtual-channels-v0: required for VirtualChannelAccess on async_order P2P
 "$RLN_BIN" "$LSP_DIR" \
   --daemon-listening-port "$LSP_PORT" \
   --ldk-peer-listening-port "$LSP_PEER_PORT" \
@@ -166,7 +165,7 @@ log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
   --enable-virtual-channels-v0 \
   --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
   --lsp-bearer-token "$APAY_BEARER_TOKEN" \
-  >"$DEMO_DIR/logs/rln-lsp.log" 2>&1 &
+  >"$RGBLN_REPO/logs/rln-lsp.log" 2>&1 &
 LSP_PID=$!
 wait_for_port "$LSP_PORT" "LSP daemon"
 
@@ -182,7 +181,7 @@ log "Starting Faucet RLN daemon (port $FAUCET_PORT, peer $FAUCET_PEER_PORT) …"
   --ldk-peer-listening-port "$FAUCET_PEER_PORT" \
   --network regtest \
   --disable-authentication \
-  >"$DEMO_DIR/logs/rln-faucet.log" 2>&1 &
+  >"$RGBLN_REPO/logs/rln-faucet.log" 2>&1 &
 FAUCET_PID=$!
 wait_for_port "$FAUCET_PORT" "Faucet daemon"
 
@@ -200,7 +199,6 @@ rln_post "$LSP_PORT" "/unlock" "$UNLOCK_BODY" >/dev/null
 log "Unlocking Faucet …"
 rln_post "$FAUCET_PORT" "/unlock" "$UNLOCK_BODY" >/dev/null
 
-# Wait for nodes to finish unlocking (sync, LDK startup, etc.)
 log "Waiting for nodes to finish unlocking …"
 for port in "$LSP_PORT" "$FAUCET_PORT"; do
   local_deadline=$((SECONDS + 60))
@@ -253,22 +251,18 @@ log "Asset ID: $ASSET_ID"
 btc_mine 1
 sleep 2
 
-# ── seed LSP from Faucet (mirrors seed_lsp_from_faucet in harness.py) ────────
+# ── seed LSP from Faucet ──────────────────────────────────────────────────────
 
-log "Seeding LSP with 6 RGB units from Faucet …"
-for i in 1 2 3 4 5 6; do
-  log "  Seed $i/6 …"
+log "Seeding LSP with 3 RGB units from Faucet …"
+for i in 1 2 3; do
+  log "  Seed $i/3 …"
 
-  # Get RGB invoice on LSP — no asset_id (receive any asset, mirrors lsp.rgbinvoice_any())
   EXPIRY=$(($(date +%s) + 3600))
   RGB_INVOICE_RESP=$(rln_post "$LSP_PORT" "/rgbinvoice" \
     "{\"assignment\":{\"type\":\"Any\"},\"expiration_timestamp\":$EXPIRY,\"min_confirmations\":1,\"witness\":false}")
   RECIPIENT_ID=$(echo "$RGB_INVOICE_RESP" | jq -r '.recipient_id')
   [ -n "$RECIPIENT_ID" ] || die "No recipient_id in rgbinvoice response: $RGB_INVOICE_RESP"
 
-  # Send 1 unit from Faucet → LSP
-  # Note: skip_sync is required by the Rust struct (not in openapi docs)
-  # assignment format: {"type":"Fungible","value":N}
   SEND_BODY=$(printf '{
   "donation": true,
   "fee_rate": 7,
@@ -288,7 +282,6 @@ for i in 1 2 3 4 5 6; do
   btc_mine 1
   sleep 2
 
-  # Double refresh (mirrors harness.py)
   rln_post "$LSP_PORT"    "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
   rln_post "$LSP_PORT"    "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
   rln_post "$FAUCET_PORT" "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
@@ -299,39 +292,30 @@ log "LSP seeded. Checking LSP asset balance …"
 LSP_BAL=$(rln_post "$LSP_PORT" "/assetbalance" "{\"asset_id\":\"$ASSET_ID\"}" | jq '.settled // 0')
 log "LSP settled balance: $LSP_BAL"
 
-# ── set adb reverse ports so Android emulator can reach proxy + LSP ──────────
-# Must happen BEFORE utexo-lsp starts; otherwise cron fires, consignment
-# delivery fails (proxy unreachable), and Initiated Sends lock all UTXOs.
+# ── adb reverse (before utexo-lsp cron) ───────────────────────────────────────
+
 if command -v adb >/dev/null 2>&1 && adb devices | grep -q "emulator\|device"; then
   log "Setting adb reverse port forwards …"
-  adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"      || log "  tcp:3000 (proxy) FAILED — set manually"
-  adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"      || log "  tcp:3005 (LSP)   FAILED — set manually"
-  adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok"  || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
-  adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"     || log "  tcp:5000 (bridge) FAILED — set manually"
-  adb reverse tcp:8081 tcp:8081 && log "  tcp:8081 (Metro JS) ok"   || log "  tcp:8081 (Metro JS) FAILED — set manually"
-  adb reverse tcp:8082 tcp:8082 && log "  tcp:8082 (Metro HMR) ok"  || log "  tcp:8082 (Metro HMR) FAILED — set manually"
+  adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"      || log "  tcp:3000 FAILED"
+  adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP RLN) ok"    || log "  tcp:3005 FAILED"
+  adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok" || log "  tcp:8080 FAILED"
+  adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"     || log "  tcp:5000 FAILED"
+  adb reverse tcp:8081 tcp:8081 && log "  tcp:8081 (Metro JS) ok" || log "  tcp:8081 FAILED"
+  adb reverse tcp:8082 tcp:8082 && log "  tcp:8082 (Metro HMR) ok"|| log "  tcp:8082 FAILED"
 else
   log "adb not found or no device — skipping port forwards"
-  log "  Run manually before starting the app:"
-  log "    adb reverse tcp:3000 tcp:3000"
-  log "    adb reverse tcp:3005 tcp:3005"
-  log "    adb reverse tcp:8080 tcp:8080"
-  log "    adb reverse tcp:5000 tcp:5000"
-  log "    adb reverse tcp:8081 tcp:8081"
-  log "    adb reverse tcp:8082 tcp:8082"
 fi
 
-# ── start utexo-lsp ───────────────────────────────────────────────────────────
+# ── start utexo-lsp (virtual channels) ───────────────────────────────────────
 
 pkill -f "go run \."  2>/dev/null || true
 pkill -f "utexo-lsp"  2>/dev/null || true
 sleep 2
 
-# Wipe the database so the new instance starts clean (no stale transfers/assets from previous runs)
 rm -f "$UTEXO_LSP_REPO/utexo_lsp.db"
 log "Wiped utexo_lsp.db"
 
-log "Starting utexo-lsp (port $UTEXO_PORT) with SUPPORTED_ASSET_IDS=$ASSET_ID …"
+log "Starting utexo-lsp (virtual trusted_no_broadcast) …"
 cd "$UTEXO_LSP_REPO"
 env \
   LSP_BASE_URL="http://127.0.0.1:$LSP_PORT" \
@@ -341,7 +325,7 @@ env \
   CRON_EVERY="5s" \
   DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
-  DEFAULT_CHANNEL_ASSET_AMOUNT="2" \
+  DEFAULT_CHANNEL_ASSET_AMOUNT="1" \
   DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT="1" \
   DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
   MIN_AMT_MSAT="3000000" \
@@ -349,22 +333,18 @@ env \
   UTXO_TARGET_COUNT="25" \
   APAY_BEARER_TOKEN="$APAY_BEARER_TOKEN" \
   APAY_OUTBOUND_MIN_FINAL_CLTV_EXPIRY_DELTA="42" \
-  go run . >"$DEMO_DIR/logs/utexo-lsp.log" 2>&1 &
+  go run . >"$RGBLN_REPO/logs/utexo-lsp.log" 2>&1 &
 UTEXO_PID=$!
 wait_for_utexo
 
-# ── write env file ────────────────────────────────────────────────────────────
+# ── write env ─────────────────────────────────────────────────────────────────
 
-# URLs are computed at runtime from Platform.OS (mirrors wallet-flow.ts pattern).
-# Only write non-URL values to env files.
 cat > "$ENV_OUT" <<EOF
 EXPO_PUBLIC_LSP_REGTEST_ASSET_ID="$ASSET_ID"
 EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
 
-# Expo auto-loads .env.local — write LSP regtest vars there.
-# Single-source env workflow: keep all active vars in .env.local.
 ENV_LOCAL="$DEMO_DIR/.env.local"
 if [ -f "$ENV_LOCAL" ]; then
   grep -v "^EXPO_PUBLIC_LSP_REGTEST_\|^EXPO_PUBLIC_FAUCET_REGTEST_" "$ENV_LOCAL" > "$ENV_LOCAL.tmp" && mv "$ENV_LOCAL.tmp" "$ENV_LOCAL"
@@ -375,18 +355,20 @@ EXPO_PUBLIC_LSP_REGTEST_ASSET_ID="$ASSET_ID"
 EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
-log "LSP regtest vars written to $ENV_LOCAL (single env-file workflow)"
+log "LSP vars written to $ENV_LOCAL"
 
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-log "  LSP regtest environment ready"
+log "  LSP local environment ready (virtual channels)"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  utexo-lsp:   http://127.0.0.1:$UTEXO_PORT"
 log "  LSP daemon:  http://127.0.0.1:$LSP_PORT  (peer :$LSP_PEER_PORT)"
 log "  Faucet:      http://127.0.0.1:$FAUCET_PORT  (peer :$FAUCET_PEER_PORT)"
 log "  Asset ID:    $ASSET_ID"
 log "  LSP pubkey:  $LSP_PUBKEY"
+log "  Channels:    virtual trusted_no_broadcast"
 log "  Env file:    $ENV_OUT"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-log "  Start demo app, select Regtest in LSP tab"
+log "  LSP tab → APay Cart Checkout or Async Payment"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+

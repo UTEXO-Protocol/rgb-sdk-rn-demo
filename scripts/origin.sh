@@ -18,8 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-RGBLN_REPO="${RGBLN_REPO:?Set RGBLN_REPO to your rgb-lightning-node path, e.g.: export RGBLN_REPO=~/rgb/rgb-lightning-node}"
-UTEXO_LSP_REPO="${UTEXO_LSP_REPO:?Set UTEXO_LSP_REPO to your utexo-lsp path, e.g.: export UTEXO_LSP_REPO=~/rgb/utexo-lsp}"
+RGBLN_REPO="${RGBLN_REPO:-/Users/yuriibandrivskyi/Desktop/utexo/rgb-lightning-node}"
+UTEXO_LSP_REPO="${UTEXO_LSP_REPO:-/Users/yuriibandrivskyi/Desktop/utexo/utexo-lsp}"
 RLN_BIN="$RGBLN_REPO/target/release/rgb-lightning-node"
 
 LSP_DIR="$RGBLN_REPO/data_lsp"
@@ -134,8 +134,7 @@ log "Regtest services confirmed running"
 
 if ! curl -sf "http://127.0.0.1:$BRIDGE_PORT/execute" -d '{"args":"getblockcount"}' >/dev/null 2>&1; then
   log "Starting local-node-bridge on :$BRIDGE_PORT …"
-  mkdir -p "$DEMO_DIR/logs"
-  RGBLN_REPO="$RGBLN_REPO" node "$DEMO_DIR/scripts/local-node-bridge.js" >"$DEMO_DIR/logs/bridge.log" 2>&1 &
+  node "$RGBLN_REPO/local-node-bridge.js" >"$RGBLN_REPO/logs/bridge.log" 2>&1 &
   sleep 2
   curl -sf "http://127.0.0.1:$BRIDGE_PORT/execute" -d '{"args":"getblockcount"}' >/dev/null || die "local-node-bridge failed to start"
   log "local-node-bridge ready"
@@ -149,7 +148,7 @@ pkill -f "rgb-lightning-node.*data_lsp" 2>/dev/null || true
 sleep 1
 # Always start fresh (mirrors test fixture: new artifact_dir per run)
 rm -rf "$LSP_DIR"
-mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs" "$DEMO_DIR/logs"
+mkdir -p "$LSP_DIR" "$RGBLN_REPO/logs"
 APAY_BEARER_TOKEN="apay-regtest-secret"
 
 log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
@@ -166,7 +165,7 @@ log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
   --enable-virtual-channels-v0 \
   --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
   --lsp-bearer-token "$APAY_BEARER_TOKEN" \
-  >"$DEMO_DIR/logs/rln-lsp.log" 2>&1 &
+  >"$RGBLN_REPO/logs/rln-lsp.log" 2>&1 &
 LSP_PID=$!
 wait_for_port "$LSP_PORT" "LSP daemon"
 
@@ -182,7 +181,7 @@ log "Starting Faucet RLN daemon (port $FAUCET_PORT, peer $FAUCET_PEER_PORT) …"
   --ldk-peer-listening-port "$FAUCET_PEER_PORT" \
   --network regtest \
   --disable-authentication \
-  >"$DEMO_DIR/logs/rln-faucet.log" 2>&1 &
+  >"$RGBLN_REPO/logs/rln-faucet.log" 2>&1 &
 FAUCET_PID=$!
 wait_for_port "$FAUCET_PORT" "Faucet daemon"
 
@@ -255,9 +254,9 @@ sleep 2
 
 # ── seed LSP from Faucet (mirrors seed_lsp_from_faucet in harness.py) ────────
 
-log "Seeding LSP with 6 RGB units from Faucet …"
-for i in 1 2 3 4 5 6; do
-  log "  Seed $i/6 …"
+log "Seeding LSP with 3 RGB units from Faucet …"
+for i in 1 2 3; do
+  log "  Seed $i/3 …"
 
   # Get RGB invoice on LSP — no asset_id (receive any asset, mirrors lsp.rgbinvoice_any())
   EXPIRY=$(($(date +%s) + 3600))
@@ -304,12 +303,10 @@ log "LSP settled balance: $LSP_BAL"
 # delivery fails (proxy unreachable), and Initiated Sends lock all UTXOs.
 if command -v adb >/dev/null 2>&1 && adb devices | grep -q "emulator\|device"; then
   log "Setting adb reverse port forwards …"
-  adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"      || log "  tcp:3000 (proxy) FAILED — set manually"
-  adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"      || log "  tcp:3005 (LSP)   FAILED — set manually"
-  adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok"  || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
-  adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"     || log "  tcp:5000 (bridge) FAILED — set manually"
-  adb reverse tcp:8081 tcp:8081 && log "  tcp:8081 (Metro JS) ok"   || log "  tcp:8081 (Metro JS) FAILED — set manually"
-  adb reverse tcp:8082 tcp:8082 && log "  tcp:8082 (Metro HMR) ok"  || log "  tcp:8082 (Metro HMR) FAILED — set manually"
+  adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"    || log "  tcp:3000 (proxy) FAILED — set manually"
+  adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"    || log "  tcp:3005 (LSP)   FAILED — set manually"
+  adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok" || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
+  adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"   || log "  tcp:5000 (bridge) FAILED — set manually"
 else
   log "adb not found or no device — skipping port forwards"
   log "  Run manually before starting the app:"
@@ -317,8 +314,6 @@ else
   log "    adb reverse tcp:3005 tcp:3005"
   log "    adb reverse tcp:8080 tcp:8080"
   log "    adb reverse tcp:5000 tcp:5000"
-  log "    adb reverse tcp:8081 tcp:8081"
-  log "    adb reverse tcp:8082 tcp:8082"
 fi
 
 # ── start utexo-lsp ───────────────────────────────────────────────────────────
@@ -341,15 +336,14 @@ env \
   CRON_EVERY="5s" \
   DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
-  DEFAULT_CHANNEL_ASSET_AMOUNT="2" \
-  DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT="1" \
+  DEFAULT_CHANNEL_ASSET_AMOUNT="1" \
   DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
   MIN_AMT_MSAT="3000000" \
   UTXO_MIN_COUNT="15" \
   UTXO_TARGET_COUNT="25" \
   APAY_BEARER_TOKEN="$APAY_BEARER_TOKEN" \
   APAY_OUTBOUND_MIN_FINAL_CLTV_EXPIRY_DELTA="42" \
-  go run . >"$DEMO_DIR/logs/utexo-lsp.log" 2>&1 &
+  go run . >"$RGBLN_REPO/logs/utexo-lsp.log" 2>&1 &
 UTEXO_PID=$!
 wait_for_utexo
 

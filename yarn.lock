@@ -2310,7 +2310,7 @@
     wonka "^6.3.2"
 
 "@utexo/rgb-sdk-rn@file:../rgb-sdk-rn":
-  version "1.0.0-beta.12"
+  version "1.0.0-beta.13"
   resolved "file:../rgb-sdk-rn"
   dependencies:
     "@noble/hashes" "^2.0.1"
