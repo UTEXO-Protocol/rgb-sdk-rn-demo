@@ -79,6 +79,76 @@ function chanField<T>(c: Record<string, unknown>, camel: string, snake: string):
   return (c[camel] ?? c[snake]) as T | undefined;
 }
 
+/** RGB balance + LSP channel slice (offchainOutbound = local spendable, offchainInbound = remote). */
+type RgbBalanceSnap = {
+  offchainOutbound: number;
+  offchainInbound: number;
+  settled: number;
+  spendable: number;
+  localRgb?: number;
+  remoteRgb?: number;
+};
+
+async function snapshotRgbBalances(
+  wallet: UTEXOWallet,
+  assetId: string,
+  lspPubkey: string,
+): Promise<RgbBalanceSnap> {
+  const bal = await wallet.getAssetBalance(assetId).catch(() => null);
+  const chans = await wallet.listChannels().catch(() => []);
+  const ch = chans.find(c => {
+    const row = c as unknown as Record<string, unknown>;
+    const peer = String(chanField<string>(row, 'peerPubkey', 'peer_pubkey') ?? '');
+    const asset = String(chanField<string>(row, 'assetId', 'asset_id') ?? '');
+    return peer === lspPubkey && asset === assetId;
+  });
+  const chRow = ch != null ? (ch as unknown as Record<string, unknown>) : null;
+  return {
+    offchainOutbound: Number(bal?.offchainOutbound ?? 0),
+    offchainInbound: Number(bal?.offchainInbound ?? 0),
+    settled: Number(bal?.settled ?? 0),
+    spendable: Number(bal?.spendable ?? 0),
+    localRgb: chRow != null
+      ? Number(chanField<number>(chRow, 'assetLocalAmount', 'asset_local_amount') ?? 0)
+      : undefined,
+    remoteRgb: chRow != null
+      ? Number(chanField<number>(chRow, 'assetRemoteAmount', 'asset_remote_amount') ?? 0)
+      : undefined,
+  };
+}
+
+function logRgbBalanceSnap(
+  role: string,
+  when: 'START (after channel)' | 'START (pre-checkout)' | 'END (settled)',
+  snap: RgbBalanceSnap,
+  addLog: (msg: string, type?: LogEntry['type']) => void,
+): void {
+  const chan =
+    snap.localRgb != null
+      ? ` | chan local=${snap.localRgb} remote=${snap.remoteRgb}`
+      : '';
+  addLog(
+    `balance ${when} — ${role}: offchainOutbound(local)=${snap.offchainOutbound} ` +
+      `offchainInbound(remote)=${snap.offchainInbound} settled=${snap.settled} spendable=${snap.spendable}${chan}`,
+    when.startsWith('END') ? 'success' : 'info',
+  );
+}
+
+function logRgbBalanceDelta(
+  role: string,
+  before: RgbBalanceSnap,
+  after: RgbBalanceSnap,
+  addLog: (msg: string, type?: LogEntry['type']) => void,
+): void {
+  const dOut = after.offchainOutbound - before.offchainOutbound;
+  const dIn = after.offchainInbound - before.offchainInbound;
+  addLog(
+    `balance Δ ${role}: offchainOutbound ${before.offchainOutbound}→${after.offchainOutbound} (${dOut >= 0 ? '+' : ''}${dOut}) ` +
+      `offchainInbound ${before.offchainInbound}→${after.offchainInbound} (${dIn >= 0 ? '+' : ''}${dIn})`,
+    'success',
+  );
+}
+
 /** Settlement-time snapshot — merchant inbound HTLC / claim state vs buyer outbound. */
 async function logSettlementDiagnostics(
   wA: UTEXOWallet,
@@ -376,6 +446,8 @@ export default function ApayRegularChannelsScreen({ embedded = false }: { embedd
       });
       setChannelB(chanB);
       addLog('Merchant virtual RGB channel usable ✓', 'success');
+      const merchantSnapStart = await snapshotRgbBalances(wB, ASSET_ID, LSP_PEER_PUBKEY);
+      logRgbBalanceSnap('merchant', 'START (after channel)', merchantSnapStart, addLog);
 
       addLog('Syncing and waiting for P2P onion path to stabilise (5s)…');
       await wB.syncWallet();
@@ -479,10 +551,24 @@ export default function ApayRegularChannelsScreen({ embedded = false }: { embedd
       setChannelA(chanA);
       addLog('Buyer RGB channel usable ✓', 'success');
 
+      const [buyerSnapStart, merchantSnapCheckout] = await Promise.all([
+        snapshotRgbBalances(wA, ASSET_ID, LSP_PEER_PUBKEY),
+        snapshotRgbBalances(wB, ASSET_ID, LSP_PEER_PUBKEY),
+      ]);
+      logRgbBalanceSnap('buyer', 'START (pre-checkout)', buyerSnapStart, addLog);
+      logRgbBalanceSnap('merchant', 'START (pre-checkout)', merchantSnapCheckout, addLog);
+      addLog(
+        `Expected checkout: buyer offchainOutbound(local) ≥ ${PAYMENT_ASSET_AMOUNT} to pay; ` +
+          `after settle buyer local −${PAYMENT_ASSET_AMOUNT}, merchant local +${PAYMENT_ASSET_AMOUNT} ` +
+          `(offchainInbound/remote usually −${PAYMENT_ASSET_AMOUNT} on receive)`,
+        'info',
+      );
+
+      // offchainOutbound = channel local RGB (spendable); increases when merchant receives pay
       let balBefore = 0;
       try {
         const b0 = await wB.getAssetBalance(ASSET_ID);
-        balBefore = Number(b0?.offchainInbound ?? 0);
+        balBefore = Number(b0?.offchainOutbound ?? 0);
       } catch {}
 
       setPhase('lnurlp');
@@ -568,9 +654,9 @@ export default function ApayRegularChannelsScreen({ embedded = false }: { embedd
         let balAfter = balBefore;
         try {
           const b1 = await wB.getAssetBalance(ASSET_ID);
-          balAfter = Number(b1?.offchainInbound ?? 0);
+          balAfter = Number(b1?.offchainOutbound ?? 0);
           setFinalBalB(b1);
-          addLog(`merchant offchainInbound: ${balAfter} (was ${balBefore})`);
+          addLog(`merchant offchainOutbound (local RGB): ${balAfter} (was ${balBefore})`);
         } catch {}
 
         diagEvery += POLL_INTERVAL_MS;
@@ -579,9 +665,24 @@ export default function ApayRegularChannelsScreen({ embedded = false }: { embedd
           await logSettlementDiagnostics(wA, wB, pHash, LSP_PEER_PUBKEY, addLog);
         }
 
+        const merchantInboundOk = async (): Promise<boolean> => {
+          if (!pHash) return false;
+          const n = normHash(pHash);
+          const pays = await wB.listPaymentsRaw().catch(() => []);
+          const mp = pays.find(p => normHash(p.paymentHash) === n);
+          if (!mp) return false;
+          const st = String(mp.status ?? '').toLowerCase();
+          return st === 'succeeded' || st === 'claimable';
+        };
+
         if (status === 'Settled' && balAfter > balBefore) {
           settled = true;
-          addLog(`merchant received +${balAfter - balBefore} RGB (offchain inbound)`, 'success');
+          addLog(`merchant received +${balAfter - balBefore} RGB (local / offchainOutbound)`, 'success');
+          break;
+        }
+        if (status === 'Settled' && (await merchantInboundOk())) {
+          settled = true;
+          addLog('buyer Settled + merchant inbound SUCCEEDED — cart complete', 'success');
           break;
         }
         if (status === 'Failed') {
@@ -597,6 +698,16 @@ export default function ApayRegularChannelsScreen({ embedded = false }: { embedd
       }
 
       addLog('LSP claimed buyer HTLC with preimage — cart checkout complete ✓', 'success');
+
+      const [buyerSnapEnd, merchantSnapEnd] = await Promise.all([
+        snapshotRgbBalances(wA, ASSET_ID, LSP_PEER_PUBKEY),
+        snapshotRgbBalances(wB, ASSET_ID, LSP_PEER_PUBKEY),
+      ]);
+      logRgbBalanceSnap('buyer', 'END (settled)', buyerSnapEnd, addLog);
+      logRgbBalanceSnap('merchant', 'END (settled)', merchantSnapEnd, addLog);
+      logRgbBalanceDelta('buyer', buyerSnapStart, buyerSnapEnd, addLog);
+      logRgbBalanceDelta('merchant', merchantSnapCheckout, merchantSnapEnd, addLog);
+
       setPhase('done');
 
       } finally {
