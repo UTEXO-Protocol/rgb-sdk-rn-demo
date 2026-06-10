@@ -56,14 +56,14 @@ SDK call: `wallet.apayNew(lspPubkey)`
 
 ```
 Sender  ──GET /.well-known/lnurlp/{username}──►  utexo-lsp  ──callback──►  HODL BOLT11
-Sender  ──payLightningInvoice(hodlBolt11)──►  Sender RLN  ──HTLC──►  LSP RLN  (HELD)
+Sender  ──lsp.payAddress(address)──►  Sender RLN  ──HTLC──►  LSP RLN  (HELD)
 LSP RLN  ──POST /internal/async_order/claimable──►  utexo-lsp
 ```
 
 1. Sender fetches the LNURL pay endpoint for Recipient's username.
 2. Sender calls the callback with `amount_msat` (and optionally `asset_id` + `asset_amount` for RGB).
 3. utexo-lsp reserves a hash slot from Recipient's pool and calls the LSP RLN `/lninvoice` with `is_hodl=true` and the reserved `payment_hash` → gets a HODL BOLT11.
-4. Sender pays the HODL BOLT11 via `payLightningInvoice`.
+4. Sender pays via `lsp.payAddress({ address, amtMsat, asset })` (LNURL resolve + HODL pay).
 5. The HTLC reaches the LSP RLN and is **intercepted/held** (not settled).
 6. LSP RLN notifies utexo-lsp via `POST /internal/async_order/claimable` (with `payment_hash` + `claim_deadline_height`).
 7. utexo-lsp marks the invoice `claimable` and enqueues outbox job `request_outbound_invoice`.
@@ -142,54 +142,22 @@ Terminal failure: `failed` — claim deadline exceeded or delivery impossible.
 
 ## What the Demo App Must Do
 
+Reference implementation: [`screens/apay/useApayFlow.ts`](../screens/apay/useApayFlow.ts)  
+Screens: **Async Payment** (`screens/async-pay.tsx`), **APay Cart** (`screens/apay-regular-channels.tsx`).
+
 | Role | App responsibility |
 |------|-------------------|
-| **Recipient** | Call `apayNew(lspPubkey)` once while connected. Stay online (reconnect periodically) so the LSP can deliver via P2P in Phase 3. No manual claim needed — delivery is automatic. |
-| **Sender** | Resolve LNURL address → get HODL BOLT11 → call `payLightningInvoice`. Wait for payment status to become `Succeeded`. |
+| **Recipient** | `lsp.connect()` → `lsp.waitForChannel()` → `lsp.enableLightningAddress()`. Call `lsp.connect()` when online so the LSP outbox can reach the node in Phase 3. Settlement is automatic — no `claimHodlInvoice`. |
+| **Sender** | `lsp.connect()` → `lsp.waitForChannel()` → `lsp.waitForOutboundLiquidity()` → `lsp.payAddress()`. Poll `getLightningSendRequest(paymentHash)` until `Settled`. |
 
-### What the current demo (`async-pay.tsx`) does wrong
-
-1. **User B polls for `InboundHodl/Claimable` and calls `claimHodlInvoice` manually.** This is wrong. The Recipient does NOT hold a HODL invoice — the LSP pays Recipient's outbound invoice and Recipient auto-settles it. User B's node just needs to remain connected.
-
-2. **User A has 0 RGB.** The LSP opens channels to both users with all RGB on the LSP's side. `payLightningInvoice` fails immediately with `status=FAILED` because User A's channel has no RGB to send. Fix: LSP must push RGB to User A when opening the channel (`push_asset_amount=1`, `asset_amount=2`).
+**Success checks:** Sender `Settled`; Recipient inbound `INBOUND_HODL` → `Succeeded`; Recipient `offchainOutbound` increased (not `offchainInbound`).
 
 ---
 
-## Required Config Changes
+## Regtest setup
 
-### utexo-lsp (`start-lsp-local.sh`)
+Run `./scripts/start-lsp-local.sh` (or `start-lsp-regtest.sh`) before the demo. Required env: `EXPO_PUBLIC_LSP_REGTEST_ASSET_ID`, LSP HTTP on `:8080`, Host RLN on `:3005`.
 
-```bash
-DEFAULT_CHANNEL_ASSET_AMOUNT="2"         # total RGB per channel (was 1)
-DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT="1"    # push 1 RGB to counterparty at open (new)
-```
+Channel config must give the **Sender RGB** to pay (`DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT=1`, `DEFAULT_CHANNEL_ASSET_AMOUNT=2` in the start script). Without push, the Sender channel has 0 local RGB and `payAddress` fails immediately with `Failed`.
 
-LSP seeding must provide enough RGB to cover both channels:
-
-- Channel to Sender: 2 units (1 pushed, 1 retained)
-- Channel to Recipient: 1 unit (retained for outbound delivery; no push needed since Recipient is the receiver)
-
-But because utexo-lsp uses the same config for all channels, both get push=1 and total=2. LSP needs 4 units minimum → seed at least 5.
-
-### utexo-lsp source changes needed
-
-`DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT` does not exist in the current codebase. The existing `inbound` calculation (from `c.AssetDecimals`) is unreachable because rgb-lightning-node has no `/listconnections` endpoint and the `ListPeers` fallback never sets `AssetDecimals`. A new config field is required:
-
-```go
-// config.go
-DefaultChannelPushAssetAmount *uint64
-
-// LoadConfig()
-DefaultChannelPushAssetAmount: optionalUint64("DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT"),
-
-// api.go — openChannelRequest()
-if inbound == 0 && a.cfg.DefaultChannelPushAssetAmount != nil {
-    inbound = *a.cfg.DefaultChannelPushAssetAmount
-}
-```
-
-### async-pay.tsx demo changes needed
-
-1. **Remove `claimHodlInvoice` polling phase.** Replace with: wait for User A's payment to reach `Succeeded`.
-2. **Verify User B's RGB balance increased** after User A's payment succeeds.
-3. User B just needs to stay connected (keep reconnecting to LSP peer) so Phase 3 P2P exchange can happen.
+See also [LSP_REGTEST_SETUP.md](./LSP_REGTEST_SETUP.md) and SDK [async-payments.md](https://github.com/UTEXO-Protocol/rgb-sdk-rn/blob/main/docs/async-payments.md).

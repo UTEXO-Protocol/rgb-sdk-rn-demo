@@ -24,7 +24,7 @@
 #   ./scripts/claimbug.sh stop         # kill claimbug nodes only
 #   ./scripts/claimbug.sh diagnose     # re-print diagnostics from last run
 #
-# See docs/bug-apay-lsp-channel-push-asymmetry.md for channel-push notes.
+# See docs/apay-flow.md for the APay protocol flow.
 
 set -euo pipefail
 
