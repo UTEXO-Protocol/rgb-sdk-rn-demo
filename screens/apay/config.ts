@@ -32,7 +32,7 @@ export type ApayFlowVariant = 'cart' | 'async';
 export type Phase =
   | 'idle'
   | 'b_init' | 'b_fund' | 'b_utxos' | 'b_channel' | 'register'
-  | 'a_init' | 'a_fund' | 'a_utxos' | 'a_channel'
+  | 'a_init' | 'a_fund' | 'a_utxos' | 'a_channel' | 'a_topup'
   | 'lnurlp' | 'send' | 'settle'
   | 'done' | 'error';
 
@@ -45,10 +45,10 @@ export const normHash = (h: string) => (h || '').toLowerCase().replace(/^0x/, ''
 export const PHASE_LABELS: Record<Phase, string> = {
   idle: 'Idle',
   b_init: 'B Init', b_fund: 'B Fund', b_utxos: 'B UTXOs', b_channel: 'B Chan', register: 'Register',
-  a_init: 'A Init', a_fund: 'A Fund', a_utxos: 'A UTXOs', a_channel: 'A Chan',
+  a_init: 'A Init', a_fund: 'A Fund', a_utxos: 'A UTXOs', a_channel: 'A Chan', a_topup: 'A Top-up',
   lnurlp: 'Checkout', send: 'Pay', settle: 'Settle',
   done: 'Done', error: 'Error',
 };
 
 export const PHASES_P1: Phase[] = ['b_init', 'b_fund', 'b_utxos', 'b_channel', 'register'];
-export const PHASES_P2: Phase[] = ['a_init', 'a_fund', 'a_utxos', 'a_channel', 'send', 'settle', 'done'];
+export const PHASES_P2: Phase[] = ['a_init', 'a_fund', 'a_utxos', 'a_channel', 'a_topup', 'send', 'settle', 'done'];

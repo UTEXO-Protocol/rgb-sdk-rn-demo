@@ -306,6 +306,7 @@ if command -v adb >/dev/null 2>&1 && adb devices | grep -q "emulator\|device"; t
   log "Setting adb reverse port forwards …"
   adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"      || log "  tcp:3000 (proxy) FAILED — set manually"
   adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"      || log "  tcp:3005 (LSP)   FAILED — set manually"
+  adb reverse tcp:3008 tcp:3008 && log "  tcp:3008 (faucet) ok"     || log "  tcp:3008 (faucet) FAILED — set manually"
   adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok"  || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
   adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"     || log "  tcp:5000 (bridge) FAILED — set manually"
   adb reverse tcp:8081 tcp:8081 && log "  tcp:8081 (Metro JS) ok"   || log "  tcp:8081 (Metro JS) FAILED — set manually"
@@ -315,6 +316,7 @@ else
   log "  Run manually before starting the app:"
   log "    adb reverse tcp:3000 tcp:3000"
   log "    adb reverse tcp:3005 tcp:3005"
+  log "    adb reverse tcp:3008 tcp:3008"
   log "    adb reverse tcp:8080 tcp:8080"
   log "    adb reverse tcp:5000 tcp:5000"
   log "    adb reverse tcp:8081 tcp:8081"
@@ -342,7 +344,6 @@ env \
   DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
   DEFAULT_CHANNEL_ASSET_AMOUNT="2" \
-  DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT="1" \
   DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
   MIN_AMT_MSAT="3000000" \
   UTXO_MIN_COUNT="15" \

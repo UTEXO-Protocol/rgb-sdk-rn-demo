@@ -37,6 +37,7 @@ function phaseMessage(phase: Phase): string {
     case 'a_fund':    return 'Funding User A…';
     case 'a_utxos':   return 'Creating User A UTXOs…';
     case 'a_channel': return 'Opening RGB channel LSP → User A…';
+    case 'a_topup':   return 'User A deposit — receiving RGB via lightning_receive…';
     case 'send':      return 'User A paying via Lightning Address (payAddress)…';
     case 'settle':    return 'User B online — LSP outbox settlement…';
     default:          return 'Working…';

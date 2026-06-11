@@ -40,6 +40,7 @@ function phaseMessage(phase: Phase): string {
     case 'a_fund':    return 'Funding buyer wallet…';
     case 'a_utxos':   return 'Creating buyer UTXOs…';
     case 'a_channel': return 'Opening virtual RGB channel LSP → buyer…';
+    case 'a_topup':   return 'Buyer deposit — receiving RGB via lightning_receive…';
     case 'send':      return 'Buyer checkout — payAddress (LNURL + HODL pay)…';
     case 'settle':    return 'Waiting for LSP auto-settlement…';
     default:          return 'Working…';

@@ -385,6 +385,19 @@ export function useLspFlow({ channelMode = 'regular' }: UseLspFlowOptions = {}) 
       const initialBalA = await wA.getAssetBalance(ASSET_ID);
       const initialBalB = await wB.getAssetBalance(ASSET_ID);
 
+      // Verify User B still has a usable RGB channel — the utexo-lsp cron opens virtual
+      // channels (trusted_no_broadcast) whose RGB push HTLC can force-close the channel
+      // while Part 1 is running. Fail fast here rather than hanging for 60 s.
+      const bChannelList = (await wB.listChannels()) as any[];
+      const bHasChannel = bChannelList.some((c: any) =>
+        (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
+      );
+      if (!bHasChannel) throw new Error(
+        'User B has no usable RGB channel — force-closed by utexo-lsp cron push HTLC. ' +
+        'Restart the LSP stack (start-lsp-local.sh) and retry.'
+      );
+      addLog('User B channel still usable ✓', 'success');
+
       setPhase('p2_pay');
 
       req('userB.createLightningInvoice', { amtMsat: PAYMENT_MSAT, assetId: short(ASSET_ID), assetAmount: PAYMENT_ASSET_AMOUNT });
@@ -406,11 +419,16 @@ export function useLspFlow({ channelMode = 'regular' }: UseLspFlowOptions = {}) 
       setPhase('p2_settle');
       addLog('Waiting for userB invoice to settle …');
       setInvoiceStatusB('Pending');
+      let p2LastStatus = '';
       await lspB.awaitReceiveSettlement(bInvoice, {
         timeoutMs:      PAYMENT_TIMEOUT_S * 1000,
         pollIntervalMs: POLL_INTERVAL_S * 1000,
-        onProgress: (s) => { setInvoiceStatusB(s); addLog(`userB invoice: ${s}`); },
+        onProgress: (s) => { p2LastStatus = s; setInvoiceStatusB(s); addLog(`userB invoice: ${s}`); },
       });
+      // lib/module compiled output returns 'Succeeded' on both success and timeout — track via onProgress.
+      if (p2LastStatus !== 'Succeeded') throw new Error(
+        `userB invoice did not settle (last status: ${p2LastStatus}) — check LSP routing and User B channel state`
+      );
       addLog('userB LN invoice Succeeded ✓ — User A paid User B via RGB Lightning!', 'success');
 
       // Poll offchain balance delta — mirrors test_flow0 wait_until(offchain_balances_updated).

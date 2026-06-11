@@ -16,7 +16,13 @@
  *   when you cannot set lspBaseUrl on the wallet (see lsp-regtest/useLspFlow.ts).
  *
  * Buyer app:
- *   await lsp.connect(); await lsp.waitForChannel(…); await lsp.waitForOutboundLiquidity(…);
+ *   await lsp.connect(); await lsp.waitForChannel(…);
+ *   // Deposit outbound balance — the LSP never pushes RGB at open. The buyer
+ *   // receives RGB over the channel via lightning_receive (receiveAsset →
+ *   // external on-chain send to the LSP → awaitReceiveSettlement). In this
+ *   // regtest demo the faucet node plays the external sender.
+ *   await lsp.receiveAsset({ assetId, amountSats, amountRgb }); // + on-chain send + settlement
+ *   await lsp.waitForOutboundLiquidity(…);
  *   await lsp.payAddress({ address, amtMsat, asset: { assetId, assetAmount } });
  *   // Poll wallet.getLightningSendRequest(paymentHash) until Settled
  *
@@ -34,6 +40,7 @@ import {
   UTEXOWallet,
 } from '@utexo/rgb-sdk-rn';
 
+import { faucet, lspDaemon } from '../lsp-regtest/daemons';
 import {
   logRgbBalanceDelta,
   logRgbBalanceSnap,
@@ -324,6 +331,82 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         setChannelA(chanA);
         addLog('Buyer RGB channel usable ✓', 'success');
 
+        // ── Buyer top-up: deposit RGB via lightning_receive ──────────────────
+        // The LSP (origin/main) never pushes RGB at channel open — the buyer starts
+        // with 0 local RGB and acquires outbound balance by *receiving* a payment
+        // over the channel (production: funded by the buyer's own on-chain RGB;
+        // regtest stand-in for the external sender: faucet node).
+        setPhase('a_topup');
+        req('lspA.receiveAsset', { assetId: short(ASSET_ID), amountSats: PAYMENT_MSAT / 1000, amountRgb: PAYMENT_ASSET_AMOUNT });
+        const { lnInvoice: topupInvoice, rgbInvoice: topupRgbInvoice } = await lspA.receiveAsset({
+          assetId:    ASSET_ID,
+          amountSats: PAYMENT_MSAT / 1000,
+          amountRgb:  PAYMENT_ASSET_AMOUNT,
+        });
+        res('lspA.receiveAsset', { lnInvoice: short(topupInvoice, 32), rgbInvoice: short(topupRgbInvoice, 32) });
+
+        req('faucet.decodergbinvoice');
+        const topupDecoded = await faucet.decodeRgbInvoice(topupRgbInvoice);
+        const topupRecipientId = topupDecoded.recipient_id;
+        const topupEndpoints = topupDecoded.transport_endpoints ?? [`rpc://${host}:3000/json-rpc`];
+        const topupAssignment = (topupDecoded.assignment?.type === 'Fungible' && topupDecoded.assignment?.value > 0)
+          ? topupDecoded.assignment
+          : { type: 'Fungible', value: PAYMENT_ASSET_AMOUNT };
+        res('faucet.decodergbinvoice', { recipientId: short(topupRecipientId, 24) });
+
+        req('faucet.sendrgb', { amount: topupAssignment.value, recipientId: short(topupRecipientId, 20) });
+        await faucet.sendRgb({
+          donation: false, fee_rate: 7, min_confirmations: 1, skip_sync: false,
+          recipient_map: {
+            [ASSET_ID]: [{ recipient_id: topupRecipientId, assignment: topupAssignment, transport_endpoints: topupEndpoints }],
+          },
+        });
+        res('faucet.sendrgb');
+
+        await mine(1);
+        await sleep(2000);
+        await lspDaemon.refresh();
+        await faucet.refresh();
+
+        addLog('Waiting for faucet Send + LSP receive to settle …');
+        const topupDeadline = Date.now() + SETTLE_TIMEOUT_S * 1000;
+        let topupSettled = false;
+        while (Date.now() < topupDeadline) {
+          if (abortRef.current) throw new Error('Cancelled');
+          await mine(1);
+          await sleep(POLL_INTERVAL_MS);
+          try {
+            await lspDaemon.refresh();
+            await faucet.refresh();
+            const faucetTransfers = await faucet.listTransfers(ASSET_ID);
+            const lspTransfers    = await lspDaemon.listTransfers(ASSET_ID);
+            const faucetSend = [...(faucetTransfers.transfers ?? [])].reverse().find((t: any) => t.kind === 'Send');
+            const lspReceive = [...(lspTransfers.transfers    ?? [])].reverse().find((t: any) => t.kind === 'ReceiveBlind');
+            addLog(`faucet Send: ${faucetSend?.status ?? 'none'}  LSP receive: ${lspReceive?.status ?? 'none'}`);
+            if (faucetSend?.status === 'Failed') throw new Error('Faucet RGB send transfer failed');
+            if (faucetSend?.status === 'Settled' && lspReceive?.status === 'Settled') { topupSettled = true; break; }
+          } catch (e: any) {
+            if ((e?.message ?? '').includes('failed')) throw e;
+            console.error(`[${logTag}] topup settle poll:`, e?.message ?? e);
+          }
+        }
+        if (!topupSettled) addLog('RGB delivery settlement timeout — LSP may still be processing');
+        else addLog('Faucet Send + LSP receive Settled ✓', 'success');
+
+        addLog('Waiting for buyer top-up LN invoice to settle …');
+        let topupLastStatus = '';
+        await lspA.awaitReceiveSettlement(topupInvoice, {
+          timeoutMs:      SETTLE_TIMEOUT_S * 1000,
+          pollIntervalMs: POLL_INTERVAL_MS,
+          onProgress: (s) => { topupLastStatus = s; addLog(`${buyerLabel} top-up invoice: ${s}`); },
+        });
+        // compiled SDK returns 'Succeeded' on both success and timeout — verify via onProgress
+        if (topupLastStatus !== 'Succeeded') throw new Error(
+          `Buyer top-up did not settle (last status: ${topupLastStatus}) — check LSP RGB inventory and proxy reachability`
+        );
+        addLog(`Buyer deposited ${PAYMENT_ASSET_AMOUNT} RGB via lightning_receive ✓`, 'success');
+        await wA.syncWallet();
+
         const buyerSnapStart = await snapshotRgbBalances(wA, ASSET_ID, lspPeerPubkey);
         const merchantSnapCheckout = await snapshotRgbBalances(wB, ASSET_ID, lspPeerPubkey);
         logRgbBalanceSnap(buyerLabel, 'START (pre-checkout)', buyerSnapStart, addLog);
@@ -366,7 +449,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
 
         if (payStatus === 'failed') {
           throw new Error(
-            'payAddress failed — buyer needs RGB on LSP channel (check LSP push_asset_amount).',
+            'payAddress failed — buyer has no spendable RGB on the LSP channel (top-up via lightning_receive may not have settled).',
           );
         }
         if (variant === 'async' && payStatus !== 'pending') {
