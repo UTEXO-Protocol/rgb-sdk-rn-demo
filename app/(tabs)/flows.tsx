@@ -13,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
 import VirtualChannelScreen from '@/screens/virtual-channel/index';
+import VirtualChannelBtcScreen from '@/screens/virtual-channel-btc/index';
 import VirtualChannelSignetScreen from '@/screens/virtual-channel-signet/index';
 import {
   buildRegtestConfig,
@@ -1055,6 +1056,8 @@ export default function FlowsScreen() {
             </FlowCard>
 
             <VirtualChannelScreen embedded />
+
+            <VirtualChannelBtcScreen embedded />
           </>
         )}
 

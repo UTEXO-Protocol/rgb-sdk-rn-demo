@@ -16,11 +16,21 @@ import {
   PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT, PAYMENT_TIMEOUT_S,
   POLL_INTERVAL_S, REGTEST_UNLOCK, LSP_PEER_PUBKEY_DEFAULT,
   satStr, short, sleep,
-  type LogEntry, type Phase,
+  type LogEntry, type LspChannelMode, type Phase,
 } from './config';
 import { faucet, lspDaemon } from './daemons';
 
-export function useLspFlow() {
+export type UseLspFlowOptions = { channelMode?: LspChannelMode };
+
+function walletChannelOpts(channelMode: LspChannelMode, lspPeerPubkey: string) {
+  if (channelMode !== 'virtual') return {};
+  return {
+    enableVirtualChannelsV0: true,
+    virtualPeerPubkeys: [lspPeerPubkey],
+  };
+}
+
+export function useLspFlow({ channelMode = 'regular' }: UseLspFlowOptions = {}) {
   const [phase, setPhase]               = useState<Phase>('idle');
   const [log,   setLog]                 = useState<LogEntry[]>([]);
   const [lspInfo,       setLspInfo]     = useState<any>(null);
@@ -71,6 +81,8 @@ export function useLspFlow() {
 
       if (!ASSET_ID) throw new Error('EXPO_PUBLIC_LSP_REGTEST_ASSET_ID not set — run scripts/start-lsp-regtest.sh first');
 
+      addLog(`channelMode=${channelMode}`);
+
       // Fetch LSP pubkey at runtime — no rebuild needed after LSP restarts.
       const lspNodeInfoResp = await fetch(`${LSP_DAEMON_URL}/nodeinfo`).then(r => r.json()) as any;
       let lspPeerPubkey = lspNodeInfoResp?.pubkey ?? LSP_PEER_PUBKEY_DEFAULT;
@@ -102,7 +114,8 @@ export function useLspFlow() {
 
       const ts   = Date.now();
       const port = 34000 + Math.floor(Math.random() * 2000);
-      const dirUri = `${documentDirectory ?? ''}lsp_ua_${ts}`;
+      const dirPrefix = channelMode === 'virtual' ? 'lsp_vc_ua_' : 'lsp_ua_';
+      const dirUri = `${documentDirectory ?? ''}${dirPrefix}${ts}`;
       await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true });
       const storageDirPath = dirUri.replace('file://', '');
 
@@ -112,6 +125,7 @@ export function useLspFlow() {
       const wA = new UTEXOWallet(
         { storageDirPath, daemonListeningPort: port, ldkPeerListeningPort: port + 1,
           network: 'regtest', maxMediaUploadSizeMb: 20,
+          ...walletChannelOpts(channelMode, lspPeerPubkey),
         },
         new PasswordRLNSigner('lsppass1', keysA.mnemonic),
       );
@@ -176,11 +190,15 @@ export function useLspFlow() {
       await lspA.connect();
       res('lspA.connect');
 
-      addLog('Mining 2 blocks to trigger LSP channel open …');
+      addLog(channelMode === 'virtual'
+        ? 'Mining 2 blocks to trigger LSP virtual channel open …'
+        : 'Mining 2 blocks to trigger LSP channel open …');
       await mine(2);
       await sleep(6000);
 
-      addLog(`Waiting for RGB channel usable (asset: ${short(ASSET_ID)}) …`);
+      addLog(channelMode === 'virtual'
+        ? `Waiting for virtual RGB channel usable (asset: ${short(ASSET_ID)}) …`
+        : `Waiting for RGB channel usable (asset: ${short(ASSET_ID)}) …`);
       const chanA = await lspA.waitForChannel(ASSET_ID, {
         timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
         pollIntervalMs: 3_000,
@@ -188,7 +206,7 @@ export function useLspFlow() {
         onEachPoll:  () => mine(1),
       });
       setChannelInfo(chanA);
-      addLog(`RGB channel usable ✓  cap=${chanA.capacitySat} sat`, 'success');
+      addLog(`${channelMode === 'virtual' ? 'Virtual RGB' : 'RGB'} channel usable ✓  cap=${chanA.capacitySat} sat`, 'success');
 
       // mirrors conftest.py: refresh_transfers + sync_sdk_nodes + mine(2) between connects
       await lspDaemon.refreshOnce();
@@ -204,12 +222,14 @@ export function useLspFlow() {
       addLog('Setting up User B before lightning_receive flow …');
       const keysB  = await createWallet('regtest' as any);
       const portB  = 36000 + Math.floor(Math.random() * 2000);
-      const dirBUri = `${documentDirectory ?? ''}lsp_ub_${Date.now()}`;
+      const dirBPrefix = channelMode === 'virtual' ? 'lsp_vc_ub_' : 'lsp_ub_';
+      const dirBUri = `${documentDirectory ?? ''}${dirBPrefix}${Date.now()}`;
       await FileSystem.makeDirectoryAsync(dirBUri, { intermediates: true });
 
       const wB = new UTEXOWallet(
         { storageDirPath: dirBUri.replace('file://', ''), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
           network: 'regtest', maxMediaUploadSizeMb: 20,
+          ...walletChannelOpts(channelMode, lspPeerPubkey),
         },
         new PasswordRLNSigner('lsppass2', keysB.mnemonic),
       );
@@ -236,11 +256,15 @@ export function useLspFlow() {
       await lspB.connect();
       res('lspB.connect');
 
-      addLog('Mining 2 blocks to trigger LSP channel open for User B …');
+      addLog(channelMode === 'virtual'
+        ? 'Mining 2 blocks to trigger LSP virtual channel open for User B …'
+        : 'Mining 2 blocks to trigger LSP channel open for User B …');
       await mine(2);
       await sleep(6000);
 
-      addLog('Waiting for RGB channel usable on User B …');
+      addLog(channelMode === 'virtual'
+        ? 'Waiting for virtual RGB channel usable on User B …'
+        : 'Waiting for RGB channel usable on User B …');
       const chanB = await lspB.waitForChannel(ASSET_ID, {
         timeoutMs:      CHANNEL_TIMEOUT_S * 1000,
         pollIntervalMs: 3_000,
@@ -248,7 +272,7 @@ export function useLspFlow() {
         onEachPoll:  () => mine(1),
       });
       setChannelInfoB(chanB);
-      addLog('User B RGB channel usable ✓', 'success');
+      addLog(`User B ${channelMode === 'virtual' ? 'virtual ' : ''}RGB channel usable ✓`, 'success');
 
       await lspDaemon.refresh();
       await wA.syncWallet();
@@ -361,6 +385,19 @@ export function useLspFlow() {
       const initialBalA = await wA.getAssetBalance(ASSET_ID);
       const initialBalB = await wB.getAssetBalance(ASSET_ID);
 
+      // Verify User B still has a usable RGB channel — the utexo-lsp cron opens virtual
+      // channels (trusted_no_broadcast) whose RGB push HTLC can force-close the channel
+      // while Part 1 is running. Fail fast here rather than hanging for 60 s.
+      const bChannelList = (await wB.listChannels()) as any[];
+      const bHasChannel = bChannelList.some((c: any) =>
+        (c.assetId || c.asset_id) === ASSET_ID && (c.isUsable || c.is_usable)
+      );
+      if (!bHasChannel) throw new Error(
+        'User B has no usable RGB channel — force-closed by utexo-lsp cron push HTLC. ' +
+        'Restart the LSP stack (start-lsp-local.sh) and retry.'
+      );
+      addLog('User B channel still usable ✓', 'success');
+
       setPhase('p2_pay');
 
       req('userB.createLightningInvoice', { amtMsat: PAYMENT_MSAT, assetId: short(ASSET_ID), assetAmount: PAYMENT_ASSET_AMOUNT });
@@ -382,11 +419,16 @@ export function useLspFlow() {
       setPhase('p2_settle');
       addLog('Waiting for userB invoice to settle …');
       setInvoiceStatusB('Pending');
+      let p2LastStatus = '';
       await lspB.awaitReceiveSettlement(bInvoice, {
         timeoutMs:      PAYMENT_TIMEOUT_S * 1000,
         pollIntervalMs: POLL_INTERVAL_S * 1000,
-        onProgress: (s) => { setInvoiceStatusB(s); addLog(`userB invoice: ${s}`); },
+        onProgress: (s) => { p2LastStatus = s; setInvoiceStatusB(s); addLog(`userB invoice: ${s}`); },
       });
+      // lib/module compiled output returns 'Succeeded' on both success and timeout — track via onProgress.
+      if (p2LastStatus !== 'Succeeded') throw new Error(
+        `userB invoice did not settle (last status: ${p2LastStatus}) — check LSP routing and User B channel state`
+      );
       addLog('userB LN invoice Succeeded ✓ — User A paid User B via RGB Lightning!', 'success');
 
       // Poll offchain balance delta — mirrors test_flow0 wait_until(offchain_balances_updated).
@@ -435,7 +477,7 @@ export function useLspFlow() {
       setErrorMsg(msg);
       setPhase('error');
     }
-  }, [addLog]);
+  }, [addLog, channelMode]);
 
   const reset = useCallback(async () => {
     abortRef.current = true;

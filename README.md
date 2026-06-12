@@ -1,6 +1,6 @@
 # rgb-sdk-rn Demo
 
-End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, a **Virtual Channel** flow (regtest and UTEXO signet) demonstrating `trusted_no_broadcast` RGB Lightning channels, a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet), and two **LSP** flows demonstrating inbound RGB liquidity via a Liquidity Service Provider (regtest and UTEXO signet).
+End-to-end demo app for [`@utexo/rgb-sdk-rn`](https://github.com/UTEXO-Protocol/rgb-sdk-rn). Runs four live integration flows on the **Flows** tab against a local regtest stack, a **Virtual Channel** flow (regtest and UTEXO signet) demonstrating `trusted_no_broadcast` RGB Lightning channels, a guided **UTEXO 2-Node Flow** on the **Utexo** tab (regtest or UTEXO/signet), **LSP** flows demonstrating inbound RGB liquidity via a Liquidity Service Provider (regtest and UTEXO signet), and **Async Payment (APay)** flows demonstrating Lightning Address checkout with offline-capable receive.
 
 ---
 
@@ -555,6 +555,74 @@ The LSP cron fires every 5 s and calls `/openchannel` for every connected peer. 
 
 ---
 
+## Async Payment (APay) Flows
+
+Async payments let a **recipient receive RGB Lightning while offline at payment time**. The payer pays a HODL BOLT11 via LNURL (Lightning Address); the LSP holds the HTLC until the recipient is reachable, then the **LSP outbox** delivers automatically. The recipient app does **not** call `claimHodlInvoice`.
+
+**Reference implementation:** `screens/apay/useApayFlow.ts`  
+**Protocol details:** [`docs/apay-flow.md`](./docs/apay-flow.md) · SDK [`docs/async-payments.md`](https://github.com/UTEXO-Protocol/rgb-sdk-rn/blob/main/docs/async-payments.md)
+
+**Location in app:** **LSP** tab → **Regtest** sub-tab (below the LSP regtest cards)
+
+| Screen | File | What it demonstrates |
+|--------|------|----------------------|
+| **Async Payment** | `screens/async-pay.tsx` | Merchant registers a Lightning Address, goes offline; buyer pays via LNURL; merchant comes online for LSP outbox settlement |
+| **APay Cart Checkout** | `screens/apay-regular-channels.tsx` | Same protocol as a cart checkout — merchant stays connected (`lsp.connect()` keepalive) while buyer pays |
+
+Both screens call the same hook (`useApayFlow`) with different options (`variant: 'async'` vs `'cart'`).
+
+### Infrastructure
+
+Uses the **same LSP regtest stack** as [LSP Regtest](#lsp-regtest-lsp-regtest-tab) above:
+
+```bash
+./scripts/start-lsp-regtest.sh
+# or: ./scripts/start-lsp-local.sh
+```
+
+Requires `EXPO_PUBLIC_LSP_REGTEST_ASSET_ID` (written to `.env.local` by the start script), plus Bitcoin Core, Electrum, RGB Proxy, and the node helper on `:5000`.
+
+On **Android emulator**, set port forwards before running (included in `npm run android`):
+
+```bash
+adb reverse tcp:3000 tcp:3000   # RGB Proxy — required for channel open + consignment delivery
+adb reverse tcp:8080 tcp:8080   # utexo-lsp (LNURL + APay HTTP)
+adb reverse tcp:3005 tcp:3005   # Host RLN
+adb reverse tcp:5000 tcp:5000   # Bitcoin node helper
+```
+
+The start script sets `DEFAULT_CHANNEL_PUSH_ASSET_AMOUNT=1` so the **buyer has local RGB** to pay. Without push, `payAddress` fails immediately with `Failed`.
+
+### SDK calls (integrator checklist)
+
+**Merchant (recipient):**
+
+```typescript
+await lsp.connect();
+await lsp.waitForChannel(ASSET_ID, { … });
+const { address } = await lsp.enableLightningAddress();
+// While online / expecting payment: lsp.connect() periodically
+// Settlement is automatic — poll listPaymentsRaw() for INBOUND_HODL → Succeeded
+```
+
+**Buyer (sender):**
+
+```typescript
+await lsp.connect();
+await lsp.waitForChannel(ASSET_ID, { … });
+await lsp.waitForOutboundLiquidity(PAYMENT_MSAT, { … });
+const { invoice, sendResult } = await lsp.payAddress({
+  address: merchantLightningAddress,
+  amtMsat: PAYMENT_MSAT,
+  asset: { assetId: ASSET_ID, assetAmount: 1 },
+});
+// Poll getLightningSendRequest(sendResult.txid) until Settled
+```
+
+**Success checks:** buyer `Settled`; merchant inbound `INBOUND_HODL` → `Succeeded`; merchant `offchainOutbound` increased.
+
+---
+
 ## What the SDK Handles vs What the App Must Provide
 
 ### SDK handles
@@ -568,6 +636,8 @@ The LSP cron fires every 5 s and calls `/openchannel` for every connected peer. 
 - Virtual channel negotiation (`enableVirtualChannelsV0`, `virtualPeerPubkeys`)
 - Lightning invoice create + pay + poll
 - RGB Lightning payments (asset over LN)
+- LSP composed flows (`UtexoLsp`: `connect`, `waitForChannel`, `receiveAsset`, `payAddress`, `enableLightningAddress`)
+- Async payments / Lightning Address (APay): hash pool registration, LNURL checkout, LSP outbox settlement
 - RGB on-chain send: `send()`, `blindReceive()`, `witnessReceive()`
 - RGB transfer state: `refreshWallet()`, `listTransfers()`, `failTransfers()`
 - Node info: peers, channels, network

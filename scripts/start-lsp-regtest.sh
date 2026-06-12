@@ -155,14 +155,15 @@ APAY_BEARER_TOKEN="apay-regtest-secret"
 log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
 # --lsp-base-url: host node forwards async_order.new P2P messages to utexo-lsp
 # --lsp-bearer-token: must match APAY_BEARER_TOKEN in utexo-lsp (fail-closed if empty)
-# NOTE: --enable-virtual-channels-v0 intentionally omitted — matches Python e2e test_flow0
-#       which uses standard channels (RGBLN_ENABLE_VIRTUAL_CHANNELS_V0=false by default).
-#       Re-add if testing async-pay.tsx virtual channel flow.
+# --enable-virtual-channels-v0: required for async-pay.tsx — User B nodes are created with
+#   enableVirtualChannelsV0:true and reject standard anchor channels with "unsupported_scid_alias".
+#   Virtual channels (trusted_no_broadcast) avoid the SCID-alias negotiation entirely.
 "$RLN_BIN" "$LSP_DIR" \
   --daemon-listening-port "$LSP_PORT" \
   --ldk-peer-listening-port "$LSP_PEER_PORT" \
   --network regtest \
   --disable-authentication \
+  --enable-virtual-channels-v0 \
   --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
   --lsp-bearer-token "$APAY_BEARER_TOKEN" \
   >"$DEMO_DIR/logs/rln-lsp.log" 2>&1 &
@@ -254,9 +255,9 @@ sleep 2
 
 # ── seed LSP from Faucet (mirrors seed_lsp_from_faucet in harness.py) ────────
 
-log "Seeding LSP with 3 RGB units from Faucet …"
-for i in 1 2 3; do
-  log "  Seed $i/3 …"
+log "Seeding LSP with 6 RGB units from Faucet …"
+for i in 1 2 3 4 5 6; do
+  log "  Seed $i/6 …"
 
   # Get RGB invoice on LSP — no asset_id (receive any asset, mirrors lsp.rgbinvoice_any())
   EXPIRY=$(($(date +%s) + 3600))
@@ -305,6 +306,7 @@ if command -v adb >/dev/null 2>&1 && adb devices | grep -q "emulator\|device"; t
   log "Setting adb reverse port forwards …"
   adb reverse tcp:3000 tcp:3000 && log "  tcp:3000 (proxy) ok"      || log "  tcp:3000 (proxy) FAILED — set manually"
   adb reverse tcp:3005 tcp:3005 && log "  tcp:3005 (LSP)   ok"      || log "  tcp:3005 (LSP)   FAILED — set manually"
+  adb reverse tcp:3008 tcp:3008 && log "  tcp:3008 (faucet) ok"     || log "  tcp:3008 (faucet) FAILED — set manually"
   adb reverse tcp:8080 tcp:8080 && log "  tcp:8080 (utexo-lsp) ok"  || log "  tcp:8080 (utexo-lsp) FAILED — set manually"
   adb reverse tcp:5000 tcp:5000 && log "  tcp:5000 (bridge) ok"     || log "  tcp:5000 (bridge) FAILED — set manually"
   adb reverse tcp:8081 tcp:8081 && log "  tcp:8081 (Metro JS) ok"   || log "  tcp:8081 (Metro JS) FAILED — set manually"
@@ -314,6 +316,7 @@ else
   log "  Run manually before starting the app:"
   log "    adb reverse tcp:3000 tcp:3000"
   log "    adb reverse tcp:3005 tcp:3005"
+  log "    adb reverse tcp:3008 tcp:3008"
   log "    adb reverse tcp:8080 tcp:8080"
   log "    adb reverse tcp:5000 tcp:5000"
   log "    adb reverse tcp:8081 tcp:8081"
@@ -337,11 +340,13 @@ env \
   RGB_NODE_BASE_URL="http://127.0.0.1:$LSP_PORT" \
   LIGHTNING_ADDRESS_DOMAIN_URL="http://127.0.0.1:$UTEXO_PORT" \
   SUPPORTED_ASSET_IDS="$ASSET_ID" \
-  CRON_EVERY="30s" \
+  CRON_EVERY="5s" \
   DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
   DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
-  DEFAULT_CHANNEL_ASSET_AMOUNT="1" \
+  DEFAULT_CHANNEL_ASSET_AMOUNT="2" \
+  DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
   MIN_AMT_MSAT="3000000" \
+  EXPIRY_MATCH_TOLERANCE_SEC="30" \
   UTXO_MIN_COUNT="15" \
   UTXO_TARGET_COUNT="25" \
   APAY_BEARER_TOKEN="$APAY_BEARER_TOKEN" \

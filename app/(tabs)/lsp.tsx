@@ -3,8 +3,9 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
+import ApayRegularChannelsScreen from '@/screens/apay-regular-channels';
 import AsyncPayScreen from '@/screens/async-pay';
-import LspRegtestScreen from '@/screens/lsp-regtest/index';
+import LspRegtestScreen, { LspRegtestVirtualScreen } from '@/screens/lsp-regtest/index';
 import LspSignetScreen from '@/screens/lsp-signet/index';
 
 const TABS = [
@@ -54,7 +55,11 @@ export default function LspHubScreen() {
                 >
                   <LspRegtestScreen embedded />
                   <View style={s.flowDivider} />
+                  <LspRegtestVirtualScreen embedded />
+                  <View style={s.flowDivider} />
                   <AsyncPayScreen embedded />
+                  <View style={s.flowDivider} />
+                  <ApayRegularChannelsScreen embedded />
                 </ScrollView>
               </View>
               <View style={[s.pane, activeTab !== 'utexo' && s.paneHidden]}>

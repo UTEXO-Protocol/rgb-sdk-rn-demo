@@ -24,8 +24,10 @@ import {
 import { ALL_PHASES, InfoCard, LogPane, PhaseRow, PHASES_P1, PHASES_P2 } from './components';
 import { useLspFlow } from './useLspFlow';
 
-export default function LspScreen({ embedded = false }: { embedded?: boolean }) {
-  const flow = useLspFlow();
+type LspScreenProps = { embedded?: boolean; virtual?: boolean };
+
+function LspScreen({ embedded = false, virtual = false }: LspScreenProps) {
+  const flow = useLspFlow({ channelMode: virtual ? 'virtual' : 'regular' });
 
   const isRunning = !['idle', 'done', 'error'].includes(flow.phase);
   const spA = (flow.balA?.vanilla?.spendable ?? 0) + (flow.balA?.colored?.spendable ?? 0);
@@ -46,8 +48,14 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
         nestedScrollEnabled={embedded}>
 
         <View style={s.header}>
-          <Text style={s.title}>LSP · lightning_receive</Text>
-          <Text style={s.subtitle}>Regtest · matches e2e conftest.py fixture</Text>
+          <Text style={s.title}>
+            {virtual ? 'LSP · lightning_receive (Virtual)' : 'LSP · lightning_receive (Regular)'}
+          </Text>
+          <Text style={s.subtitle}>
+            {virtual
+              ? 'Regtest · test_flow0_full_e2e · trusted_no_broadcast virtual channels'
+              : 'Regtest · test_flow0_full_e2e · on-chain funded RGB channels'}
+          </Text>
           <View style={s.badge}>
             <View style={[s.dot, { backgroundColor: envReady ? AppColors.success : AppColors.error }]} />
             <Text style={s.badgeTxt}>{envReady ? 'LSP configured' : 'Run start-lsp-regtest.sh first'}</Text>
@@ -64,19 +72,35 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
         {/* Idle */}
         {flow.phase === 'idle' && (
           <View style={s.card}>
-            <Text style={s.cardTitle}>test_flow0_full_e2e — LSP Regtest</Text>
+            <Text style={s.cardTitle}>
+              {virtual ? 'test_flow0_full_e2e — Virtual Channels' : 'test_flow0_full_e2e — Regular Channels'}
+            </Text>
             <Text style={s.cardDesc}>
-              {'Regtest e2e flow — test_flow0_full_e2e.py on-device.\n\n' +
-               'Setup:\n' +
-               'LSP opens RGB channels to both Node A and Node B after connectPeer. ' +
-               'Channel confirmation takes ~10 min (6 blocks × 100s).\n\n' +
-               'Part 1 — lightning_receive:\n' +
-               'Node A calls receiveAsset — LN + RGB invoices created in one call. ' +
-               'Node B (RGB issuer) sends RGB on-chain to the LSP. ' +
-               'Once settled, LSP pays Node A\'s LN invoice via the channel.\n\n' +
-               'Part 2 — Node A pays Node B:\n' +
-               'After outbound liquidity is confirmed, Node A pays Node B\'s LN invoice ' +
-               'via the LSP as routing node.'}
+              {virtual
+                ? ('Regtest e2e flow — same test_flow0_full_e2e.py steps on-device.\n\n' +
+                   'Setup:\n' +
+                   'LSP opens 0-conf virtual RGB channels (trusted_no_broadcast) to both users after connectPeer. ' +
+                   'Wallets use enableVirtualChannelsV0 + virtualPeerPubkeys=[LSP]. ' +
+                   'Requires ./scripts/start-lsp-regtest.sh (LSP runs with --enable-virtual-channels-v0).\n\n' +
+                   'Part 1 — lightning_receive:\n' +
+                   'Node A calls receiveAsset — LN + RGB invoices created in one call. ' +
+                   'Faucet sends RGB on-chain to the LSP. ' +
+                   'Once settled, LSP pays Node A\'s LN invoice via the virtual channel.\n\n' +
+                   'Part 2 — Node A pays Node B:\n' +
+                   'After outbound liquidity is confirmed, Node A pays Node B\'s LN invoice ' +
+                   'via the LSP as routing node.')
+                : ('Regtest e2e flow — test_flow0_full_e2e.py on-device.\n\n' +
+                   'Setup:\n' +
+                   'LSP opens standard on-chain funded RGB channels to both Node A and Node B after connectPeer. ' +
+                   'Wallets omit enableVirtualChannelsV0. ' +
+                   'LSP must run without --enable-virtual-channels-v0; channel confirmation needs mined blocks.\n\n' +
+                   'Part 1 — lightning_receive:\n' +
+                   'Node A calls receiveAsset — LN + RGB invoices created in one call. ' +
+                   'Faucet sends RGB on-chain to the LSP. ' +
+                   'Once settled, LSP pays Node A\'s LN invoice via the channel.\n\n' +
+                   'Part 2 — Node A pays Node B:\n' +
+                   'After outbound liquidity is confirmed, Node A pays Node B\'s LN invoice ' +
+                   'via the LSP as routing node.')}
             </Text>
 
             {!envReady && (
@@ -101,7 +125,9 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
               onPress={flow.run}
               disabled={!envReady}
               activeOpacity={0.8}>
-              <Text style={s.startBtnTxt}>▶  Run Full E2E Flow</Text>
+              <Text style={s.startBtnTxt}>
+                {virtual ? '▶  Run Virtual Channel E2E' : '▶  Run Regular Channel E2E'}
+              </Text>
             </TouchableOpacity>
           </View>
         )}
@@ -127,15 +153,23 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
         {flow.phase === 'channel' && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
-            <Text style={s.spinnerTxt}>Waiting for LSP to open RGB channel …</Text>
-            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>(mining blocks, LSP cron = 30s)</Text>
+            <Text style={s.spinnerTxt}>
+              {virtual ? 'Waiting for LSP to open virtual RGB channel …' : 'Waiting for LSP to open RGB channel …'}
+            </Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>
+              {virtual ? '(0-conf virtual — LSP cron ≈ 5s)' : '(mining blocks, LSP cron ≈ 30s)'}
+            </Text>
           </View>
         )}
         {['b_init', 'b_channel'].includes(flow.phase) && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>
-              {flow.phase === 'b_init' ? 'Creating User B node …' : 'Waiting for LSP → User B RGB channel …'}
+              {flow.phase === 'b_init'
+                ? 'Creating User B node …'
+                : virtual
+                  ? 'Waiting for LSP → User B virtual RGB channel …'
+                  : 'Waiting for LSP → User B RGB channel …'}
             </Text>
           </View>
         )}
@@ -175,7 +209,7 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
           ]} />
         )}
         {flow.channelInfo && (
-          <InfoCard title="RGB Channel (LSP → User A)" accent={AppColors.primary} rows={[
+          <InfoCard title={virtual ? 'Virtual RGB Channel (LSP → User A)' : 'RGB Channel (LSP → User A)'} accent={AppColors.primary} rows={[
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${flow.channelInfo.capacitySat ?? flow.channelInfo.capacity_sat ?? '?'} sat`],
             ['Status',   'Usable ✓'],
@@ -198,7 +232,7 @@ export default function LspScreen({ embedded = false }: { embedded?: boolean }) 
           <InfoCard title="User B (embedded SDK)" rows={[['Address', flow.addrB]]} />
         )}
         {flow.channelInfoB && (
-          <InfoCard title="RGB Channel (LSP → User B)" accent={AppColors.primary} rows={[
+          <InfoCard title={virtual ? 'Virtual RGB Channel (LSP → User B)' : 'RGB Channel (LSP → User B)'} accent={AppColors.primary} rows={[
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${flow.channelInfoB.capacitySat ?? flow.channelInfoB.capacity_sat ?? '?'} sat`],
             ['Status',   'Usable ✓'],
@@ -281,3 +315,11 @@ const s = StyleSheet.create({
   cancelBtn:   { borderWidth: 1, borderColor: AppColors.error, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginBottom: 16 },
   cancelBtnTxt:{ fontSize: 13, color: AppColors.error },
 });
+
+export default function LspRegtestScreen(props: Omit<LspScreenProps, 'virtual'>) {
+  return <LspScreen {...props} virtual={false} />;
+}
+
+export function LspRegtestVirtualScreen(props: Omit<LspScreenProps, 'virtual'>) {
+  return <LspScreen {...props} virtual />;
+}
