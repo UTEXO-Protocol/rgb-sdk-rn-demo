@@ -2,14 +2,14 @@
 const { getDefaultConfig } = require('expo/metro-config');
 const path = require('path');
 
-const localSdkPath = path.resolve(__dirname, '../rgb-sdk-rn');
+// const localSdkPath = path.resolve(__dirname, '../rgb-sdk-rn');
 // const localCoreSdkPath = path.resolve(__dirname, '../rgb-sdk-core');
 
 /** @type {import('expo/metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
 // Watch the local SDK package so Metro picks up changes
-config.watchFolders = [localSdkPath];
+config.watchFolders = [];
 
 // Ensure Metro resolves modules from the demo's node_modules first,
 // avoiding duplicate React/React-Native instances from the local package
@@ -17,7 +17,7 @@ config.resolver = {
   ...config.resolver,
   nodeModulesPaths: [
     path.resolve(__dirname, 'node_modules'),
-    path.resolve(localSdkPath, 'node_modules'),
+    // path.resolve(localSdkPath, 'node_modules'),
     // path.resolve(localCoreSdkPath, 'node_modules'),
   ],
   unstable_enableSymlinks: true,
