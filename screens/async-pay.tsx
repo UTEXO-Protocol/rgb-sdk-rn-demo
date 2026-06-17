@@ -95,8 +95,9 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
                'and completes delivery when the recipient comes back online.\n\n' +
                'Part 1 — Recipient (User B) registers with the LSP\n' +
                '   Opens an RGB channel to the LSP.\n' +
-               '   Registers N payment hashes (apayNew) → LSP assigns a\n' +
-               '   Lightning Address keyed to their pubkey.\n\n' +
+               '   Registers N payment hashes (enableLightningAddress →\n' +
+               '   apayNewWithAddress) → LSP assigns a Lightning Address\n' +
+               '   keyed to their pubkey.\n\n' +
                'Part 2 — Sender (User A) pays via LNURL\n' +
                '   Opens an RGB channel (needs spendable RGB).\n' +
                '   GET /.well-known/lnurlp/{username} → callback → HODL BOLT11.\n' +

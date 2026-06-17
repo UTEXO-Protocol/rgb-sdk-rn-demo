@@ -60,7 +60,7 @@ export function buildRegtestConfig() {
   const rpcUsername = readEnv('RLN_BITCOIND_RPC_USERNAME');
   const rpcPassword = readEnv('RLN_BITCOIND_RPC_PASSWORD');
   const defaultHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
-  const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost ?? defaultHost}:50001`;
+  const indexerUrl = readEnv('RLN_INDEXER_URL') ?? `${rpcHost ?? defaultHost}:3002`;
   const proxyEndpoint = readEnv('RLN_PROXY_ENDPOINT') ?? `rpc://${rpcHost ?? defaultHost}:3000/json-rpc`;
 
   return {

@@ -11,7 +11,7 @@ Async payment lets a **Recipient be offline** when a Sender initiates the paymen
 
 The real APAY flow (LSP-driven):
 
-  1. Recipient registers N payment hashes → LSP gets a Lightning Address
+  1. LSP provisions a Lightning Address on connect; Recipient registers N payment hashes (attested) against it
   2. Sender pays HODL invoice → HTLC held at LSP
   3. LSP P2P-requests an invoice from Recipient's node (using the registered hash
   index)
@@ -37,18 +37,19 @@ The utexo-lsp cron (`reconcileChannels`) opens a virtual channel to each connect
 
 ---
 
-### Phase 1 — Recipient registers hash pool with LSP
+### Phase 1 — Recipient registers attested hash pool with LSP
 
 ```
-Recipient RLN  ──P2P apay/new──►  LSP Host RLN  ──POST /internal/async_order/new──►  utexo-lsp
+Recipient RLN  ──P2P apay/new_with_address──►  LSP Host RLN  ──POST /internal/async_order/new──►  utexo-lsp
 ```
 
-1. Recipient's RLN calls `/apay/new` with `host_node_id = LSP pubkey`.
-2. RLN generates N `(hash_index, payment_hash)` pairs from its local hash pool and sends them to the LSP Host RLN via an onion P2P message.
-3. LSP Host RLN forwards the message to utexo-lsp at `/internal/async_order/new` (authenticated with `APAY_BEARER_TOKEN`).
-4. utexo-lsp stores the hash pool in its database and creates a Lightning Address for the Recipient (keyed by their pubkey).
+The Recipient starts by connecting to the LSP (`lsp.connect()`). The LSP runs a cron that assigns every connected peer a Lightning Address keyed by their pubkey, so the address already exists before registration — the Recipient fetches it with `GET /lightning_address/by_pubkey/{pubkey}`.
 
-SDK call: `wallet.apayNew(lspPubkey)`
+With the `username` and `domain` resolved, the Recipient's RLN calls `/apay/new_with_address`. It pulls N `(hash_index, payment_hash)` pairs from its local hash pool, builds a Merkle root over them, and signs `username`+`domain` (`address_sig`); this signature proves the pool belongs to that address. The batch and signature travel to the LSP Host RLN over an onion P2P message, which forwards them to utexo-lsp at `/internal/async_order/new` (authenticated with `APAY_BEARER_TOKEN`). utexo-lsp verifies the signature and stores the pool against the Recipient's address.
+
+SDK call: `wallet.apayNewWithAddress(lspPubkey, username, domain)`. In the demo this is wrapped by `lsp.enableLightningAddress()`, which does the lookup and registration in one step. When the pool runs low, top it up with `lsp.refillHashPool()`.
+
+> Register one batch only. The node's batch size already matches the LSP's pool cap, so a single batch fills it. Issuing an `apayNew` bootstrap first overflows the pool, and the LSP rejects the second batch with `invalid_hash_batch`.
 
 ---
 
