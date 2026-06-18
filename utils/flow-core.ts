@@ -14,6 +14,52 @@ export function isPoisonLike(e: unknown): boolean {
   );
 }
 
+// TEMP(esplora): Poll until a node's asset `spendable` balance reaches `minSpendable`,
+// mining + syncing + refreshing each iteration to absorb the Esplora REST indexer's
+// tip lag. With the Electrum indexer a freshly mined block was reflected almost
+// instantly, so flows could `mine(1)` and immediately start the next colored op.
+// Esplora's REST tip lags a few seconds, leaving the prior transfer in
+// WaitingConfirmations (spendable=0) and the next colored op fails with
+// "conflict with current node state". Remove this gate when switching back to Electrum.
+export async function waitForAssetSpendable(
+  node: {
+    getAssetBalance: (assetId: string) => Promise<{ spendable?: number } | null>;
+    syncWallet: () => Promise<unknown>;
+    refreshWallet: () => Promise<unknown>;
+  },
+  assetId: string,
+  minSpendable: number,
+  opts: {
+    mine?: (n: number) => Promise<unknown>;
+    attempts?: number;
+    delayMs?: number;
+    label?: string;
+  } = {}
+): Promise<boolean> {
+  const { mine, attempts = 30, delayMs = 1000, label = 'node' } = opts;
+  for (let i = 1; i <= attempts; i += 1) {
+    const bal = await node.getAssetBalance(assetId).catch(() => null);
+    const spendable = bal?.spendable ?? 0;
+    if (spendable >= minSpendable) {
+      console.log(
+        `[TEMP wait] ${label} asset spendable=${spendable} >= ${minSpendable} (attempt ${i})`
+      );
+      return true;
+    }
+    console.log(
+      `[TEMP wait] ${label} asset spendable=${spendable} < ${minSpendable}, attempt ${i}/${attempts}`
+    );
+    if (mine) await mine(1).catch(() => undefined);
+    await node.syncWallet().catch(() => undefined);
+    await node.refreshWallet().catch(() => undefined);
+    await sleep(delayMs);
+  }
+  console.warn(
+    `[TEMP wait] ${label} asset spendable never reached ${minSpendable} after ${attempts} attempts`
+  );
+  return false;
+}
+
 let activeDemoFlow: string | null = null;
 
 export function beginExclusiveFlow(flowName: string) {

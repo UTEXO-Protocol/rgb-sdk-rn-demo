@@ -162,6 +162,17 @@ export async function runRLNUtexoExternalPaymentFlow() {
     if (!assetId) throw new Error('Failed to issue asset');
     addStep('xPayIssueAsset', 'success', { assetId });
 
+    // issue #22/#28 — listUnspents assignment must be {type:'Fungible', amount:N} on both platforms
+    const unspentsAfterIssue = await nodeA.listUnspents();
+    const allocsAfterIssue = unspentsAfterIssue.flatMap((u) => u.rgbAllocations ?? []);
+    console.log(`[xPay][#22] listUnspents after issue: ${allocsAfterIssue.length} allocation(s)`);
+    for (const alloc of allocsAfterIssue) {
+      console.log(`[xPay][#22] assignment=${JSON.stringify(alloc.assignment)} settled=${alloc.settled}`);
+      if ((alloc.assignment as any)?.type === 'type') {
+        console.error(`[xPay][#22] REGRESSION: assignment.type is the literal string "type" — serialization bug`);
+      }
+    }
+
     const infoA = await nodeA.getNodeInfo();
     const infoB = await nodeB.getNodeInfo();
     const pubkeyA = String(infoA?.pubkey ?? '');
@@ -184,20 +195,20 @@ export async function runRLNUtexoExternalPaymentFlow() {
     }
     addStep('xPayConnectPeers', 'success', { peerUriB });
 
-    // nodeA opens asset channel to nodeB; pushMsat=0 required for external signer acceptor
-    let fundingTxid = '';
-    let channelId = '';
+    // nodeA opens asset channel to nodeB (600 units pushed, 100k sat)
     addStep('xPayOpenChannel', 'running');
-    try {
     await nodeA.openChannel({
       peerPubkeyAndOptAddr: peerUriB,
       capacitySat: 100000,
-      pushMsat: 0,
+      pushMsat: 3_500_000,
       public: true,
       withAnchors: true,
       assetId,
       assetAmount: 600,
     });
+
+    let fundingTxid = '';
+    let channelId = '';
     const fundDeadline = Date.now() + 120000;
     while (Date.now() < fundDeadline) {
       await nodeA.syncWallet();
@@ -230,19 +241,14 @@ export async function runRLNUtexoExternalPaymentFlow() {
     }
     await mine(6);
     addStep('xPayOpenChannel', 'success', { channelId, fundingTxid });
-    } catch (e: any) {
-      addStep('xPayOpenChannel', 'error', undefined, e?.message ?? String(e));
-      throw e;
-    }
 
     addStep('xPayAssetBalanceA', 'running');
     const bal0 = await nodeA.getAssetBalance(assetId);
     addStep('xPayAssetBalanceA', 'success', { spendable: bal0?.spendable ?? null });
 
     // inv1: B creates (100 asset units), A pays → A_chan=500, B_chan=100
-    // amountSats=5000 so nodeB gets 5000 sats; it will need 3000+1000(reserve)=4000 for inv2.
     addStep('xPayInvoice1', 'running');
-    const inv1Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 100 } });
+    const inv1Resp = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 100 } });
     const invoice1 = String(inv1Resp?.lnInvoice ?? '');
     const send1Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice1 });
     const hash1 = String(send1Resp?.txid ?? '');
@@ -258,8 +264,6 @@ export async function runRLNUtexoExternalPaymentFlow() {
     addStep('xPayInvoice1', 'success', { paymentHash: hash1, assetAmount: 100 });
 
     // inv2: A creates (50 asset units), B pays → A_chan=550, B_chan=50
-    // RGB invoices require amountSats>=3000 (RGB_MIN_HTLC_MSAT=3_000_000 msat). nodeB has 5000
-    // sats from inv1; pays 3000, keeps 2000 >= 1000 (channel reserve). Fine.
     addStep('xPayInvoice2', 'running');
     const inv2Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
     const invoice2 = String(inv2Resp?.lnInvoice ?? '');
@@ -277,9 +281,8 @@ export async function runRLNUtexoExternalPaymentFlow() {
     addStep('xPayInvoice2', 'success', { paymentHash: hash2, assetAmount: 50 });
 
     // inv3: B creates (50 asset units), A pays → A_chan=500, B_chan=100
-    // amountSats=5000 again so nodeB can afford inv4 (3000 sats + reserve).
     addStep('xPayInvoice3', 'running');
-    const inv3Resp = await nodeB.createLightningInvoice({ amountSats: 5000, expirySeconds: 900, asset: { assetId, amount: 50 } });
+    const inv3Resp = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
     const invoice3 = String(inv3Resp?.lnInvoice ?? '');
     const send3Resp = await nodeA.payLightningInvoice({ lnInvoice: invoice3 });
     const hash3 = String(send3Resp?.txid ?? '');
@@ -295,7 +298,6 @@ export async function runRLNUtexoExternalPaymentFlow() {
     addStep('xPayInvoice3', 'success', { paymentHash: hash3, assetAmount: 50 });
 
     // inv4: A creates (50 asset units), B pays → A_chan=550, B_chan=50
-    // nodeB has 2000(leftover)+5000(inv3)=7000 sats; pays 3000, keeps 4000 >= reserve. Fine.
     addStep('xPayInvoice4', 'running');
     const inv4Resp = await nodeA.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId, amount: 50 } });
     const invoice4 = String(inv4Resp?.lnInvoice ?? '');
@@ -361,9 +363,9 @@ export async function runRLNUtexoExternalPaymentFlow() {
     if (lastSpendableB !== 50) throw new Error(`nodeB balance did not reach 50, last=${lastSpendableB}`);
     addStep('xPayWaitBalances', 'success', { expectedA: 950, expectedB: 50 });
 
-    // TODO iteration 2: RGB on-chain sends to nodeC (A sends 925, B sends 25 → A=25, B=25, C=950)
+    // RGB on-chain sends to nodeC (A sends 925, B sends 25)
     addStep('xPayRgbSendA', 'running');
-    const invC1 = await nodeC.blindReceive({ minConfirmations: 1 });
+    const invC1 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
     await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
@@ -373,9 +375,7 @@ export async function runRLNUtexoExternalPaymentFlow() {
     addStep('xPayRgbSendA', 'success', { amount: 925, recipientId: invC1.recipientId.substring(0, 20) + '...' });
 
     addStep('xPayRgbSendB', 'running');
-    await nodeB.syncWallet();
-    await nodeB.refreshWallet();
-    const invC2 = await nodeC.blindReceive({ minConfirmations: 1 });
+    const invC2 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
     await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
@@ -384,7 +384,61 @@ export async function runRLNUtexoExternalPaymentFlow() {
     await nodeB.refreshWallet();
     addStep('xPayRgbSendB', 'success', { amount: 25, recipientId: invC2.recipientId.substring(0, 20) + '...' });
 
-    // TODO iteration 2: Final balances: A=25, B=25, C=950
+    // ── Regression diagnostics ────────────────────────────────────────────────
+
+    addStep('xPayDiagChecks', 'running');
+
+    // issue #22/#28 — assignment shape on nodeC after receiving
+    const unspentsC = await nodeC.listUnspents();
+    const allocsC = unspentsC.flatMap((u) => u.rgbAllocations ?? []);
+    console.log(`[xPay][#22] nodeC listUnspents: ${allocsC.length} allocation(s)`);
+    for (const alloc of allocsC) {
+      console.log(`[xPay][#22] assignment=${JSON.stringify(alloc.assignment)} settled=${alloc.settled}`);
+      if ((alloc.assignment as any)?.type === 'type') {
+        console.error(`[xPay][#22] REGRESSION: assignment.type is literal "type" — serialization bug still present`);
+      }
+      if (alloc.assignment?.type === 'Fungible' && typeof alloc.assignment?.amount === 'number') {
+        console.log(`[xPay][#22] ✓ Fungible assignment shape correct: amount=${alloc.assignment.amount}`);
+      }
+    }
+
+    // issue #29 — Transfer.expiration field is present and correctly named
+    const transfersC = await nodeC.listTransfers(assetId);
+    console.log(`[xPay][#29] nodeC listTransfers: ${transfersC.length} transfer(s)`);
+    for (const t of transfersC) {
+      const exp = t.expiration;
+      console.log(`[xPay][#29] transfer idx=${t.idx} status=${t.status} expiration=${exp ?? 'null'}`);
+      if (typeof exp !== 'number') {
+        console.error(`[xPay][#29] REGRESSION: expiration is ${JSON.stringify(exp)} — expected a Unix timestamp number`);
+      } else {
+        console.log(`[xPay][#29] ✓ expiration is a number (Unix ts=${exp}, ~${Math.round((exp - Date.now() / 1000) / 60)}min from now)`);
+      }
+    }
+
+    // issue #27 — failTransfers with no batchTransferIdx returns false (no expired transfers)
+    const failResultNull = await nodeC.failTransfers({ noAssetOnly: false });
+    console.log(`[xPay][#27] failTransfers(undefined) transfersChanged=${failResultNull} — expected false (no expired transfers)`);
+    if (failResultNull === true) {
+      console.warn(`[xPay][#27] failTransfers(undefined) unexpectedly changed transfers — check for expired pending UTXOs`);
+    }
+
+    // issue #27 — failTransfers with a specific batchTransferIdx on a settled transfer should throw
+    const settledTransfer = transfersC.find((t) => t.status === 'Settled');
+    if (settledTransfer) {
+      try {
+        await nodeC.failTransfers({ batchTransferIdx: settledTransfer.batchTransferIdx, noAssetOnly: false });
+        console.error(`[xPay][#27] UNEXPECTED: failTransfers on Settled transfer should have thrown CannotFailBatchTransfer`);
+      } catch (e: any) {
+        console.log(`[xPay][#27] ✓ failTransfers on Settled correctly threw: ${e?.message ?? String(e)}`);
+      }
+    }
+
+    addStep('xPayDiagChecks', 'success', {
+      allocCount: allocsC.length,
+      transferCount: transfersC.length,
+    });
+
+    // ── Final balances: A=25, B=25, C=950
     addStep('xPayFinalBalances', 'running');
     const [finalA, finalB, finalC] = await Promise.all([
       nodeA.getAssetBalance(assetId),

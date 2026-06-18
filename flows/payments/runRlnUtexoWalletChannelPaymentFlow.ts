@@ -14,6 +14,7 @@ import {
   endExclusiveFlow,
   isPoisonLike,
   sleep,
+  waitForAssetSpendable,
 } from '@/utils/flow-core';
 import { wChanValidate } from '@/utils/validate';
 
@@ -369,6 +370,9 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
       _v: { match: vInvBlind.match, fields: vInvBlind.fields, received: { recipientId: blindRecipientId.substring(0, 20) + '...', batchTransferIdx: invBlind?.batchTransferIdx } } });
 
     // 19 — nodeA sends 200 units to nodeB via blind invoice (no witnessData)
+    // TEMP(esplora): wait for the prior witness send's change to confirm (spendable>=200)
+    // before starting the next colored send. Remove when switching back to Electrum.
+    await waitForAssetSpendable(nodeA, assetId, 200, { mine, attempts: 30, delayMs: 1000, label: 'wChan nodeA' });
     addStep('wChanSendBlind', 'running');
     const sendBlind = await nodeA.send({
       invoice: blindInvoice,

@@ -196,8 +196,9 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     addStep('wAsExtConnectPeers', 'success', { peerUriB });
 
     // 12 — open asset channel nodeA → nodeB (600 units, 100k sat)
-    // pushMsat must be 0: channel_signer.rs hardcodes push_value_msat=0 when calling VLS SetupChannel,
-    // so any non-zero push causes VLS to reject validate_holder_commitment on the acceptor side.
+    // pushMsat can be non-zero: channel_signer.rs now derives the real push value
+    // (derive_initial_push_value_msat) and passes it to VLS SetupChannel, so the acceptor
+    // validates the holder commitment correctly. (Previously it hardcoded push_value_msat=0.)
     addStep('wAsExtOpenChannel', 'running');
     await nodeA.openChannel({
       peerPubkeyAndOptAddr: peerUriB,

@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
 import { buildRegtestConfig, buildUtexoConfig } from '@/utils/env';
+import { waitForAssetSpendable } from '@/utils/flow-core';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
 import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
@@ -607,6 +608,10 @@ export default function UtexoScreen() {
         await wA.refreshWallet();
         await mine(1);
 
+        // TEMP(esplora): wait for the receiver's incoming transfer to confirm
+        // before reading balances, to absorb the Esplora REST indexer's tip lag.
+        await waitForAssetSpendable(wB, assetId, 100, { mine, attempts: 30, delayMs: 1000, label: 'utexo nodeB' });
+
         const balA = await wA.getAssetBalance(assetId).catch(() => null);
         const balB = await wB.getAssetBalance(assetId).catch(() => null);
         res('TEMP onchain-send balances', {
@@ -650,6 +655,10 @@ export default function UtexoScreen() {
       const capacitySat = 100_000;
       const pushMsat    = 3_500_000;
       const assetAmount = 600;
+      // TEMP(esplora): wait for nodeA's colored allocation to confirm (spendable>=assetAmount)
+      // before opening the asset channel, to absorb the Esplora REST indexer's tip lag.
+      // Remove when switching back to Electrum.
+      await waitForAssetSpendable(wA, assetId, assetAmount, { mine, attempts: 30, delayMs: 1000, label: 'utexo nodeA' });
       req('nodeA.openChannel', { peer: pubkeyB.slice(0, 16) + '…', capacitySat, pushMsat, assetAmount, assetId: assetId.slice(0, 16) + '…' });
       await wA.openChannel({
         peerPubkeyAndOptAddr: peerUriB,
