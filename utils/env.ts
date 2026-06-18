@@ -45,10 +45,10 @@ export function buildUtexoConfig() {
   return {
     network,
     unlockParams: {
-      // indexerUrl,
-      // proxyEndpoint,
-      // announceAddresses: [] as string[],
-      // announceAlias: null as string | null,
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
       // gossipRgsServerUrl,
     } as IRLNUnlockParams,
   };
