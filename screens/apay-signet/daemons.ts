@@ -2,10 +2,9 @@
  * Signet RLN-node REST helpers (NOT the SDK).
  *
  * The faucet node funds the app wallets with BTC and plays the external RGB
- * sender for the buyer top-up. The LSP node is queried only for best-effort
- * transfer diagnostics during settlement.
+ * sender for the buyer top-up.
  */
-import { FAUCET_NODE_URL, LSP_RLN_URL } from './config';
+import { FAUCET_NODE_URL } from './config';
 
 async function nodePost(base: string, path: string, body: object = {}): Promise<any> {
   const res = await fetch(`${base}${path}`, {
@@ -34,9 +33,4 @@ export const faucet = {
   sendRgb:          (body: object)           => nodePost(FAUCET_NODE_URL, '/sendrgb',           body),
   listTransfers:    (assetId: string)        => nodePost(FAUCET_NODE_URL, '/listtransfers',     { asset_id: assetId }),
   refresh:          ()                       => refreshTransfers(FAUCET_NODE_URL),
-};
-
-export const lspNode = {
-  listTransfers: (assetId: string) => nodePost(LSP_RLN_URL, '/listtransfers', { asset_id: assetId }),
-  refresh:       ()                => refreshTransfers(LSP_RLN_URL),
 };

@@ -13,12 +13,8 @@ import { buildUtexoConfig } from '@/utils/env';
 // utexo-lsp service (wallet.lspBaseUrl) — peer pubkey/host discovered via GET /get_info.
 export const LSP_URL = 'https://lsp-signet.utexo.com';
 
-// LSP RLN node REST (root path) — used only for best-effort transfer diagnostics.
-export const LSP_RLN_URL = 'https://rln-signet.utexo.com';
-
-// Faucet RLN node REST — holds BTC + the RGB asset. Funds the app wallets and
-// sends RGB on-chain to the LSP for the buyer top-up (external-sender role).
-export const FAUCET_NODE_URL = 'https://rln-signet.utexo.com/faucet';
+// Faucet RLN node REST — set EXPO_PUBLIC_FAUCET_NODE_URL in .env.local
+export const FAUCET_NODE_URL = process.env.EXPO_PUBLIC_FAUCET_NODE_URL?.trim() || '';
 
 export const ASSET_ID = 'rgb:2l_MeWlj-YS7qLKQ-RJVhrQk-G6i4jZ4-EJOMAYZ-mpHfoqI';
 

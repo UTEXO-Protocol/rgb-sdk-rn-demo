@@ -25,7 +25,7 @@ import {
 } from '@utexo/rgb-sdk-rn';
 
 import { normHash, short, sleep, type LogEntry, type Phase } from '../apay/config';
-import { faucet, lspNode } from './daemons';
+import { faucet } from './daemons';
 import {
   APAY_HASH_REFILL_THRESHOLD,
   ASSET_ID,
@@ -33,7 +33,6 @@ import {
   FAUCET_BTC_SAT,
   FEE_RATE,
   FUND_TIMEOUT_MS,
-  LSP_RLN_URL,
   LSP_URL,
   MERCHANT_KEEPALIVE_MS,
   PAYMENT_ASSET_AMOUNT,
@@ -147,25 +146,10 @@ export function useApayFlow() {
       // opens channels with DEFAULT_VIRTUAL_OPEN_MODE set (like regtest), so the
       // app wallets must enable virtual channels and trust the LSP as the peer.
       // (The LSP RLN node must also be started with --enable-virtual-channels-v0.)
-      req('GET /get_info (LSP virtual peer pubkey)');
-      let lspPeerPubkey = '';
-      try {
-        const lspInfoPre = await fetch(`${LSP_URL}/get_info`).then(r => r.json()) as { pubkey?: string };
-        lspPeerPubkey = lspInfoPre?.pubkey ?? '';
-      } catch { /* try RLN node next */ }
-      if (!lspPeerPubkey) {
-        try {
-          const daemonInfo = await fetch(`${LSP_RLN_URL}/nodeinfo`).then(r => r.json()) as { pubkey?: string };
-          lspPeerPubkey = daemonInfo?.pubkey ?? '';
-        } catch { /* handled below */ }
-      }
-      if (!lspPeerPubkey) throw new Error('Could not fetch LSP pubkey from /get_info — is the LSP reachable?');
-      res('LSP pubkey', { pubkey: short(lspPeerPubkey) });
-
-      const virtualOpts = {
-        enableVirtualChannelsV0: true as const,
-        virtualPeerPubkeys: [lspPeerPubkey],
-      };
+      //
+      // No manual /get_info fetch here: createLsp() (called before init() below)
+      // auto-discovers the LSP pubkey and sets enableVirtualChannelsV0 +
+      // virtualPeerPubkeys on the node params before rlnCreateNode bakes them in.
 
       const ts = Date.now();
       const mkDir = async (name: string) => {
@@ -183,9 +167,6 @@ export function useApayFlow() {
           daemonListeningPort: portB,
           ldkPeerListeningPort: portB + 1,
           network: 'utexo',
-          maxMediaUploadSizeMb: 20,
-          lspBaseUrl: LSP_URL,
-          ...virtualOpts,
         },
         new PasswordRLNSigner('apaysigB', keysB.mnemonic),
       );
@@ -257,9 +238,6 @@ export function useApayFlow() {
             daemonListeningPort: portA,
             ldkPeerListeningPort: portA + 1,
             network: 'utexo',
-            maxMediaUploadSizeMb: 20,
-            lspBaseUrl: LSP_URL,
-            ...virtualOpts,
           },
           new PasswordRLNSigner('apaysigA', keysA.mnemonic),
         );
@@ -341,16 +319,9 @@ export function useApayFlow() {
           await sleep(POLL_MS);
           try {
             await faucet.refresh().catch(() => {});
-            await lspNode.refresh().catch(() => {});
             const faucetTransfers = await faucet.listTransfers(ASSET_ID);
             const faucetSend = [...(faucetTransfers.transfers ?? [])].reverse().find((t: any) => t.kind === 'Send');
-            let lspReceiveStatus = 'n/a';
-            try {
-              const lspTransfers = await lspNode.listTransfers(ASSET_ID);
-              const lspReceive = [...(lspTransfers.transfers ?? [])].reverse().find((t: any) => t.kind === 'ReceiveBlind');
-              lspReceiveStatus = lspReceive?.status ?? 'none';
-            } catch { /* LSP node REST optional */ }
-            addLog(`faucet Send: ${faucetSend?.status ?? 'none'}  LSP receive: ${lspReceiveStatus}`);
+            addLog(`faucet Send: ${faucetSend?.status ?? 'none'}`);
             if (faucetSend?.status === 'Failed') throw new Error('Faucet RGB send transfer failed');
             if (faucetSend?.status === 'Settled') { topupSettled = true; break; }
           } catch (e: any) {

@@ -113,7 +113,7 @@ export function useVirtualChannelSignetFlow() {
 
       const wA = new UTEXOWallet(
         { storageDirPath: dirAUri.replace('file://', ''), daemonListeningPort: portA,
-          ldkPeerListeningPort: portA + 1, network: 'utexo', maxMediaUploadSizeMb: 20,
+          ldkPeerListeningPort: portA + 1, network: 'utexo',
           enableVirtualChannelsV0: true },
         new PasswordRLNSigner('vcpass_a', keysA.mnemonic),
       );
@@ -145,7 +145,7 @@ export function useVirtualChannelSignetFlow() {
 
       const wB = new UTEXOWallet(
         { storageDirPath: dirBUri.replace('file://', ''), daemonListeningPort: portB,
-          ldkPeerListeningPort: portB + 1, network: 'utexo', maxMediaUploadSizeMb: 20,
+          ldkPeerListeningPort: portB + 1, network: 'utexo',
           enableVirtualChannelsV0: true,
           virtualPeerPubkeys: pkA ? [pkA] : null },
         new PasswordRLNSigner('vcpass_b', keysB.mnemonic),

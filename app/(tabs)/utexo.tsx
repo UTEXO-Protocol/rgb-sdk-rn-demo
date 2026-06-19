@@ -349,13 +349,13 @@ export default function UtexoScreen() {
 
       const wA = new UTEXOWallet(
         { storageDirPath: storageDirA, daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
-          network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
+          network, enableVirtualChannelsV0: false,
         },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
       const wB = new UTEXOWallet(
         { storageDirPath: storageDirB, daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
-          network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
+          network, enableVirtualChannelsV0: false,
         },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
