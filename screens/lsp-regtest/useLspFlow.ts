@@ -124,7 +124,7 @@ export function useLspFlow({ channelMode = 'regular' }: UseLspFlowOptions = {}) 
 
       const wA = new UTEXOWallet(
         { storageDirPath, daemonListeningPort: port, ldkPeerListeningPort: port + 1,
-          network: 'regtest', maxMediaUploadSizeMb: 20,
+          network: 'regtest',
           ...walletChannelOpts(channelMode, lspPeerPubkey),
         },
         new PasswordRLNSigner('lsppass1', keysA.mnemonic),
@@ -228,7 +228,7 @@ export function useLspFlow({ channelMode = 'regular' }: UseLspFlowOptions = {}) 
 
       const wB = new UTEXOWallet(
         { storageDirPath: dirBUri.replace('file://', ''), daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
-          network: 'regtest', maxMediaUploadSizeMb: 20,
+          network: 'regtest',
           ...walletChannelOpts(channelMode, lspPeerPubkey),
         },
         new PasswordRLNSigner('lsppass2', keysB.mnemonic),

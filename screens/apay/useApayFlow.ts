@@ -36,6 +36,7 @@ import { Platform } from 'react-native';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
 import {
   createWallet,
+  NativeExternalRLNSigner,
   PasswordRLNSigner,
   UTEXOWallet,
 } from '@utexo/rgb-sdk-rn';
@@ -48,6 +49,7 @@ import {
   snapshotRgbBalances,
 } from './balance';
 import {
+  APAY_HASH_REFILL_THRESHOLD,
   ASSET_ID,
   CHANNEL_TIMEOUT_S,
   host,
@@ -67,6 +69,15 @@ import {
   type LogEntry,
   type Phase,
 } from './config';
+
+/**
+ * Diagnostic A/B toggle for the async-variant recipient (userB) signer.
+ *  - false → PasswordRLNSigner (known-good baseline)
+ *  - true  → NativeExternalRLNSigner (VLS) — currently fails apay settle with
+ *            `invoice_hash_mismatch` (1104) on the LSP's request_invoice.
+ * Flip to true to reproduce the external-signer failure.
+ */
+const ASYNC_B_EXTERNAL_SIGNER = true;
 
 export type UseApayFlowOptions = {
   variant?: ApayFlowVariant;
@@ -115,6 +126,8 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
   const walletBRef = useRef<UTEXOWallet | null>(null);
   const abortRef = useRef(false);
   const keepaliveActiveRef = useRef(false);
+  /** Last-known size of the merchant's APay hash pool — drives auto-refill. */
+  const unusedHashesRef = useRef<number | null>(null);
 
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const time = new Date().toLocaleTimeString('en', { hour12: false });
@@ -125,6 +138,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
   const run = useCallback(async () => {
     abortRef.current = false;
     keepaliveActiveRef.current = false;
+    unusedHashesRef.current = null;
     setLog([]); setErrorMsg('');
     setPubkeyB(''); setLnaddrUsername(''); setLnaddrDomain('');
     setLightningAddress(''); setHashPoolInfo(null);
@@ -174,11 +188,21 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           daemonListeningPort: portB,
           ldkPeerListeningPort: portB + 1,
           network: 'regtest',
-          maxMediaUploadSizeMb: 20,
           lspBaseUrl: LSP_URL,
           ...regtestVirtualOpts,
         },
-        new PasswordRLNSigner(variant === 'cart' ? 'apayregB' : 'apaypassB', keysB.mnemonic),
+        // async variant: merchant/recipient signer.
+        // Diagnostic A/B toggle (ASYNC_B_EXTERNAL_SIGNER): false = PasswordRLNSigner
+        // (known-good), true = NativeExternalRLNSigner (VLS). With the external
+        // signer the recipient currently rejects the LSP's request_invoice with
+        // `invoice_hash_mismatch` (1104) — apay hashes diverge under VLS.
+        // permissivePolicy=true relaxes the acceptor policy for the LSP-opened
+        // virtual channel (VLS rejects a non-zero push otherwise).
+        variant === 'cart'
+          ? new PasswordRLNSigner('apayregB', keysB.mnemonic)
+          : ASYNC_B_EXTERNAL_SIGNER
+            ? new NativeExternalRLNSigner(keysB.mnemonic, 'regtest', true)
+            : new PasswordRLNSigner('apaypassB', keysB.mnemonic),
       );
       walletBRef.current = wB;
       // createLsp() — same as signet; regtest passes LDK port 9737 (default is 9735)
@@ -252,18 +276,32 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
       setLnaddrDomain(lnAddr.domain);
       setLightningAddress(lnAddr.address);
       setHashPoolInfo({ address: lnAddr.address, username: lnAddr.username, domain: lnAddr.domain });
-      res('enableLightningAddress', { address: lnAddr.address });
-      addLog(`Merchant Lightning Address: ${lnAddr.address}`, 'success');
+      unusedHashesRef.current = lnAddr.unusedHashes ?? null;
+      res('enableLightningAddress', { address: lnAddr.address, unusedHashes: lnAddr.unusedHashes });
+      addLog(`Merchant Lightning Address: ${lnAddr.address} (unusedHashes=${lnAddr.unusedHashes ?? '?'})`, 'success');
 
-      // Integrator: keep merchant reachable for LSP outbox (request_outbound_invoice)
+      // Integrator: keep merchant reachable for LSP outbox (request_outbound_invoice),
+      // and auto-refill the APay hash pool when it runs low.
       if (merchantKeepalive) {
         keepaliveActiveRef.current = true;
-        addLog('Merchant keepalive: lsp.connect() every 15s while buyer checks out', 'info');
+        addLog('Merchant keepalive: lsp.connect() every 15s + auto-refill hash pool when low', 'info');
         (async () => {
           while (keepaliveActiveRef.current && !abortRef.current) {
             await sleep(MERCHANT_KEEPALIVE_MS);
             if (!keepaliveActiveRef.current || abortRef.current) break;
             try { await lspB.connect(); } catch { /* already connected */ }
+
+            // Auto-refill: register a fresh signed batch once the pool is low.
+            const left = unusedHashesRef.current;
+            if (left !== null && left < APAY_HASH_REFILL_THRESHOLD) {
+              try {
+                const pool = await lspB.refillHashPool();
+                unusedHashesRef.current = pool.unusedHashes;
+                addLog(`Auto-refill: new batch registered (unusedHashes ${left} → ${pool.unusedHashes})`, 'success');
+              } catch (e: any) {
+                addLog(`Auto-refill failed: ${e?.message ?? e}`, 'error');
+              }
+            }
           }
         })();
       }
@@ -283,7 +321,6 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
             daemonListeningPort: portA,
             ldkPeerListeningPort: portA + 1,
             network: 'regtest',
-            maxMediaUploadSizeMb: 20,
             lspBaseUrl: LSP_URL,
             ...regtestVirtualOpts,
           },
@@ -553,6 +590,13 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         }
 
         addLog('LSP claimed buyer HTLC — checkout complete ✓', 'success');
+
+        // One hash was consumed serving this payment — reflect it so the
+        // keepalive loop's auto-refill can kick in once the pool runs low.
+        if (unusedHashesRef.current !== null) {
+          unusedHashesRef.current = Math.max(0, unusedHashesRef.current - 1);
+          addLog(`Hash pool: ~${unusedHashesRef.current} unused left`, 'info');
+        }
 
         const buyerSnapEnd = await snapshotRgbBalances(wA, ASSET_ID, lspPeerPubkey);
         const merchantSnapEnd = await snapshotRgbBalances(wB, ASSET_ID, lspPeerPubkey);

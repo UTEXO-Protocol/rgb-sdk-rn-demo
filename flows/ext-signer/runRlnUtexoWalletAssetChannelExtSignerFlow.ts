@@ -17,6 +17,43 @@ import {
   sleep,
 } from '@/utils/flow-core';
 
+/**
+ * Wait until every node reports a usable channel, mining between polls.
+ * Mirrors the SDK's WaitOptions.onEachPoll pattern (UtexoLsp.waitForChannel),
+ * which the bare UTEXOWallet does not expose. The readiness loop must advance
+ * the chain itself — otherwise the (colored) funding tx never accrues
+ * confirmations to minimum_depth and numUsableChannels stays 0.
+ */
+async function waitForUsableChannels(
+  nodes: [UTEXOWallet, string][],
+  opts: {
+    minUsable?: number;
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    onEachPoll?: () => Promise<void>;
+  } = {},
+): Promise<void> {
+  const minUsable = opts.minUsable ?? 1;
+  const timeoutMs = opts.timeoutMs ?? 180000;
+  const pollIntervalMs = opts.pollIntervalMs ?? 2000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (opts.onEachPoll) await opts.onEachPoll();
+    const usables = await Promise.all(
+      nodes.map(async ([node]) => {
+        await node.syncWallet();
+        return Number((await node.getNodeInfo())?.numUsableChannels ?? 0);
+      }),
+    );
+    nodes.forEach(([, label], i) =>
+      console.log(`[wAsExt] ${label} usableChannels=${usables[i]} (need ${minUsable})`),
+    );
+    if (usables.every((u) => u >= minUsable)) return;
+    await sleep(pollIntervalMs);
+  }
+  throw new Error(`channels not usable within timeout (need ${minUsable} per node)`);
+}
+
 export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
   const flowName = 'runRlnUtexoWalletAssetChannelExtSignerFlow';
   beginExclusiveFlow(flowName);
@@ -49,7 +86,6 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
         daemonListeningPort: basePortA,
         ldkPeerListeningPort: basePortA + 1,
         network,
-        maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
       },
       new PasswordRLNSigner(nodeAPassword, keysA.mnemonic),
@@ -62,7 +98,6 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
         daemonListeningPort: basePortB,
         ldkPeerListeningPort: basePortB + 1,
         network,
-        maxMediaUploadSizeMb: 20,
         enableVirtualChannelsV0: false,
       },
       new NativeExternalRLNSigner(keysB.mnemonic, network),
@@ -159,8 +194,9 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     addStep('wAsExtConnectPeers', 'success', { peerUriB });
 
     // 12 — open asset channel nodeA → nodeB (600 units, 100k sat)
-    // pushMsat must be 0: channel_signer.rs hardcodes push_value_msat=0 when calling VLS SetupChannel,
-    // so any non-zero push causes VLS to reject validate_holder_commitment on the acceptor side.
+    // pushMsat can be non-zero: channel_signer.rs now derives the real push value
+    // (derive_initial_push_value_msat) and passes it to VLS SetupChannel, so the acceptor
+    // validates the holder commitment correctly. (Previously it hardcoded push_value_msat=0.)
     addStep('wAsExtOpenChannel', 'running');
     await nodeA.openChannel({
       peerPubkeyAndOptAddr: peerUriB,
@@ -191,20 +227,11 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     if (!fundingTxid) throw new Error('Timeout waiting for funding tx');
     console.log(`[wAsExt] channelId=${channelId} fundingTxid=${fundingTxid}`);
 
-    await mine(6);
-    await sleep(3000);
-    for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
-      const deadline = Date.now() + 120000;
-      while (Date.now() < deadline) {
-        await node.syncWallet();
-        const info = await node.getNodeInfo();
-        const usable = Number(info?.numUsableChannels ?? 0);
-        console.log(`[wAsExt] ${label} usableChannels=${usable}`);
-        if (usable >= 1) break;
-        await sleep(2000);
-      }
-    }
-    await mine(6);
+    // Let the async colored-funding broadcast reach the mempool before mining.
+    await sleep(2000);
+    await waitForUsableChannels([[nodeA, 'nodeA'], [nodeB, 'nodeB']], {
+      onEachPoll: async () => { await mine(1); },
+    });
     addStep('wAsExtOpenChannel', 'success', { channelId, fundingTxid, assetId });
 
     // log asset balances after channel open to confirm push worked
@@ -386,26 +413,14 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
 
     // listChannels() returns fundingTxid as soon as FundingCreated is sent, but with
     // NativeExternalRLNSigner the VLS signing on the initiator (nodeB) side takes several
-    // seconds, so the funding tx may not be broadcast yet. Mine in a retry loop.
+    // seconds, so the funding tx may not be broadcast yet. Mine on each poll until the
+    // reverse channel is usable — both nodes must reach 2 usable channels (forward + reverse),
+    // otherwise the still-usable forward channel would let a `>= 1` check pass immediately.
     await sleep(5000);
-    const revOpenDeadline = Date.now() + 120000;
-    let revOpenDone = false;
-    while (Date.now() < revOpenDeadline) {
-      await mine(6);
-      await sleep(3000);
-      let allUsable = true;
-      for (const [node, label] of [[nodeA, 'nodeA'], [nodeB, 'nodeB']] as [UTEXOWallet, string][]) {
-        await node.syncWallet();
-        const info = await node.getNodeInfo();
-        const usable = Number(info?.numUsableChannels ?? 0);
-        console.log(`[wAsExt] rev open ${label} usableChannels=${usable}`);
-        if (usable < 1) allUsable = false;
-      }
-      if (allUsable) { revOpenDone = true; break; }
-      await sleep(5000);
-    }
-    if (!revOpenDone) throw new Error('Reverse channel never became usable within 120s');
-    await mine(6);
+    await waitForUsableChannels([[nodeA, 'nodeA'], [nodeB, 'nodeB']], {
+      minUsable: 2,
+      onEachPoll: async () => { await mine(1); },
+    });
     addStep('wAsExtRevOpenChannel', 'success', { channelId: revChannelId, fundingTxid: revFundingTxid, assetId });
 
     // 20 — payment: nodeA creates invoice (50 units), nodeB (VLS initiator) pays

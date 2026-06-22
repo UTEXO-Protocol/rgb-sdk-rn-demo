@@ -22,8 +22,8 @@ export async function daemonGet(url: string, path: string): Promise<any> {
 
 // mirrors refresh_transfers_for_clients in harness.py (double refresh)
 async function refreshTransfers(daemonUrl: string): Promise<void> {
-  await daemonPost(daemonUrl, '/refreshtransfers', { skip_sync: false });
-  await daemonPost(daemonUrl, '/refreshtransfers', { skip_sync: false });
+  await daemonPost(daemonUrl, '/refreshtransfers', { filter: [], skip_sync: false });
+  await daemonPost(daemonUrl, '/refreshtransfers', { filter: [], skip_sync: false });
 }
 
 // ── Demo helpers: faucet daemon (external RLN node, NOT the SDK) ─────────────
@@ -33,7 +33,7 @@ export const faucet = {
   sendRgb:          (body: object)    => daemonPost(FAUCET_DAEMON_URL, '/sendrgb',           body),
   listTransfers:    (assetId: string) => daemonPost(FAUCET_DAEMON_URL, '/listtransfers',     { asset_id: assetId }),
   refresh:          ()                => refreshTransfers(FAUCET_DAEMON_URL),
-  refreshOnce:      ()                => daemonPost(FAUCET_DAEMON_URL, '/refreshtransfers',  { skip_sync: false }),
+  refreshOnce:      ()                => daemonPost(FAUCET_DAEMON_URL, '/refreshtransfers',  { filter: [], skip_sync: false }),
 };
 
 // ── Demo helpers: LSP daemon (external RLN node, NOT the SDK) ────────────────
@@ -41,5 +41,5 @@ export const lspDaemon = {
   nodeInfo:      ()                => daemonGet(LSP_DAEMON_URL,  '/nodeinfo'),
   listTransfers: (assetId: string) => daemonPost(LSP_DAEMON_URL, '/listtransfers', { asset_id: assetId }),
   refresh:       ()                => refreshTransfers(LSP_DAEMON_URL),
-  refreshOnce:   ()                => daemonPost(LSP_DAEMON_URL, '/refreshtransfers', { skip_sync: false }),
+  refreshOnce:   ()                => daemonPost(LSP_DAEMON_URL, '/refreshtransfers', { filter: [], skip_sync: false }),
 };

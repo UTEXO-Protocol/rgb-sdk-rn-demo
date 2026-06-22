@@ -4,6 +4,7 @@ import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area
 
 import { AppColors } from '@/constants/theme';
 import ApayRegularChannelsScreen from '@/screens/apay-regular-channels';
+import ApaySignetScreen from '@/screens/apay-signet/index';
 import AsyncPayScreen from '@/screens/async-pay';
 import LspRegtestScreen, { LspRegtestVirtualScreen } from '@/screens/lsp-regtest/index';
 import LspSignetScreen from '@/screens/lsp-signet/index';
@@ -63,7 +64,16 @@ export default function LspHubScreen() {
                 </ScrollView>
               </View>
               <View style={[s.pane, activeTab !== 'utexo' && s.paneHidden]}>
-                <LspSignetScreen />
+                <ScrollView
+                  style={s.paneScroll}
+                  contentContainerStyle={s.paneContent}
+                  showsVerticalScrollIndicator={false}
+                  nestedScrollEnabled
+                >
+                  <LspSignetScreen embedded />
+                  <View style={s.flowDivider} />
+                  <ApaySignetScreen embedded />
+                </ScrollView>
               </View>
             </View>
           </SafeAreaInsetsContext.Provider>

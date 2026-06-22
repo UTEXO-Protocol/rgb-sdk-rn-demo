@@ -26,6 +26,8 @@ export const CHANNEL_TIMEOUT_S    = 180;
 export const SETTLE_TIMEOUT_S     = 120;
 export const POLL_INTERVAL_MS     = 3_000;
 export const MERCHANT_KEEPALIVE_MS = 15_000;
+/** Auto-refill the merchant's APay hash pool once it drops below this many unused hashes. */
+export const APAY_HASH_REFILL_THRESHOLD = 3;
 
 export type ApayFlowVariant = 'cart' | 'async';
 

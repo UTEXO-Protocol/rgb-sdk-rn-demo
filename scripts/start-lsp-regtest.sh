@@ -289,10 +289,10 @@ for i in 1 2 3 4 5 6; do
   sleep 2
 
   # Double refresh (mirrors harness.py)
-  rln_post "$LSP_PORT"    "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$LSP_PORT"    "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"skip_sync":false}' >/dev/null 2>&1 || true
+  rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+  rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
 done
 
 log "LSP seeded. Checking LSP asset balance …"

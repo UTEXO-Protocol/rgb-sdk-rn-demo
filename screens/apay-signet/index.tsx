@@ -1,5 +1,6 @@
 /**
- * Async Payment tab — APay flow via useApayFlow (SDK helpers).
+ * APay · Signet (UTEXO) tab — Async Payment on the live signet stack.
+ * Flow logic: ./useApayFlow.ts  |  Visual components: ../apay/ui
  */
 import React from 'react';
 import {
@@ -13,43 +14,31 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
 
-import {
-  ASSET_ID,
-  LSP_URL,
-  PAYMENT_ASSET_AMOUNT,
-  PAYMENT_MSAT,
-  PHASES_P1,
-  PHASES_P2,
-  short,
-  type Phase,
-} from './apay/config';
-import { useApayFlow } from './apay/useApayFlow';
-import { apayStyles as s, InfoCard, LogPane, PhaseRow } from './apay/ui';
+import { PHASES_P1, PHASES_P2, short, type Phase } from '../apay/config';
+import { apayStyles as s, InfoCard, LogPane, PhaseRow } from '../apay/ui';
+import { ASSET_ID, LSP_URL, PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT } from './config';
+import { useApayFlow } from './useApayFlow';
 
 function phaseMessage(phase: Phase): string {
   switch (phase) {
-    case 'b_init':    return 'Creating User B (recipient) node…';
-    case 'b_fund':    return 'Funding User B…';
-    case 'b_utxos':   return 'Creating User B UTXOs…';
-    case 'b_channel': return 'Opening RGB channel LSP → User B…';
+    case 'b_init':    return 'Creating merchant (recipient) node on signet…';
+    case 'b_fund':    return 'Faucet funding merchant — waiting for confirmation…';
+    case 'b_utxos':   return 'Creating merchant UTXOs — waiting for confirmation…';
+    case 'b_channel': return 'Opening RGB channel LSP → merchant (~10 min)…';
     case 'register':  return 'Registering hash pool (enableLightningAddress)…';
-    case 'a_init':    return 'Creating User A (sender) node…';
-    case 'a_fund':    return 'Funding User A…';
-    case 'a_utxos':   return 'Creating User A UTXOs…';
-    case 'a_channel': return 'Opening RGB channel LSP → User A…';
-    case 'a_topup':   return 'User A deposit — receiving RGB via lightning_receive…';
-    case 'send':      return 'User A paying via Lightning Address (payAddress)…';
-    case 'settle':    return 'User B online — LSP outbox settlement…';
+    case 'a_init':    return 'Creating buyer (sender) node on signet…';
+    case 'a_fund':    return 'Faucet funding buyer — waiting for confirmation…';
+    case 'a_utxos':   return 'Creating buyer UTXOs — waiting for confirmation…';
+    case 'a_channel': return 'Opening RGB channel LSP → buyer (~10 min)…';
+    case 'a_topup':   return 'Buyer deposit — faucet sends RGB → LSP (lightning_receive)…';
+    case 'send':      return 'Buyer paying via Lightning Address (payAddress)…';
+    case 'settle':    return 'Merchant online — LSP outbox settlement…';
     default:          return 'Working…';
   }
 }
 
-export default function AsyncPayScreen({ embedded = false }: { embedded?: boolean }) {
-  const flow = useApayFlow({
-    variant: 'async',
-    merchantKeepalive: false,
-    settlementDiagnostics: false,
-  });
+export default function ApaySignetScreen({ embedded = false }: { embedded?: boolean }) {
+  const flow = useApayFlow();
 
   const hodlStatus = flow.merchantOnline
     ? (flow.sendStatus === 'Settled' ? 'Settled ✓' : flow.sendStatus || 'Settling…')
@@ -71,11 +60,11 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
         nestedScrollEnabled={embedded}>
 
         <View style={s.header}>
-          <Text style={s.title}>Async Payment</Text>
-          <Text style={s.subtitle}>Regtest · recipient offline → LSP holds HTLC → online settlement</Text>
+          <Text style={s.title}>Async Payment · Signet</Text>
+          <Text style={s.subtitle}>UTEXO signet · recipient offline → LSP holds HTLC → online settlement</Text>
           <View style={s.badge}>
             <View style={[s.dot, { backgroundColor: flow.envReady ? AppColors.success : AppColors.error }]} />
-            <Text style={s.badgeTxt}>{flow.envReady ? 'LSP configured' : `Run ${flow.setupScriptHint}`}</Text>
+            <Text style={s.badgeTxt}>{flow.envReady ? 'Asset configured' : 'EXPO_PUBLIC_SIGNET_ASSET_ID not set'}</Text>
           </View>
         </View>
 
@@ -88,34 +77,22 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
 
         {flow.phase === 'idle' && (
           <View style={s.card}>
-            <Text style={s.cardTitle}>Async Payment (APay)</Text>
+            <Text style={s.cardTitle}>Async Payment (APay) — Signet</Text>
             <Text style={s.cardDesc}>
-              {'APay (Async Payments) lets someone pay a Lightning Address even when\n' +
-               'the recipient app is not actively listening. The LSP holds the HTLC\n' +
-               'and completes delivery when the recipient comes back online.\n\n' +
-               'Part 1 — Recipient (User B) registers with the LSP\n' +
-               '   Opens an RGB channel to the LSP.\n' +
-               '   Registers N payment hashes (enableLightningAddress →\n' +
-               '   apayNewWithAddress) → LSP assigns a Lightning Address\n' +
-               '   keyed to their pubkey.\n\n' +
-               'Part 2 — Sender (User A) pays via LNURL\n' +
-               '   Opens an RGB channel (needs spendable RGB).\n' +
-               '   GET /.well-known/lnurlp/{username} → callback → HODL BOLT11.\n' +
-               '   Pays the invoice. HTLC is held at the LSP — payment is NOT\n' +
-               '   settled yet (User B is treated as "offline").\n\n' +
-               'Part 3 — LSP outbox settlement (no manual claim on recipient)\n' +
-               '   User B reconnects to the LSP peer.\n' +
-               '   LSP outbox: request outbound invoice from B → pay B → B\n' +
-               '   auto-claims → preimage released → LSP settles A\'s HTLC.\n' +
-               '   Recipient does NOT call claimHodlInvoice in APay.\n\n' +
-               `Prerequisite: ${flow.setupScriptHint}`}
+              {'Same APay flow as regtest, but against the live signet stack —\n' +
+               'real RGB channels and no manual mining (waits for confirmations).\n\n' +
+               'Part 1 — Recipient (merchant)\n' +
+               '   Faucet funds BTC → createUtxos → LSP opens an RGB channel.\n' +
+               '   enableLightningAddress registers a hash pool → Lightning Address.\n\n' +
+               'Part 2 — Sender (buyer)\n' +
+               '   Faucet funds BTC → LSP opens an RGB channel.\n' +
+               '   Buyer tops up RGB via lightning_receive (faucet is the external\n' +
+               '   on-chain RGB sender), then pays the merchant Lightning Address.\n' +
+               '   HTLC is held at the LSP (recipient treated as offline).\n\n' +
+               'Part 3 — LSP outbox settlement\n' +
+               '   Merchant reconnects → LSP outbox pays the merchant → merchant\n' +
+               '   auto-claims → LSP settles the buyer HTLC. No claimHodlInvoice.'}
             </Text>
-
-            {!flow.envReady && (
-              <View style={s.warnCard}>
-                <Text style={s.warnTxt}>{`Run:\n\n  ${flow.setupScriptHint}`}</Text>
-              </View>
-            )}
 
             <View style={s.paramCard}>
               <Text style={s.paramTitle}>Config</Text>
@@ -129,7 +106,7 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
               onPress={flow.run}
               disabled={!flow.envReady}
               activeOpacity={0.8}>
-              <Text style={s.startBtnTxt}>▶  Run Async Payment Flow</Text>
+              <Text style={s.startBtnTxt}>▶  Run on Signet</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -138,25 +115,28 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>{phaseMessage(flow.phase)}</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>
+              Signet — confirmations can take several minutes
+            </Text>
           </View>
         )}
 
         {flow.hashPoolInfo && (
-          <InfoCard title="Hash Pool (enableLightningAddress)" accent={AppColors.primary} rows={[
+          <InfoCard title="Lightning Address (enableLightningAddress)" accent={AppColors.primary} rows={[
             ['LN Address', flow.lnAddress || '(pending)'],
             ['Username',   flow.lnaddrUsername || '—'],
           ]} />
         )}
 
         {flow.channelB && (
-          <InfoCard title="RGB Channel (LSP → User B)" accent={AppColors.success} rows={[
+          <InfoCard title="RGB Channel (LSP → Merchant)" accent={AppColors.success} rows={[
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${flow.channelB.capacitySat ?? flow.channelB.capacity_sat ?? '?'} sat`],
             ['Status',   'Usable ✓'],
           ]} />
         )}
         {flow.channelA && (
-          <InfoCard title="RGB Channel (LSP → User A)" accent={AppColors.success} rows={[
+          <InfoCard title="RGB Channel (LSP → Buyer)" accent={AppColors.success} rows={[
             ['Asset',    short(ASSET_ID, 28)],
             ['Capacity', `${flow.channelA.capacitySat ?? flow.channelA.capacity_sat ?? '?'} sat`],
             ['Status',   'Usable ✓'],
@@ -173,7 +153,7 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
         )}
 
         {flow.finalBalB && (
-          <InfoCard title="User B Final Balance" accent={AppColors.success} rows={[
+          <InfoCard title="Merchant Final Balance" accent={AppColors.success} rows={[
             ['Offchain In',  String(flow.finalBalB.offchainInbound ?? 0)],
             ['Offchain Out', String(flow.finalBalB.offchainOutbound ?? 0)],
           ]} />
@@ -183,11 +163,11 @@ export default function AsyncPayScreen({ embedded = false }: { embedded?: boolea
           <View style={[s.card, { borderColor: AppColors.successBorder }]}>
             <Text style={[s.cardTitle, { color: AppColors.success }]}>✓ Async Payment Complete</Text>
             <Text style={s.cardDesc}>
-              {'1. User B registered hash pool → LSP created Lightning Address\n' +
-               '2. User A paid via LNURL-pay → LSP held HTLC while B was offline\n' +
-               '3. User B came online → LSP outbox settled outbound to B\n' +
-               '4. LSP claimed inbound HTLC from User A with the preimage\n\n' +
-               'Full async payment lifecycle — RGB delivered without manual claim.'}
+              {'1. Merchant registered hash pool → LSP created Lightning Address\n' +
+               '2. Buyer paid via LNURL-pay → LSP held HTLC while merchant offline\n' +
+               '3. Merchant came online → LSP outbox settled outbound\n' +
+               '4. LSP claimed inbound HTLC with the preimage\n\n' +
+               'Full async payment lifecycle on signet — no manual claim.'}
             </Text>
           </View>
         )}

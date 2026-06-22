@@ -13,7 +13,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
-import { buildUtexoConfig } from '@/utils/env';
+import { buildRegtestConfig, buildUtexoConfig } from '@/utils/env';
+import { waitForAssetSpendable } from '@/utils/flow-core';
 import { mine, sendToAddress } from '@/utils/wallet-flow';
 import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
@@ -22,16 +23,8 @@ const UTEXO_UNLOCK = buildUtexoConfig().unlockParams;
 
 // ── Local regtest node credentials ────────────────────────────────────────────
 const _rpcHost = Platform.OS === 'android' ? '10.0.2.2' : '127.0.0.1';
-const REGTEST_UNLOCK = {
-  bitcoindRpcUsername: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_USERNAME?.trim() || 'user',
-  bitcoindRpcPassword: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PASSWORD?.trim() || 'password',
-  bitcoindRpcHost: process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_HOST?.trim() || _rpcHost,
-  bitcoindRpcPort: Number(process.env.EXPO_PUBLIC_RLN_BITCOIND_RPC_PORT?.trim() || '18443'),
-  indexerUrl: process.env.EXPO_PUBLIC_RLN_INDEXER_URL?.trim() || `${_rpcHost}:50001`,
-  proxyEndpoint: process.env.EXPO_PUBLIC_RLN_PROXY_ENDPOINT?.trim() || `rpc://${_rpcHost}:3000/json-rpc`,
-  announceAddresses: [] as string[],
-  announceAlias: null as string | null,
-};
+// Shared regtest config (indexer-only, no bitcoind RPC) — same as the other flows.
+const REGTEST_UNLOCK = buildRegtestConfig().unlockParams;
 
 const POLL_MS = 20_000;
 const FUND_TIMEOUT_MS = 45 * 60 * 1000;
@@ -356,13 +349,13 @@ export default function UtexoScreen() {
 
       const wA = new UTEXOWallet(
         { storageDirPath: storageDirA, daemonListeningPort: portA, ldkPeerListeningPort: portA + 1,
-          network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
+          network, enableVirtualChannelsV0: false,
         },
         new PasswordRLNSigner('password', keysA.mnemonic),
       );
       const wB = new UTEXOWallet(
         { storageDirPath: storageDirB, daemonListeningPort: portB, ldkPeerListeningPort: portB + 1,
-          network, maxMediaUploadSizeMb: 20, enableVirtualChannelsV0: false,
+          network, enableVirtualChannelsV0: false,
         },
         new PasswordRLNSigner('password', keysB.mnemonic),
       );
@@ -595,6 +588,41 @@ export default function UtexoScreen() {
         issuedSupply: asset?.issuedSupply,
       });
 
+      // ── TEMP DIAGNOSTIC: on-chain RGB asset send A → B (blindReceive + send) ──
+      // Verifies whether on-chain colored transfers settle on this indexer-only
+      // regtest config, to isolate whether the failure is specific to asset CHANNELS
+      // or also affects plain on-chain RGB sends. Remove once that's confirmed.
+      try {
+        req('TEMP nodeB.blindReceive');
+        const invOnchain = await wB.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
+        res('TEMP nodeB.blindReceive', { recipientId: String(invOnchain.recipientId).slice(0, 20) + '…' });
+
+        req('TEMP nodeA.send', { amount: 100, assetId: assetId.slice(0, 16) + '…' });
+        await wA.send({ invoice: invOnchain.invoice, assetId, amount: 100, donation: true, feeRate: 1, minConfirmations: 1 });
+        res('TEMP nodeA.send');
+
+        await mine(1);
+        await wB.syncWallet();
+        await wB.refreshWallet();
+        await wB.refreshWallet();
+        await wA.refreshWallet();
+        await mine(1);
+
+        // TEMP(esplora): wait for the receiver's incoming transfer to confirm
+        // before reading balances, to absorb the Esplora REST indexer's tip lag.
+        await waitForAssetSpendable(wB, assetId, 100, { mine, attempts: 30, delayMs: 1000, label: 'utexo nodeB' });
+
+        const balA = await wA.getAssetBalance(assetId).catch(() => null);
+        const balB = await wB.getAssetBalance(assetId).catch(() => null);
+        res('TEMP onchain-send balances', {
+          nodeA_settled: balA?.settled, nodeA_spendable: balA?.spendable,
+          nodeB_settled: balB?.settled, nodeB_spendable: balB?.spendable,
+        });
+        addLog(`TEMP on-chain A→B send: nodeB settled expected 100, got ${balB?.settled} (spendable ${balB?.spendable})`);
+      } catch (e: any) {
+        addLog(`TEMP on-chain send FAILED: ${e?.message ?? String(e)}`);
+      }
+
       // ── 10. Node pubkeys ───────────────────────────────────────────────────
       req('nodeA.getNodeInfo');
       const infoA = await wA.getNodeInfo();
@@ -627,6 +655,10 @@ export default function UtexoScreen() {
       const capacitySat = 100_000;
       const pushMsat    = 3_500_000;
       const assetAmount = 600;
+      // TEMP(esplora): wait for nodeA's colored allocation to confirm (spendable>=assetAmount)
+      // before opening the asset channel, to absorb the Esplora REST indexer's tip lag.
+      // Remove when switching back to Electrum.
+      await waitForAssetSpendable(wA, assetId, assetAmount, { mine, attempts: 30, delayMs: 1000, label: 'utexo nodeA' });
       req('nodeA.openChannel', { peer: pubkeyB.slice(0, 16) + '…', capacitySat, pushMsat, assetAmount, assetId: assetId.slice(0, 16) + '…' });
       await wA.openChannel({
         peerPubkeyAndOptAddr: peerUriB,
