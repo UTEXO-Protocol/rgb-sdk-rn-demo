@@ -396,7 +396,7 @@ export default function UtexoScreen() {
 
       req('nodeA.getNetworkInfo');
       const netInfo = await wA.getNetworkInfo();
-      res('nodeA.getNetworkInfo', { network: netInfo.network, height: netInfo.height });
+      res('nodeA.getNetworkInfo', { network: netInfo.network, height: netInfo.blockHeight });
 
       // ── 6. Addresses ───────────────────────────────────────────────────────
       req('nodeA.getAddress');
@@ -488,7 +488,7 @@ export default function UtexoScreen() {
         // UTEXO: wait for LDK to process the confirming block before createUtxos
         for (const [w, label] of [[wA, 'nodeA'], [wB, 'nodeB']] as [UTEXOWallet, string][]) {
           req(`${label}.getNetworkInfo`);
-          const { height: h0 } = await w.getNetworkInfo();
+          const { blockHeight: h0 } = await w.getNetworkInfo();
           res(`${label}.getNetworkInfo`, { height: h0 });
           addLog(`Waiting for ${label} LDK to advance past block ${h0}…`);
           const deadline = Date.now() + 3 * 60 * 1000;
@@ -497,8 +497,8 @@ export default function UtexoScreen() {
             await sleep(5_000);
             req(`${label}.getNetworkInfo`);
             const info = await w.getNetworkInfo();
-            res(`${label}.getNetworkInfo`, { height: info.height, waitingFor: h0 + 1 });
-            if (info.height > h0) break;
+            res(`${label}.getNetworkInfo`, { height: info.blockHeight, waitingFor: (h0 ?? 0) + 1 });
+            if ((info.blockHeight ?? 0) > (h0 ?? 0)) break;
           }
         }
       }
@@ -661,13 +661,13 @@ export default function UtexoScreen() {
       await waitForAssetSpendable(wA, assetId, assetAmount, { mine, attempts: 30, delayMs: 1000, label: 'utexo nodeA' });
       req('nodeA.openChannel', { peer: pubkeyB.slice(0, 16) + '…', capacitySat, pushMsat, assetAmount, assetId: assetId.slice(0, 16) + '…' });
       await wA.openChannel({
-        peerPubkeyAndOptAddr: peerUriB,
+        peerPubkey: peerUriB,
         capacitySat,
         pushMsat,
-        public: true,
+        isPublic: true,
         withAnchors: true,
         assetId,
-        assetAmount,
+        assetLocalAmount: assetAmount,
       });
       res('nodeA.openChannel', { capacitySat, assetAmount });
 
@@ -761,12 +761,12 @@ export default function UtexoScreen() {
       while (Date.now() < pay1Deadline) {
         if (abortRef.current) throw new Error('Cancelled');
         await sleep(2000);
-        req('nodeA.getLightningSendRequest', { hash: hash1.slice(0, 16) + '…' });
+        req('nodeA.getLightningSendStatus', { hash: hash1.slice(0, 16) + '…' });
         await wA.syncWallet();
-        const status = await wA.getLightningSendRequest(hash1);
-        res('nodeA.getLightningSendRequest', { status });
+        const status = await wA.getLightningSendStatus(hash1);
+        res('nodeA.getLightningSendStatus', { status });
         setPayResults([{ direction: 'A → B', amount: 100, hash: hash1, status: status ?? 'Pending' }]);
-        if (status === 'Settled') break;
+        if (status === 'Succeeded') break;
         if (status === 'Failed') throw new Error('Payment 1 (A→B 100 units) failed');
       }
       addLog('Payment 1 settled: A → B  100 units', 'success');
@@ -786,12 +786,12 @@ export default function UtexoScreen() {
       while (Date.now() < pay2Deadline) {
         if (abortRef.current) throw new Error('Cancelled');
         await sleep(2000);
-        req('nodeB.getLightningSendRequest', { hash: hash2.slice(0, 16) + '…' });
+        req('nodeB.getLightningSendStatus', { hash: hash2.slice(0, 16) + '…' });
         await wB.syncWallet();
-        const status = await wB.getLightningSendRequest(hash2);
-        res('nodeB.getLightningSendRequest', { status });
+        const status = await wB.getLightningSendStatus(hash2);
+        res('nodeB.getLightningSendStatus', { status });
         setPayResults(prev => prev.map((r, i) => i === 1 ? { ...r, status: status ?? 'Pending' } : r));
-        if (status === 'Settled') break;
+        if (status === 'Succeeded') break;
         if (status === 'Failed') throw new Error('Payment 2 (B→A 50 units) failed');
       }
       addLog('Payment 2 settled: B → A  50 units', 'success');

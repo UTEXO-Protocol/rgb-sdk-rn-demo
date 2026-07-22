@@ -110,10 +110,10 @@ export async function runRlnVssFlow() {
     try { await wallet.connectPeer(peerUriB); } catch {}
     await sleep(1000);
     const openResp = await wallet.openChannel({
-      peerPubkeyAndOptAddr: peerUriB,
+      peerPubkey: peerUriB,
       capacitySat: 200000,
       pushMsat: 0,
-      public: true,
+      isPublic: true,
       withAnchors: true,
     });
     const tempChannelId = String(openResp?.temporaryChannelId ?? '');

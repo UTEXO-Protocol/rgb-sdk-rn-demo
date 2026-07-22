@@ -109,6 +109,8 @@ if [ "${1:-}" = "stop" ]; then
   pkill -f "go run \."                       2>/dev/null || true
   pkill -f "utexo-lsp"                       2>/dev/null || true
   pkill -f "local-node-bridge"               2>/dev/null || true
+  # A fixture describing a torn-down stack would send e2e at dead endpoints.
+  rm -f "$DEMO_DIR/e2e-fixtures.json"
   log "Done."
   exit 0
 fi
@@ -216,7 +218,9 @@ done
 # ── get pubkeys ───────────────────────────────────────────────────────────────
 
 LSP_PUBKEY=$(rln_get "$LSP_PORT" "/nodeinfo" | jq -r '.pubkey')
-log "LSP pubkey: $LSP_PUBKEY"
+FAUCET_PUBKEY=$(rln_get "$FAUCET_PORT" "/nodeinfo" | jq -r '.pubkey')
+log "LSP pubkey:    $LSP_PUBKEY"
+log "Faucet pubkey: $FAUCET_PUBKEY"
 
 # ── fund both nodes ───────────────────────────────────────────────────────────
 
@@ -379,6 +383,42 @@ EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
 log "LSP regtest vars written to $ENV_LOCAL (single env-file workflow)"
 
+# ── e2e fixtures — machine-readable, additive to the env files above ──────────
+# Consumed by the e2e suites; same shape as the web script's fixture
+# (rgb-sdk-web-demo/scripts/start-lsp-web.sh). The emulator reaches every URL
+# via the adb reverse forwards set earlier, so 127.0.0.1 stays valid on-device.
+FIXTURES="$DEMO_DIR/e2e-fixtures.json"
+jq -n \
+  --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg assetId "$ASSET_ID" \
+  --arg lspPubkey "$LSP_PUBKEY" \
+  --arg faucetPubkey "$FAUCET_PUBKEY" \
+  --arg lspUrl "http://127.0.0.1:$LSP_PORT" \
+  --arg faucetUrl "http://127.0.0.1:$FAUCET_PORT" \
+  --arg utexoLspUrl "http://127.0.0.1:$UTEXO_PORT" \
+  --arg bridgeUrl "http://127.0.0.1:$BRIDGE_PORT" \
+  --arg indexerUrl "$INDEXER_URL" \
+  --arg proxyEndpoint "$PROXY_ENDPOINT" \
+  --argjson lspPeerPort "$LSP_PEER_PORT" \
+  --argjson faucetPeerPort "$FAUCET_PEER_PORT" \
+  '{
+    generatedAt: $generatedAt,
+    platform: "rn",
+    ASSET_ID: $assetId,
+    LSP_PUBKEY: $lspPubkey,
+    FAUCET_PUBKEY: $faucetPubkey,
+    LSP_URL: $lspUrl,
+    FAUCET_URL: $faucetUrl,
+    UTEXO_LSP_URL: $utexoLspUrl,
+    BRIDGE_URL: $bridgeUrl,
+    INDEXER_URL: $indexerUrl,
+    PROXY_ENDPOINT: $proxyEndpoint,
+    LSP_PEER_PORT: $lspPeerPort,
+    FAUCET_PEER_PORT: $faucetPeerPort
+  }' \
+  > "$FIXTURES"
+log "e2e fixtures written to $FIXTURES"
+
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  LSP regtest environment ready"
@@ -389,6 +429,7 @@ log "  Faucet:      http://127.0.0.1:$FAUCET_PORT  (peer :$FAUCET_PEER_PORT)"
 log "  Asset ID:    $ASSET_ID"
 log "  LSP pubkey:  $LSP_PUBKEY"
 log "  Env file:    $ENV_OUT"
+log "  Fixtures:    $FIXTURES"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  Start demo app, select Regtest in LSP tab"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

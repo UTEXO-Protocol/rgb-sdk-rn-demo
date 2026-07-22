@@ -182,13 +182,13 @@ export function useVirtualChannelBtcFlow() {
 
       req('nodeA.openChannel', { capacitySat: CHANNEL_CAPACITY_SAT, asset: 'none (BTC only)', virtualOpenMode: VIRTUAL_OPEN_MODE });
       const openResp = await wA.openChannel({
-        peerPubkeyAndOptAddr: peerUri,
+        peerPubkey: peerUri,
         capacitySat: CHANNEL_CAPACITY_SAT,
         pushMsat: 0,
-        public: false,
+        isPublic: false,
         withAnchors: true,
-        assetId: null,
-        assetAmount: null,
+        assetId: undefined,
+        assetLocalAmount: undefined,
         pushAssetAmount: null,
         virtualOpenMode: VIRTUAL_OPEN_MODE,
       });

@@ -166,13 +166,13 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     // listChannels() → RlnChannel[] — each: { channelId, fundingTxid, isUsable, capacitySat, localBalanceMsat, ... }
     addStep('wChanOpenChannel', 'running');
     const openResp = await nodeA.openChannel({
-      peerPubkeyAndOptAddr: peerUriB,
+      peerPubkey: peerUriB,
       capacitySat: 500000,
       pushMsat: 0,
-      public: false,
+      isPublic: false,
       withAnchors: true,
-      assetId: null,
-      assetAmount: null,
+      assetId: undefined,
+      assetLocalAmount: undefined,
     });
     const vOpenResp = wChanValidate('openChannel(nodeA)', openResp, { temporaryChannelId: 'nonempty-string' });
     const tmpId = String(openResp?.temporaryChannelId ?? '');
@@ -220,7 +220,7 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     // 12 — payment 1: nodeB creates invoice, nodeA pays
     // createLightningInvoice() → { lnInvoice: string, amountMsat?: number, expirySeconds: number }
     // payLightningInvoice() → { txid: string }
-    // getLightningSendRequest(hash) → status string: 'Pending' | 'Settled' | 'Failed'
+    // getLightningSendStatus(hash) → status string: 'Pending' | 'Succeeded' | 'Failed'
     addStep('wChanPayment1', 'running');
     const inv1 = await nodeB.createLightningInvoice({ amountSats: 3000, expirySeconds: 900, asset: { assetId: '', amount: 0 } });
     const vInv1 = wChanValidate('createLightningInvoice(nodeB)', inv1, { lnInvoice: 'nonempty-string' });
@@ -234,15 +234,15 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     const pay1Deadline = Date.now() + 60000;
     while (Date.now() < pay1Deadline) {
       await nodeA.syncWallet();
-      status1 = String((await nodeA.getLightningSendRequest(hash1)) ?? '');
+      status1 = String((await nodeA.getLightningSendStatus(hash1)) ?? '');
       console.log(`[wChan] payment1 status=${status1}`);
-      if (status1 === 'Settled') break;
+      if (status1 === 'Succeeded') break;
       if (status1 === 'Failed') throw new Error(`Payment1 failed: ${hash1}`);
       await sleep(2000);
     }
-    const vStatus1 = wChanValidate('getLightningSendRequest(nodeA) payment1', { status: status1 }, { status: 'nonempty-string' });
+    const vStatus1 = wChanValidate('getLightningSendStatus(nodeA) payment1', { status: status1 }, { status: 'nonempty-string' });
     addStep('wChanPayment1', 'success', { paymentHash: hash1,
-      _v: { invoice: { match: vInv1.match, fields: vInv1.fields }, pay: { match: vSend1.match, fields: vSend1.fields }, status: { value: status1, settled: status1 === 'Settled' } } });
+      _v: { invoice: { match: vInv1.match, fields: vInv1.fields }, pay: { match: vSend1.match, fields: vSend1.fields }, status: { value: status1, settled: status1 === 'Succeeded' } } });
 
     // 13 — restart nodeA (shutdown + reinit on same instance — no manager recreation needed)
     addStep('wChanRestartNodeA', 'running');
@@ -275,14 +275,14 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     const pay2Deadline = Date.now() + 60000;
     while (Date.now() < pay2Deadline) {
       await nodeA.syncWallet();
-      status2 = String((await nodeA.getLightningSendRequest(hash2)) ?? '');
+      status2 = String((await nodeA.getLightningSendStatus(hash2)) ?? '');
       console.log(`[wChan] payment2 status=${status2}`);
-      if (status2 === 'Settled') break;
+      if (status2 === 'Succeeded') break;
       if (status2 === 'Failed') throw new Error(`Payment2 failed: ${hash2}`);
       await sleep(2000);
     }
     addStep('wChanPayment2', 'success', { paymentHash: hash2,
-      _v: { invoice: { match: vInv2.match, fields: vInv2.fields }, pay: { match: vSend2.match, fields: vSend2.fields }, status: { value: status2, settled: status2 === 'Settled' } } });
+      _v: { invoice: { match: vInv2.match, fields: vInv2.fields }, pay: { match: vSend2.match, fields: vSend2.fields }, status: { value: status2, settled: status2 === 'Succeeded' } } });
 
     // 15 — issue RGB asset on nodeA (1000 units)
     // issueAssetNia() → AssetNIA { assetId, ticker, name, precision, issuedSupply, timestamp, addedAt, balance: { spendable, future, settled } }

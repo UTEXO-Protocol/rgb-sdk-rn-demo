@@ -199,13 +199,13 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     // validates the holder commitment correctly. (Previously it hardcoded push_value_msat=0.)
     addStep('wAsExtOpenChannel', 'running');
     await nodeA.openChannel({
-      peerPubkeyAndOptAddr: peerUriB,
+      peerPubkey: peerUriB,
       capacitySat: 100000,
       pushMsat: 3_500_000,
-      public: false,
+      isPublic: false,
       withAnchors: true,
       assetId,
-      assetAmount: 600,
+      assetLocalAmount: 600,
     });
 
     let fundingTxid = '';
@@ -257,9 +257,9 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     const pay1Deadline = Date.now() + 60000;
     while (Date.now() < pay1Deadline) {
       await nodeA.syncWallet();
-      const status = await nodeA.getLightningSendRequest(hash1);
+      const status = await nodeA.getLightningSendStatus(hash1);
       console.log(`[wAsExt] payment1 status=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Payment1 failed: ${hash1}`);
       await sleep(2000);
     }
@@ -293,9 +293,9 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     const pay2Deadline = Date.now() + 60000;
     while (Date.now() < pay2Deadline) {
       await nodeA.syncWallet();
-      const status = await nodeA.getLightningSendRequest(hash2);
+      const status = await nodeA.getLightningSendStatus(hash2);
       console.log(`[wAsExt] payment2 status=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Payment2 failed: ${hash2}`);
       await sleep(2000);
     }
@@ -380,13 +380,13 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     addStep('wAsExtRevOpenChannel', 'running');
     await nodeB.syncWallet();
     await nodeB.openChannel({
-      peerPubkeyAndOptAddr: peerUriA,
+      peerPubkey: peerUriA,
       capacitySat: 100000,
       pushMsat: 3_500_000,
-      public: false,
+      isPublic: false,
       withAnchors: true,
       assetId,
-      assetAmount: 100,
+      assetLocalAmount: 100,
     });
 
     let revFundingTxid = '';
@@ -434,9 +434,9 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     const revPayDeadline = Date.now() + 60000;
     while (Date.now() < revPayDeadline) {
       await nodeB.syncWallet();
-      const status = await nodeB.getLightningSendRequest(hashRev);
+      const status = await nodeB.getLightningSendStatus(hashRev);
       console.log(`[wAsExt] rev payment status=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Rev payment failed: ${hashRev}`);
       await sleep(2000);
     }
