@@ -24,7 +24,7 @@
  *   await lsp.receiveAsset({ assetId, amountSats, amountRgb }); // + on-chain send + settlement
  *   await lsp.waitForOutboundLiquidity(…);
  *   await lsp.payAddress({ address, amtMsat, asset: { assetId, assetAmount } });
- *   // Poll wallet.getLightningSendRequest(paymentHash) until Settled
+ *   // Poll wallet.getLightningSendStatus(paymentHash) until Settled
  *
  * Merchant never calls claimHodlInvoice for APay — LSP outbox + auto-claim handles delivery.
  */
@@ -541,9 +541,9 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           await wB.syncWallet();
           await wB.refreshWallet();
 
-          const status = pHash ? await wA.getLightningSendRequest(pHash) : 'Pending';
+          const status = pHash ? await wA.getLightningSendStatus(pHash) : 'Pending';
           setSendStatus(status ?? 'Pending');
-          addLog(`${buyerLabel} getLightningSendRequest: ${status}`);
+          addLog(`${buyerLabel} getLightningSendStatus: ${status}`);
 
           let balAfter = balBefore;
           const b1 = await wB.getAssetBalance(ASSET_ID).catch(() => null);
@@ -555,7 +555,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
             }
           }
 
-          const pays = await wB.listPaymentsRaw().catch(() => []);
+          const pays = await wB.listPayments().catch(() => []);
           const mp = pays.find(p => normHash(p.paymentHash) === normHash(pHash));
           if (mp) addLog(`${merchantLabel} inbound: ${mp.paymentType}/${mp.status}`, 'info');
 
@@ -568,12 +568,12 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           }
 
           const merchantOk = mp && ['succeeded', 'claimable'].includes(String(mp.status ?? '').toLowerCase());
-          if (status === 'Settled' && balAfter > balBefore) {
+          if (status === 'Succeeded' && balAfter > balBefore) {
             settled = true;
             addLog(`merchant received +${balAfter - balBefore} RGB`, 'success');
             break;
           }
-          if (status === 'Settled' && merchantOk) {
+          if (status === 'Succeeded' && merchantOk) {
             settled = true;
             addLog('buyer Settled + merchant inbound SUCCEEDED — APay complete ✓', 'success');
             break;
@@ -585,7 +585,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
 
         if (!settled) {
           throw new Error(
-            'Timeout — poll getLightningSendRequest until Settled; ensure merchant lsp.connect().',
+            'Timeout — poll getLightningSendStatus until Settled; ensure merchant lsp.connect().',
           );
         }
 

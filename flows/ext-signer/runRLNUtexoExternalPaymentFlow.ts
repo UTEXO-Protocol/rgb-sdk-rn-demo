@@ -195,13 +195,13 @@ export async function runRLNUtexoExternalPaymentFlow() {
     // nodeA opens asset channel to nodeB (600 units pushed, 100k sat)
     addStep('xPayOpenChannel', 'running');
     await nodeA.openChannel({
-      peerPubkeyAndOptAddr: peerUriB,
+      peerPubkey: peerUriB,
       capacitySat: 100000,
       pushMsat: 3_500_000,
-      public: true,
+      isPublic: true,
       withAnchors: true,
       assetId,
-      assetAmount: 600,
+      assetLocalAmount: 600,
     });
 
     let fundingTxid = '';
@@ -252,9 +252,9 @@ export async function runRLNUtexoExternalPaymentFlow() {
     const pay1Deadline = Date.now() + 60000;
     while (Date.now() < pay1Deadline) {
       await nodeA.syncWallet();
-      const status = await nodeA.getLightningSendRequest(hash1);
+      const status = await nodeA.getLightningSendStatus(hash1);
       console.log(`[xPay] inv1 sendStatus=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Invoice1 payment failed: ${hash1}`);
       await sleep(2000);
     }
@@ -269,9 +269,9 @@ export async function runRLNUtexoExternalPaymentFlow() {
     const pay2Deadline = Date.now() + 60000;
     while (Date.now() < pay2Deadline) {
       await nodeB.syncWallet();
-      const status = await nodeB.getLightningSendRequest(hash2);
+      const status = await nodeB.getLightningSendStatus(hash2);
       console.log(`[xPay] inv2 sendStatus=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Invoice2 payment failed: ${hash2}`);
       await sleep(2000);
     }
@@ -286,9 +286,9 @@ export async function runRLNUtexoExternalPaymentFlow() {
     const pay3Deadline = Date.now() + 60000;
     while (Date.now() < pay3Deadline) {
       await nodeA.syncWallet();
-      const status = await nodeA.getLightningSendRequest(hash3);
+      const status = await nodeA.getLightningSendStatus(hash3);
       console.log(`[xPay] inv3 sendStatus=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Invoice3 payment failed: ${hash3}`);
       await sleep(2000);
     }
@@ -303,9 +303,9 @@ export async function runRLNUtexoExternalPaymentFlow() {
     const pay4Deadline = Date.now() + 60000;
     while (Date.now() < pay4Deadline) {
       await nodeB.syncWallet();
-      const status = await nodeB.getLightningSendRequest(hash4);
+      const status = await nodeB.getLightningSendStatus(hash4);
       console.log(`[xPay] inv4 sendStatus=${status}`);
-      if (status === 'Settled') break;
+      if (status === 'Succeeded') break;
       if (status === 'Failed') throw new Error(`Invoice4 payment failed: ${hash4}`);
       await sleep(2000);
     }
@@ -363,7 +363,7 @@ export async function runRLNUtexoExternalPaymentFlow() {
     // RGB on-chain sends to nodeC (A sends 925, B sends 25)
     addStep('xPayRgbSendA', 'running');
     const invC1 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
-    await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeA.onchainSend({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
     await nodeC.refreshWallet();
@@ -373,7 +373,7 @@ export async function runRLNUtexoExternalPaymentFlow() {
 
     addStep('xPayRgbSendB', 'running');
     const invC2 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
-    await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeB.onchainSend({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
     await nodeC.refreshWallet();

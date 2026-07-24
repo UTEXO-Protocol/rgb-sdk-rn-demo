@@ -120,7 +120,7 @@ export async function runExtSignerOnchainSendFlow() {
     // nodeB → nodeA on-chain: nodeA (ext signer) does blindReceive, nodeB sends 500
     addStep('extOsSendToExt', 'running');
     const invA = await nodeA.blindReceive({ minConfirmations: 1 });
-    await nodeB.send({ invoice: invA.invoice, assetId, amount: 500, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeB.onchainSend({ invoice: invA.invoice, assetId, amount: 500, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeA.syncWallet();
     await nodeA.refreshWallet();
@@ -150,7 +150,7 @@ export async function runExtSignerOnchainSendFlow() {
     await nodeA.syncWallet();
     await nodeA.refreshWallet();
     const invB = await nodeB.blindReceive({ minConfirmations: 1 });
-    await nodeA.send({ invoice: invB.invoice, assetId, amount: 250, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeA.onchainSend({ invoice: invB.invoice, assetId, amount: 250, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeB.syncWallet();
     await nodeB.refreshWallet();

@@ -208,17 +208,17 @@ export async function runRlnUtexoVssFlow() {
       }
       await sleep(1000);
       console.log('[vss] openChannel: request', JSON.stringify({
-        peerPubkeyAndOptAddr: peerUriB,
+        peerPubkey: peerUriB,
         capacitySat: channelCapacitySat,
         pushMsat: 0,
-        public: true,
+        isPublic: true,
         withAnchors: true,
       }));
       const openResp = await wallet.openChannel({
-        peerPubkeyAndOptAddr: peerUriB,
+        peerPubkey: peerUriB,
         capacitySat: channelCapacitySat,
         pushMsat: 0,
-        public: true,
+        isPublic: true,
         withAnchors: true,
       });
       const tempChannelId = String(openResp?.temporaryChannelId ?? '');

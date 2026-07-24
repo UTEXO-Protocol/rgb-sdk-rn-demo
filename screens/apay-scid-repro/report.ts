@@ -1,0 +1,107 @@
+/**
+ * Shared markdown report builder for the SCID-alias JIT reproduction flows
+ * (regtest + signet). Keeps the root-cause write-up in one place.
+ */
+import type { ChannelSample, ReproVerdict } from './config';
+
+export interface ReportInput {
+  network: string;              // 'regtest' | 'signet (utexo)'
+  verdict: ReproVerdict;
+  pubkey: string;
+  lspPubkey: string;
+  assetId: string;
+  distinctChannels: number;
+  lspSideMax?: number;          // regtest only (LSP RLN daemon REST); omitted on signet
+  timeline: ChannelSample[];
+  rgbAtLsp: boolean;
+  delivered: boolean | null;
+  lastInvoiceStatus: string;
+  watchSeconds: number;
+}
+
+export function buildReport(d: ReportInput): string {
+  const now = new Date().toISOString();
+  const verdictLine =
+    d.verdict === 'reproduced' ? '🔴 REPRODUCED — RGB stranded at the LSP; JIT channel force-closed (scid_alias)'
+      : d.verdict === 'not-reproduced' ? '🟢 NOT reproduced — the LSP delivered the RGB to the receiver'
+      : '⚪️ Inconclusive — the RGB never reached the LSP (infra problem, not #49)';
+
+  const rows = d.timeline.length === 0
+    ? '_(no channel to the LSP was ever observed on the receiver side)_'
+    : ['| t (s) | channelId | status | usable | cap (sat) |',
+       '|------:|-----------|--------|:------:|----------:|',
+       ...d.timeline.map(s =>
+         `| ${(s.atMs / 1000).toFixed(1)} | \`${s.channelId.slice(0, 12)}…\` | ${s.status} | ${s.isUsable ? '✅' : '❌'} | ${s.capacitySat} |`),
+      ].join('\n');
+
+  const lspSide = d.lspSideMax == null ? '' : ` (LSP-side peak to us: ${d.lspSideMax})`;
+
+  return `# Issue #49 reproduction report — scid_alias JIT channel force-close
+
+- **Generated:** ${now}
+- **Verdict:** ${verdictLine}
+- **Network:** ${d.network}
+- **Wallet config:** \`enableVirtualChannelsV0: true\`, \`virtualPeerPubkeys: [LSP]\` — identical to the issue report (virtual channels do NOT prevent the bug)
+- **Receiver pubkey:** \`${d.pubkey}\`
+- **LSP pubkey:** \`${d.lspPubkey || '(unknown)'}\`
+- **Asset:** \`${d.assetId}\`
+
+## Summary
+
+The receiver requested inbound RGB via \`lightning_receive\`, and OUR faucet RLN node paid the
+RGB invoice (sent the asset to the LSP).
+
+- RGB reached the LSP: **${d.rgbAtLsp ? 'yes' : 'no'}**
+- RGB delivered to the receiver: **${d.delivered ? 'yes' : 'no'}** (LN invoice status: \`${d.lastInvoiceStatus || 'Pending'}\`)
+- Distinct channels the LSP opened toward the receiver: **${d.distinctChannels}**${lspSide}
+
+${d.verdict === 'reproduced'
+  ? `The RGB settled at the LSP but was **never delivered**. To deliver it the LSP opened a JIT
+channel — but a PLAIN one (channel_type \`[0,16]\` = static_remote_key only, no scid_privacy),
+i.e. without \`virtual_open_mode: "trusted_no_broadcast"\`. The receiver is configured for virtual
+channels and trusts this peer, so its accept handler REQUIRES scid_privacy and force-closes the
+plain channel with \`unsupported_scid_alias\`. No usable channel is ever established and **the asset
+is stranded at the LSP** — exactly the #49 symptom.`
+  : d.verdict === 'not-reproduced'
+    ? `The LSP opened a VIRTUAL channel (\`virtual_open_mode: "trusted_no_broadcast"\` → scid_privacy),
+which the receiver accepts, so the RGB was delivered. #49 only fires when the LSP opens a PLAIN
+channel to a virtual-mode receiver.`
+    : `The faucet RGB never reached the LSP, so nothing downstream can be concluded about #49. Check
+the faucet inventory and RGB proxy reachability.`}
+
+## Channel lifecycle timeline (receiver side)
+
+${rows}
+
+## Root cause (rgb-lightning-node source)
+
+Open-mode mismatch — \`src/ldk.rs:2573-2628\` (accept) + \`src/routes.rs:4118,4299\` (open):
+
+- With \`enable_virtual_channels_v0 = true\` and a trusted peer, the receiver ACCEPTS an inbound
+  channel only if \`channel_type.supports_scid_privacy()\`; otherwise it force-closes with
+  \`unsupported_scid_alias\`.
+- The opener only sets scid_privacy when it opens with \`virtual_open_mode = "trusted_no_broadcast"\`
+  (\`negotiate_scid_privacy: is_virtual_open\`).
+
+So the receiver DEMANDS a virtual (scid_privacy) channel and the LSP opened a PLAIN one. The error
+name is misleading: it means "I only accept scid_privacy/virtual channels from you, and this isn't
+one." The issue's own summary is inverted.
+
+## How to confirm the exact LDK reason
+
+The app node's public API surfaces only the behavioural signature (RGB stranded, channel never
+usable). To see the literal rejection, read the LSP RLN node log for the OpenChannel /
+Force-closing lines (\`channel_type: Some([0, 16])\` … \`unsupported_scid_alias\`).
+
+## Fix options
+
+1. **utexo-lsp** — open the JIT channel with \`virtual_open_mode: "trusted_no_broadcast"\` so it
+   matches what a virtual-channel wallet expects.
+2. **rgb-lightning-node** — let the receiver accept plain channels from a trusted peer instead of
+   force-closing.
+3. **rgb-sdk-rn** — don't enable virtual channels toward an LSP that opens plain channels, or
+   expose the choice to integrators.
+
+_Generated by the in-app APay · SCID-alias JIT reproduction flow (screens/apay-scid-repro*)._
+`;
+}

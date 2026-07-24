@@ -84,8 +84,8 @@ export async function logSettlementDiagnostics(
 ): Promise<void> {
   try {
     const [buyerPays, merchantPays, buyerChans, merchantChans, peers] = await Promise.all([
-      wA.listPaymentsRaw().catch(() => []),
-      wB.listPaymentsRaw().catch(() => []),
+      wA.listPayments().catch(() => []),
+      wB.listPayments().catch(() => []),
       wA.listChannels().catch(() => []),
       wB.listChannels().catch(() => []),
       wB.listPeers().catch(() => []),

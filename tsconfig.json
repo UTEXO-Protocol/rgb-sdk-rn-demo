@@ -5,6 +5,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@utexo/rgb-sdk-core/conformance": [
+        "../rgb-sdk-core/dist/conformance/index.d.ts"
       ]
     }
   },

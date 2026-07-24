@@ -415,25 +415,25 @@ export function useApayFlow() {
           await wB.syncWallet();
           await wB.refreshWallet();
 
-          const status = pHash ? await wA.getLightningSendRequest(pHash) : 'Pending';
+          const status = pHash ? await wA.getLightningSendStatus(pHash) : 'Pending';
           setSendStatus(status ?? 'Pending');
-          addLog(`${buyerLabel} getLightningSendRequest: ${status}`);
+          addLog(`${buyerLabel} getLightningSendStatus: ${status}`);
 
           let balAfter = balBefore;
           const b1 = await wB.getAssetBalance(ASSET_ID).catch(() => null);
           if (b1) { balAfter = Number(b1.offchainOutbound ?? 0); setFinalBalB(b1); }
 
-          const pays = await wB.listPaymentsRaw().catch(() => []);
+          const pays = await wB.listPayments().catch(() => []);
           const mp = pays.find(p => normHash(p.paymentHash) === normHash(pHash));
           if (mp) addLog(`${merchantLabel} inbound: ${mp.paymentType}/${mp.status}`, 'info');
 
           const merchantOk = mp && ['succeeded', 'claimable'].includes(String(mp.status ?? '').toLowerCase());
-          if (status === 'Settled' && balAfter > balBefore) {
+          if (status === 'Succeeded' && balAfter > balBefore) {
             settled = true;
             addLog(`merchant received +${balAfter - balBefore} RGB`, 'success');
             break;
           }
-          if (status === 'Settled' && merchantOk) {
+          if (status === 'Succeeded' && merchantOk) {
             settled = true;
             addLog('buyer Settled + merchant inbound SUCCEEDED — APay complete ✓', 'success');
             break;
@@ -442,7 +442,7 @@ export function useApayFlow() {
         }
 
         if (!settled) {
-          throw new Error('Timeout — poll getLightningSendRequest until Settled; ensure merchant lsp.connect().');
+          throw new Error('Timeout — poll getLightningSendStatus until Settled; ensure merchant lsp.connect().');
         }
 
         addLog('LSP claimed buyer HTLC — APay complete ✓', 'success');

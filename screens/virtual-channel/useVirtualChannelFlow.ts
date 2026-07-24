@@ -198,13 +198,13 @@ export function useVirtualChannelFlow() {
 
       req('nodeA.openChannel', { capacitySat: CHANNEL_CAPACITY_SAT, assetAmount: CHANNEL_ASSET_AMOUNT, virtualOpenMode: VIRTUAL_OPEN_MODE });
       const openResp = await wA.openChannel({
-        peerPubkeyAndOptAddr: peerUri,
+        peerPubkey: peerUri,
         capacitySat: CHANNEL_CAPACITY_SAT,
         pushMsat: 0,
-        public: false,
+        isPublic: false,
         withAnchors: true,
         assetId: aid,
-        assetAmount: CHANNEL_ASSET_AMOUNT,
+        assetLocalAmount: CHANNEL_ASSET_AMOUNT,
         pushAssetAmount: null,
         virtualOpenMode: VIRTUAL_OPEN_MODE,
       });

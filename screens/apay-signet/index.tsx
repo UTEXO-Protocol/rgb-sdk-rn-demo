@@ -41,7 +41,7 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
   const flow = useApayFlow();
 
   const hodlStatus = flow.merchantOnline
-    ? (flow.sendStatus === 'Settled' ? 'Settled ✓' : flow.sendStatus || 'Settling…')
+    ? (flow.sendStatus === 'Succeeded' ? 'Settled ✓' : flow.sendStatus || 'Settling…')
     : flow.phase === 'send' || flow.phase === 'settle'
       ? flow.phase === 'settle' ? 'Merchant online — settling' : 'HTLC held — merchant offline'
       : 'Pending';

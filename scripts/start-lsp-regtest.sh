@@ -10,9 +10,15 @@
 # Run once before starting the demo app.
 # Outputs .env.lsp.local with LSP_ASSET_ID, LSP_PEER_PUBKEY, etc.
 #
+# The regtest docker services (bitcoind, electrs, proxy) are started here if
+# they are not already up — no separate `./regtest.sh start` needed.
+#
 # Usage:
 #   ./scripts/start-lsp-regtest.sh
-#   ./scripts/start-lsp-regtest.sh stop     # kill daemons
+#   VSS=1 ./scripts/start-lsp-regtest.sh    # …plus vss-server on :8181 (NOT
+#                                           # :8081 — Metro owns that port);
+#                                           # adds VSS_URL to e2e-fixtures.json
+#   ./scripts/start-lsp-regtest.sh stop     # kill daemons (docker stays up)
 
 set -euo pipefail
 
@@ -31,6 +37,12 @@ FAUCET_PORT=3008
 FAUCET_PEER_PORT=9740
 UTEXO_PORT=8080
 BRIDGE_PORT=5000
+# vss-server (root compose, --profile vss; VSS=1 opt-in). NOT :8081 as in the
+# web stack — Metro owns that port here, so the container is republished on
+# 8181 via scripts/compose.vss-rn.yaml.
+VSS_PORT="${VSS_PORT:-8181}"
+VSS_URL="http://127.0.0.1:$VSS_PORT/vss"
+VSS_OVERRIDE="$SCRIPT_DIR/compose.vss-rn.yaml"
 
 PASSWORD="password123"
 BTC_USER="user"
@@ -109,6 +121,8 @@ if [ "${1:-}" = "stop" ]; then
   pkill -f "go run \."                       2>/dev/null || true
   pkill -f "utexo-lsp"                       2>/dev/null || true
   pkill -f "local-node-bridge"               2>/dev/null || true
+  # A fixture describing a torn-down stack would send e2e at dead endpoints.
+  rm -f "$DEMO_DIR/e2e-fixtures.json"
   log "Done."
   exit 0
 fi
@@ -125,10 +139,49 @@ log ""
 command -v go >/dev/null || die "go not found — install Go"
 command -v jq >/dev/null || die "jq not found — brew install jq"
 
-# Check regtest services are running
+# ── regtest services (bitcoind + electrs + proxy, optionally vss) ────────────
+#
+# Started here rather than demanded of the caller — but only when they are
+# genuinely down: `regtest.sh start` begins with `down -v` and deletes the
+# data dirs, so calling it on a live stack throws away the chain and every
+# wallet on it. A docker that cannot be queried is therefore an error, not a
+# reason to assume "not running".
 cd "$RGBLN_REPO"
-docker compose ps --services --status running | grep -q bitcoind || die "regtest not running — start with: ./regtest.sh start"
-log "Regtest services confirmed running"
+
+regtest_running() { # 0 = up, 1 = down, 2 = docker unreachable
+  local out
+  out="$(docker compose ps --services --status running 2>/dev/null)" || return 2
+  grep -qx bitcoind <<<"$out"
+}
+
+regtest_running && rc=0 || rc=$?
+case "$rc" in
+  0) log "Regtest services already running" ;;
+  1)
+    log "Regtest not running — starting it (./regtest.sh start, fresh chain) …"
+    # VSS is deliberately NOT passed through: regtest.sh publishes vss-server on
+    # :8081, which Metro owns here. The block below starts it on $VSS_PORT.
+    VSS= ./regtest.sh start || die "./regtest.sh start failed"
+    log "Regtest services started"
+    ;;
+  *) die "could not query docker compose in $RGBLN_REPO — is Docker running?" ;;
+esac
+
+# The vss profile is part of the same compose project but not of a plain
+# `regtest.sh start`, so it is added separately either way.
+if [ "${VSS:-}" = "1" ]; then
+  [ -f "$VSS_OVERRIDE" ] || die "missing compose overlay: $VSS_OVERRIDE"
+  log "Starting vss-server (profile vss) on :$VSS_PORT …"
+  VSS_PORT="$VSS_PORT" docker compose -f compose.yaml -f "$VSS_OVERRIDE" \
+    --profile vss up -d vss-server || die "failed to start vss-server"
+  # vss-server has no GET health route — any HTTP response means it is listening.
+  vss_deadline=$((SECONDS + 120))
+  while [ "$(curl -s -o /dev/null -w '%{http_code}' "$VSS_URL/getObject" 2>/dev/null || echo 000)" = "000" ]; do
+    [ $SECONDS -lt $vss_deadline ] || die "vss-server did not come up on :$VSS_PORT within 120s"
+    sleep 2
+  done
+  log "vss-server ready at $VSS_URL"
+fi
 
 # ── local-node-bridge (mine/send helper for demo app) ─────────────────────────
 
@@ -216,7 +269,9 @@ done
 # ── get pubkeys ───────────────────────────────────────────────────────────────
 
 LSP_PUBKEY=$(rln_get "$LSP_PORT" "/nodeinfo" | jq -r '.pubkey')
-log "LSP pubkey: $LSP_PUBKEY"
+FAUCET_PUBKEY=$(rln_get "$FAUCET_PORT" "/nodeinfo" | jq -r '.pubkey')
+log "LSP pubkey:    $LSP_PUBKEY"
+log "Faucet pubkey: $FAUCET_PUBKEY"
 
 # ── fund both nodes ───────────────────────────────────────────────────────────
 
@@ -379,6 +434,47 @@ EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
 log "LSP regtest vars written to $ENV_LOCAL (single env-file workflow)"
 
+# ── e2e fixtures — machine-readable, additive to the env files above ──────────
+# Consumed by the e2e suites; same shape as the web script's fixture
+# (rgb-sdk-web-demo/scripts/start-lsp-web.sh). The emulator reaches every URL
+# via the adb reverse forwards set earlier, so 127.0.0.1 stays valid on-device.
+FIXTURES="$DEMO_DIR/e2e-fixtures.json"
+# Optional keys are omitted, not emptied (§6.0k): a VSS_URL present but blank
+# would read as "configured and broken" rather than "not enabled".
+VSS_URL_VALUE=""
+[ "${VSS:-}" = "1" ] && VSS_URL_VALUE="$VSS_URL"
+jq -n \
+  --arg vssUrl "$VSS_URL_VALUE" \
+  --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg assetId "$ASSET_ID" \
+  --arg lspPubkey "$LSP_PUBKEY" \
+  --arg faucetPubkey "$FAUCET_PUBKEY" \
+  --arg lspUrl "http://127.0.0.1:$LSP_PORT" \
+  --arg faucetUrl "http://127.0.0.1:$FAUCET_PORT" \
+  --arg utexoLspUrl "http://127.0.0.1:$UTEXO_PORT" \
+  --arg bridgeUrl "http://127.0.0.1:$BRIDGE_PORT" \
+  --arg indexerUrl "$INDEXER_URL" \
+  --arg proxyEndpoint "$PROXY_ENDPOINT" \
+  --argjson lspPeerPort "$LSP_PEER_PORT" \
+  --argjson faucetPeerPort "$FAUCET_PEER_PORT" \
+  '{
+    generatedAt: $generatedAt,
+    platform: "rn",
+    ASSET_ID: $assetId,
+    LSP_PUBKEY: $lspPubkey,
+    FAUCET_PUBKEY: $faucetPubkey,
+    LSP_URL: $lspUrl,
+    FAUCET_URL: $faucetUrl,
+    UTEXO_LSP_URL: $utexoLspUrl,
+    BRIDGE_URL: $bridgeUrl,
+    INDEXER_URL: $indexerUrl,
+    PROXY_ENDPOINT: $proxyEndpoint,
+    LSP_PEER_PORT: $lspPeerPort,
+    FAUCET_PEER_PORT: $faucetPeerPort
+  } + (if $vssUrl == "" then {} else { VSS_URL: $vssUrl } end)' \
+  > "$FIXTURES"
+log "e2e fixtures written to $FIXTURES"
+
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  LSP regtest environment ready"
@@ -386,9 +482,11 @@ log "━━━━━━━━━━━━━━━━━━━━━━━━━
 log "  utexo-lsp:   http://127.0.0.1:$UTEXO_PORT"
 log "  LSP daemon:  http://127.0.0.1:$LSP_PORT  (peer :$LSP_PEER_PORT)"
 log "  Faucet:      http://127.0.0.1:$FAUCET_PORT  (peer :$FAUCET_PEER_PORT)"
+[ "${VSS:-}" = "1" ] && log "  VSS:         $VSS_URL"
 log "  Asset ID:    $ASSET_ID"
 log "  LSP pubkey:  $LSP_PUBKEY"
 log "  Env file:    $ENV_OUT"
+log "  Fixtures:    $FIXTURES"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  Start demo app, select Regtest in LSP tab"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
