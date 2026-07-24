@@ -1,0 +1,14 @@
+# vss-server port override for the rn stack.
+#
+# The shared compose file (rgb-lightning-node/compose.yaml) publishes
+# vss-server on :8081 — which is **Metro's port** in this demo, so the
+# container cannot bind and `regtest.sh start`'s own VSS=1 path fails with
+# "address already in use". This overlay republishes it on $VSS_PORT (8181 by
+# default); `!override` replaces the ports list instead of appending to it.
+#
+# Used only by scripts/start-lsp-regtest.sh — the web stack has no such clash
+# and keeps :8081.
+services:
+  vss-server:
+    ports: !override
+      - "${VSS_PORT:-8181}:8080"

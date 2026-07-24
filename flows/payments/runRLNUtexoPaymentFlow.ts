@@ -369,7 +369,7 @@ export async function runRLNUtexoPaymentFlow() {
     // RGB on-chain sends to nodeC (A sends 925, B sends 25)
     addStep('wPayRgbSendA', 'running');
     const invC1 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
-    await nodeA.send({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeA.onchainSend({ invoice: invC1.invoice, assetId, amount: 925, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
     await nodeC.refreshWallet();
@@ -379,7 +379,7 @@ export async function runRLNUtexoPaymentFlow() {
 
     addStep('wPayRgbSendB', 'running');
     const invC2 = await nodeC.blindReceive({ minConfirmations: 1, durationSeconds: 3600 });
-    await nodeB.send({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeB.onchainSend({ invoice: invC2.invoice, assetId, amount: 25, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeC.syncWallet();
     await nodeC.refreshWallet();

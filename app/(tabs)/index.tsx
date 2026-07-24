@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import sdkPkg from '@utexo/rgb-sdk-rn/package.json';
 
 import { AppColors } from '@/constants/theme';
 
@@ -195,7 +194,7 @@ export default function DocsScreen() {
           <View style={styles.badgeRow}>
             <VersionBadge
               label="package"
-              value={`${sdkPkg.name}@${sdkPkg.version}`}
+              value="@utexo/rgb-sdk-rn (local)"
               accent
             />
             {Platform.OS === 'android' && (

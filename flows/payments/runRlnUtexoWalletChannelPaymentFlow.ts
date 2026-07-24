@@ -320,7 +320,7 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     // listOnchainTransfers(assetId) → Transfer[] — each: { kind, status, txid?, amount, assetId, ... }
     // listAssets() → ListAssets { nia?: AssetNIA[], cfa?: AssetCFA[], uda?: AssetUDA[] }
     addStep('wChanSendWitness', 'running');
-    const sendWitness = await nodeA.send({
+    const sendWitness = await nodeA.onchainSend({
       invoice: witnessInvoice,
       assetId,
       amount: 300,
@@ -329,7 +329,7 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
       minConfirmations: 1,
       witnessData: { amountSat: 1000 },
     });
-    const vSendWitness = wChanValidate('send(nodeA, witness)', sendWitness, { txid: 'nonempty-string', batchTransferIdx: 'number' });
+    const vSendWitness = wChanValidate('onchainSend(nodeA, witness)', sendWitness, { txid: 'nonempty-string', batchTransferIdx: 'number' });
     await mine(1);
     await nodeA.syncWallet();
     await nodeB.syncWallet();
@@ -372,7 +372,7 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
     // before starting the next colored send. Remove when switching back to Electrum.
     await waitForAssetSpendable(nodeA, assetId, 200, { mine, attempts: 30, delayMs: 1000, label: 'wChan nodeA' });
     addStep('wChanSendBlind', 'running');
-    const sendBlind = await nodeA.send({
+    const sendBlind = await nodeA.onchainSend({
       invoice: blindInvoice,
       assetId,
       amount: 200,
@@ -380,7 +380,7 @@ export async function runRlnUtexoWalletChannelPaymentFlow() {
       feeRate: 1,
       minConfirmations: 1,
     });
-    const vSendBlind = wChanValidate('send(nodeA, blind)', sendBlind, { txid: 'nonempty-string', batchTransferIdx: 'number' });
+    const vSendBlind = wChanValidate('onchainSend(nodeA, blind)', sendBlind, { txid: 'nonempty-string', batchTransferIdx: 'number' });
     await mine(1);
     await nodeA.syncWallet();
     await nodeB.syncWallet();

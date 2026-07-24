@@ -489,7 +489,7 @@ export async function runRlnUtexoWalletAssetChannelExtSignerFlow() {
     // TODO iteration 2: nodeB RGB on-chain sends 150 back to nodeA
     addStep('wAsExtRgbSendBtoA', 'running');
     const invA = await nodeA.blindReceive({ minConfirmations: 1 });
-    await nodeB.send({ invoice: invA.invoice, assetId, amount: 150, donation: true, feeRate: 1, minConfirmations: 1 });
+    await nodeB.onchainSend({ invoice: invA.invoice, assetId, amount: 150, donation: true, feeRate: 1, minConfirmations: 1 });
     await mine(1);
     await nodeA.syncWallet();
     await nodeA.refreshWallet();

@@ -598,7 +598,7 @@ export default function UtexoScreen() {
         res('TEMP nodeB.blindReceive', { recipientId: String(invOnchain.recipientId).slice(0, 20) + '…' });
 
         req('TEMP nodeA.send', { amount: 100, assetId: assetId.slice(0, 16) + '…' });
-        await wA.send({ invoice: invOnchain.invoice, assetId, amount: 100, donation: true, feeRate: 1, minConfirmations: 1 });
+        await wA.onchainSend({ invoice: invOnchain.invoice, assetId, amount: 100, donation: true, feeRate: 1, minConfirmations: 1 });
         res('TEMP nodeA.send');
 
         await mine(1);

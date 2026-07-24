@@ -38,8 +38,8 @@ export function readEnv(name: string): string | null {
 
 export function buildUtexoConfig() {
   const network = (process.env.EXPO_PUBLIC_UTEXO_NETWORK?.trim() || 'utexo') as any;
-  const indexerUrl = process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() ?? 'https://esplora-api.utexo.com';
-  const proxyEndpoint = process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() ?? 'rpcs://rgb-proxy-utexo.utexo.com/json-rpc';
+  const indexerUrl = process.env.EXPO_PUBLIC_UTEXO_INDEXER_URL?.trim() || 'https://esplora-api.utexo.com';
+  const proxyEndpoint = process.env.EXPO_PUBLIC_UTEXO_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy.utexo.com/json-rpc';
   const gossipRgsServerUrl = process.env.EXPO_PUBLIC_UTEXO_GOSSIP_RGS_URL?.trim() || null;
 
   return {

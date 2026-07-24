@@ -45,3 +45,6 @@ app-example
 # generated native folders
 /ios
 /android
+
+# stack logs written by scripts/start-lsp-*.sh
+logs/
