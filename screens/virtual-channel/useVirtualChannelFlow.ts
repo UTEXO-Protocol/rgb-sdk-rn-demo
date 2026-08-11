@@ -16,10 +16,11 @@ import { mine, sendToAddress } from '@/utils/wallet-flow';
 import { createWallet, PasswordRLNSigner, UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
 import {
-  CHANNEL_ASSET_AMOUNT, CHANNEL_CAPACITY_SAT, CHANNEL_TIMEOUT_S,
+  CHANNEL_ASSET_AMOUNT, CHANNEL_CAPACITY_SAT, CHANNEL_CLOSE_TIMEOUT_S, CHANNEL_TIMEOUT_S,
+  CLIENT_OPEN_CAPACITY_SAT, CLIENT_OPEN_TIMEOUT_S,
   PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT, PAYMENT_TIMEOUT_S, POLL_INTERVAL_S,
   VIRTUAL_OPEN_MODE, REGTEST_UNLOCK, sleep, short, satStr,
-  type LogEntry, type Phase,
+  type LogEntry, type Phase, type ReopenOutcome, type AcceptOutcome,
 } from './config';
 
 export function useVirtualChannelFlow() {
@@ -39,9 +40,21 @@ export function useVirtualChannelFlow() {
   const [balA,      setBalA]      = useState<any>(null);
   const [balB,      setBalB]      = useState<any>(null);
   const [errorMsg,  setErrorMsg]  = useState('');
+  const [closeConfirmed, setCloseConfirmed] = useState(false);
+  const [reopenOutcome,  setReopenOutcome]  = useState<ReopenOutcome>('pending');
+  const [reopenErrorMsg, setReopenErrorMsg] = useState('');
+  const [reopenChanId,   setReopenChanId]   = useState('');
+  const [btcChannelOutcome, setBtcChannelOutcome] = useState<ReopenOutcome>('pending');
+  const [btcChannelError,  setBtcChannelError]  = useState('');
+  const [btcChannelId,     setBtcChannelId]     = useState('');
+  const [pubkeyC,          setPubkeyC]          = useState('');
+  const [clientOpenOutcome, setClientOpenOutcome] = useState<AcceptOutcome>('pending');
+  const [clientOpenError,   setClientOpenError]   = useState('');
+  const [clientOpenChanId,  setClientOpenChanId]  = useState('');
 
   const walletARef = useRef<UTEXOWallet | null>(null);
   const walletBRef = useRef<UTEXOWallet | null>(null);
+  const walletCRef = useRef<UTEXOWallet | null>(null);
   const abortRef   = useRef(false);
 
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
@@ -56,6 +69,9 @@ export function useVirtualChannelFlow() {
     setAssetId(''); setChanA(null); setChanB(null);
     setInvoiceAB(''); setInvoiceBA(''); setStatusAB(''); setStatusBA('');
     setBalA(null); setBalB(null); setErrorMsg('');
+    setCloseConfirmed(false); setReopenOutcome('pending'); setReopenErrorMsg(''); setReopenChanId('');
+    setBtcChannelOutcome('pending'); setBtcChannelError(''); setBtcChannelId('');
+    setPubkeyC(''); setClientOpenOutcome('pending'); setClientOpenError(''); setClientOpenChanId('');
 
     const req = (label: string, p?: Record<string, any>) =>
       addLog(`→ ${label}${p ? '  ' + Object.entries(p).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''}`);
@@ -239,6 +255,40 @@ export function useVirtualChannelFlow() {
       else addLog('Node B channel not yet visible — continuing', 'info');
       addLog(`Channel open ✓  mode=${nodeAChan.virtualOpenMode ?? 'default'}  localAsset=${nodeAChan.assetLocalAmount ?? '?'}`, 'success');
 
+      // ── Second virtual channel attempt — BTC-only, same peer ─────────────────
+      // virtual_channel_add_intent() (ldk.rs:777-802) caps virtual sessions at ONE per peer_id,
+      // asset-agnostic — the RGB channel above already occupies that slot, so this is expected
+      // to be rejected the same way a same-asset reopen would be.
+      setPhase('open_btc_channel');
+
+      addLog('Attempting a 2nd virtual channel to the same peer (BTC-only, no assetId) — expect rejection: one virtual channel per peer pair, regardless of asset.');
+      req('nodeA.openChannel (BTC-only, same peer)', { capacitySat: CHANNEL_CAPACITY_SAT, virtualOpenMode: VIRTUAL_OPEN_MODE });
+      try {
+        const btcOpenResp = await wA.openChannel({
+          peerPubkey: peerUri,
+          capacitySat: CHANNEL_CAPACITY_SAT,
+          pushMsat: 0,
+          isPublic: false,
+          withAnchors: true,
+          virtualOpenMode: VIRTUAL_OPEN_MODE,
+        });
+        const btcTmpId = String(btcOpenResp?.temporaryChannelId ?? '');
+        setBtcChannelOutcome('succeeded');
+        setBtcChannelId(btcTmpId);
+        res('nodeA.openChannel (BTC-only)', { tmpChanId: short(btcTmpId, 16) });
+        addLog('⚠ BTC-only channel opened successfully — one-virtual-channel-per-peer limit did not apply here (unexpected)', 'success');
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        setBtcChannelError(msg);
+        if (msg.toLowerCase().includes('already exists for this peer pair')) {
+          setBtcChannelOutcome('blocked');
+          addLog(`Confirmed: BTC-only open rejected — "${msg}" (one virtual channel per peer, regardless of asset — ldk.rs:793-802)`, 'success');
+        } else {
+          setBtcChannelOutcome('error');
+          addLog(`BTC-only open failed with an unexpected error: ${msg}`, 'error');
+        }
+      }
+
       // ── Snapshot initial offchain balances ───────────────────────────────────
       await wA.syncWallet(); await wB.syncWallet();
       const initBalA = await wA.getAssetBalance(aid);
@@ -279,11 +329,11 @@ export function useVirtualChannelFlow() {
           const st = String(await wB.invoiceStatus(invoiceABStr) ?? 'Pending');
           setStatusAB(st);
           addLog(`A→B invoice: ${st}`);
-          if (st === 'SUCCEEDED') { settledAB = true; break; }
-          if (st === 'FAILED' || st === 'CANCELLED') throw new Error(`A→B invoice ${st}`);
+          if (st === 'Succeeded') { settledAB = true; break; }
+          if (st === 'Failed' || st === 'Cancelled') throw new Error(`A→B invoice ${st}`);
         } catch (e: any) {
           const msg = e?.message ?? String(e);
-          if (msg.includes('FAILED') || msg.includes('CANCELLED')) throw e;
+          if (msg.includes('Failed') || msg.includes('Cancelled')) throw e;
           addLog(`invoiceStatus error: ${msg}`);
         }
       }
@@ -339,11 +389,11 @@ export function useVirtualChannelFlow() {
           const st = String(await wA.invoiceStatus(invoiceBAStr) ?? 'Pending');
           setStatusBA(st);
           addLog(`B→A invoice: ${st}`);
-          if (st === 'SUCCEEDED') { settledBA = true; break; }
-          if (st === 'FAILED' || st === 'CANCELLED') throw new Error(`B→A invoice ${st}`);
+          if (st === 'Succeeded') { settledBA = true; break; }
+          if (st === 'Failed' || st === 'Cancelled') throw new Error(`B→A invoice ${st}`);
         } catch (e: any) {
           const msg = e?.message ?? String(e);
-          if (msg.includes('FAILED') || msg.includes('CANCELLED')) throw e;
+          if (msg.includes('Failed') || msg.includes('Cancelled')) throw e;
           addLog(`invoiceStatus error: ${msg}`);
         }
       }
@@ -362,6 +412,195 @@ export function useVirtualChannelFlow() {
         addLog('nodeB offchain balance restored to initial ✓', 'success');
       }
 
+      // ── Cooperative close (repro: issue-virtual-session-leak.md) ────────────
+      setPhase('close_channel');
+
+      const channelId = String(nodeAChan?.channelId ?? nodeAChan?.channel_id ?? '');
+      if (!channelId) throw new Error('Could not resolve channelId for close');
+
+      // Pre-check: rgb-lightning-node's virtual_channel_ensure_no_client_value() (ldk.rs:864-943)
+      // rejects the close unless the COUNTERPARTY's balance is exactly zero, both BTC and asset —
+      // it does not care about our own balance. Verify that here instead of finding out from a
+      // "counterparty BTC balance floor is N sat" error at close time, which would otherwise be
+      // indistinguishable from a real close failure in this repro.
+      addLog('Checking counterparty (nodeB) balance before close — must be exactly zero …');
+      await wA.syncWallet().catch(() => {});
+      const preCloseChans = (await wA.listChannels()) ?? [];
+      const preCloseChan = (preCloseChans as any[]).find(c => (c.channelId ?? c.channel_id) === channelId);
+      const remoteBalanceMsat = Number(preCloseChan?.remoteBalanceMsat ?? preCloseChan?.remote_balance_msat ?? NaN);
+      const assetRemoteAmount = Number(preCloseChan?.assetRemoteAmount ?? preCloseChan?.asset_remote_amount ?? NaN);
+      addLog(`nodeB balance as seen by nodeA: ${Number.isFinite(remoteBalanceMsat) ? remoteBalanceMsat + ' msat' : 'n/a'}  ${Number.isFinite(assetRemoteAmount) ? assetRemoteAmount + ' VTST' : 'n/a'}`);
+      if (Number.isFinite(remoteBalanceMsat) && remoteBalanceMsat !== 0) {
+        throw new Error(`Close would be rejected: counterparty BTC balance is ${remoteBalanceMsat} msat, not 0 (virtual_channel_ensure_no_client_value requires counterparty_balance_sats_floor == 0). The A→B/B→A round trip did not fully return value to nodeA.`);
+      }
+      if (Number.isFinite(assetRemoteAmount) && assetRemoteAmount !== 0) {
+        throw new Error(`Close would be rejected: counterparty asset balance is ${assetRemoteAmount} VTST, not 0 (virtual_channel_ensure_no_client_value requires remote_rgb_amount == 0).`);
+      }
+      addLog('Counterparty balance confirmed zero ✓ — close should be accepted', 'success');
+
+      req('nodeA.closeChannel (cooperative)', { channelId: short(channelId, 16), force: false });
+      await wA.closeChannel(channelId, pkB, false);
+      res('nodeA.closeChannel', { channelId: short(channelId, 16) });
+
+      addLog(`Confirming channel is actually gone (timeout ${CHANNEL_CLOSE_TIMEOUT_S}s) …`);
+      const closeDeadline = Date.now() + CHANNEL_CLOSE_TIMEOUT_S * 1000;
+      let goneFromA = false;
+      let goneFromB = false;
+      while (Date.now() < closeDeadline) {
+        if (abortRef.current) throw new Error('Cancelled');
+        await sleep(POLL_INTERVAL_S * 1000);
+        await wA.syncWallet().catch(() => {});
+        await wB.syncWallet().catch(() => {});
+        try {
+          const chansA = (await wA.listChannels()) ?? [];
+          const chansB = (await wB.listChannels()) ?? [];
+          goneFromA = !(chansA as any[]).some(c => (c.channelId ?? c.channel_id) === channelId);
+          goneFromB = !(chansB as any[]).some(c => (c.channelId ?? c.channel_id) === channelId);
+          addLog(`nodeA: ${goneFromA ? 'gone ✓' : 'still listed…'}  nodeB: ${goneFromB ? 'gone ✓' : 'still listed…'}`);
+          if (goneFromA && goneFromB) break;
+        } catch (e: any) {
+          addLog(`listChannels: ${e?.message ?? e}`, 'error');
+        }
+      }
+
+      if (!goneFromA) throw new Error(`Channel still listed on nodeA after ${CHANNEL_CLOSE_TIMEOUT_S}s — cooperative close did not complete, cannot proceed to reopen repro`);
+      setCloseConfirmed(goneFromB);
+      if (goneFromB) {
+        addLog(`Channel confirmed closed on both nodes ✓ (verified via listChannels, not just the closeChannel() return)`, 'success');
+      } else {
+        addLog(`Channel gone from nodeA but STILL LISTED on nodeB after ${CHANNEL_CLOSE_TIMEOUT_S}s — the peer was never notified of the close (abandon_virtual_channel() uses ErrorAction::IgnoreError). Proceeding to reopen repro from nodeA's side anyway.`, 'error');
+      }
+
+      // ── Reopen attempt — expect the session-leak bug to block this ──────────
+      setPhase('reopen_attempt');
+
+      req('nodeA.openChannel (2nd attempt, same peer)', { capacitySat: CHANNEL_CAPACITY_SAT, assetAmount: CHANNEL_ASSET_AMOUNT, virtualOpenMode: VIRTUAL_OPEN_MODE });
+      try {
+        const reopenResp = await wA.openChannel({
+          peerPubkey: peerUri,
+          capacitySat: CHANNEL_CAPACITY_SAT,
+          pushMsat: 0,
+          isPublic: false,
+          withAnchors: true,
+          assetId: aid,
+          assetLocalAmount: CHANNEL_ASSET_AMOUNT,
+          pushAssetAmount: null,
+          virtualOpenMode: VIRTUAL_OPEN_MODE,
+        });
+        const newTmpId = String(reopenResp?.temporaryChannelId ?? '');
+        setReopenChanId(newTmpId);
+        setReopenOutcome('succeeded');
+        res('nodeA.openChannel (reopen)', { tmpChanId: short(newTmpId, 16) });
+        addLog('⚠ Reopen SUCCEEDED — session-leak bug does not reproduce on this build (may already be fixed)', 'success');
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        setReopenErrorMsg(msg);
+        if (msg.toLowerCase().includes('virtual channel session already exists')) {
+          setReopenOutcome('blocked');
+          addLog(`🐛 REPRODUCED — reopen rejected: "${msg}" (see docs/issue-virtual-session-leak.md)`, 'success');
+        } else {
+          setReopenOutcome('error');
+          addLog(`Reopen failed with an unexpected error (not the session-leak signature): ${msg}`, 'error');
+        }
+      }
+
+      // ── Accept-mode asymmetry — fresh Node C tries a REGULAR open to Node B ──
+      // Node B has enableVirtualChannelsV0=true + virtualPeerPubkeys=[pkA] (only trusts A for
+      // virtual). Node C is a plain node with no virtual flags, requesting an ordinary channel.
+      // Per docs/issue-virtual-channel-accept-mode.md: Node B's acceptor branches on its OWN
+      // enableVirtualChannelsV0 flag before looking at what the incoming request actually asked
+      // for — so this plain request may get swept into the "untrusted_virtual_peer" rejection
+      // meant for virtual opens, even though Node C never requested virtual_open_mode at all.
+      setPhase('client_regular_open');
+
+      req('createWallet nodeC (plain client, no virtual flags)');
+      const keysC = await createWallet('regtest' as any);
+      res('createWallet nodeC', { fp: keysC.masterFingerprint });
+
+      const portC   = portA + 400;
+      const dirCUri = `${documentDirectory ?? ''}vc_nc_${ts}`;
+      await FileSystem.makeDirectoryAsync(dirCUri, { intermediates: true });
+      addLog(`nodeC storage: ${dirCUri.replace('file://', '')}`);
+
+      const wC = new UTEXOWallet(
+        { storageDirPath: dirCUri.replace('file://', ''), daemonListeningPort: portC,
+          ldkPeerListeningPort: portC + 1, network: 'regtest' },
+        new PasswordRLNSigner('vcpass_c', keysC.mnemonic),
+      );
+      walletCRef.current = wC;
+      await wC.init();
+      await wC.unlock(REGTEST_UNLOCK);
+
+      const infoC = await wC.getNodeInfo();
+      const pkC = String(infoC.pubkey ?? '');
+      setPubkeyC(pkC);
+      res('nodeC.init+unlock', { pubkey: short(pkC, 20) });
+
+      const addressC = await wC.getAddress();
+      addLog('Funding nodeC (0.1 BTC) …');
+      await sendToAddress(addressC, 0.1);
+      await mine(6);
+      await sleep(2000);
+      await wC.syncWallet();
+      await wC.createUtxos({ upTo: false, num: 5, feeRate: 7 });
+      await mine(1);
+      await wC.syncWallet();
+
+      const bPeerUri = `${pkB}@127.0.0.1:${portB + 1}`;
+      req('nodeC.connectPeer -> nodeB', { uri: short(bPeerUri, 30) });
+      await wC.connectPeer(bPeerUri);
+      await sleep(2000);
+      res('nodeC.connectPeer');
+
+      req('nodeC.openChannel (REGULAR, to nodeB)', { capacitySat: CLIENT_OPEN_CAPACITY_SAT });
+      try {
+        const clientOpenResp = await wC.openChannel({
+          peerPubkey: bPeerUri,
+          capacitySat: CLIENT_OPEN_CAPACITY_SAT,
+          pushMsat: 0,
+          isPublic: false,
+          withAnchors: true,
+        });
+        const clientTmpId = String(clientOpenResp?.temporaryChannelId ?? '');
+        setClientOpenChanId(clientTmpId);
+        res('nodeC.openChannel', { tmpChanId: short(clientTmpId, 16) });
+
+        addLog(`Local request accepted by nodeC's own node — waiting up to ${CLIENT_OPEN_TIMEOUT_S}s to see whether nodeB's acceptor honors it as a regular channel …`);
+        const clientDeadline = Date.now() + CLIENT_OPEN_TIMEOUT_S * 1000;
+        let seenOnB = false;
+        while (Date.now() < clientDeadline) {
+          if (abortRef.current) throw new Error('Cancelled');
+          await mine(1);
+          await sleep(POLL_INTERVAL_S * 1000);
+          try {
+            const chansB2 = (await wB.listChannels()) ?? [];
+            seenOnB = (chansB2 as any[]).some(c => c.peerPubkey === pkC);
+            addLog(`nodeB sees a channel from nodeC: ${seenOnB ? 'yes ✓' : 'not yet…'}`);
+            if (seenOnB) break;
+          } catch (e: any) {
+            addLog(`listChannels (nodeB): ${e?.message ?? e}`, 'error');
+          }
+        }
+
+        if (seenOnB) {
+          setClientOpenOutcome('accepted');
+          addLog('✓ nodeB accepted the regular open from an unlisted peer — accept-mode asymmetry does not reproduce on this build', 'success');
+        } else {
+          setClientOpenOutcome('timeout');
+          addLog(`Never appeared on nodeB after ${CLIENT_OPEN_TIMEOUT_S}s — likely rejected on nodeB's side (check nodeB's .ldk/logs/logs.txt for "untrusted_virtual_peer"; this call only reports nodeC's local send, not nodeB's decision)`, 'error');
+        }
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        setClientOpenError(msg);
+        if (msg.toLowerCase().includes('untrusted_virtual_peer')) {
+          setClientOpenOutcome('blocked');
+          addLog(`🐛 REPRODUCED synchronously — nodeC's plain open was rejected: "${msg}" (accept-mode asymmetry, see docs/issue-virtual-channel-accept-mode.md)`, 'success');
+        } else {
+          setClientOpenOutcome('error');
+          addLog(`nodeC.openChannel failed locally with an unexpected error (not the accept-mode signature): ${msg}`, 'error');
+        }
+      }
+
       setPhase('done');
 
     } catch (e: any) {
@@ -376,16 +615,24 @@ export function useVirtualChannelFlow() {
     abortRef.current = true;
     if (walletARef.current) { try { await walletARef.current.destroy(); } catch {} walletARef.current = null; }
     if (walletBRef.current) { try { await walletBRef.current.destroy(); } catch {} walletBRef.current = null; }
+    if (walletCRef.current) { try { await walletCRef.current.destroy(); } catch {} walletCRef.current = null; }
     setPhase('idle'); setLog([]);
     setPubkeyA(''); setPubkeyB(''); setAddrA(''); setAddrB('');
     setAssetId(''); setChanA(null); setChanB(null);
     setInvoiceAB(''); setInvoiceBA(''); setStatusAB(''); setStatusBA('');
     setBalA(null); setBalB(null); setErrorMsg('');
+    setCloseConfirmed(false); setReopenOutcome('pending'); setReopenErrorMsg(''); setReopenChanId('');
+    setBtcChannelOutcome('pending'); setBtcChannelError(''); setBtcChannelId('');
+    setPubkeyC(''); setClientOpenOutcome('pending'); setClientOpenError(''); setClientOpenChanId('');
   }, []);
 
   return {
     phase, log, pubkeyA, pubkeyB, addrA, addrB, assetId,
     chanA, chanB, invoiceAB, invoiceBA, statusAB, statusBA,
-    balA, balB, errorMsg, run, reset,
+    balA, balB, errorMsg,
+    closeConfirmed, reopenOutcome, reopenErrorMsg, reopenChanId,
+    btcChannelOutcome, btcChannelError, btcChannelId,
+    pubkeyC, clientOpenOutcome, clientOpenError, clientOpenChanId,
+    run, reset,
   };
 }

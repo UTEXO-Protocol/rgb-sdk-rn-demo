@@ -48,3 +48,9 @@ app-example
 
 # stack logs written by scripts/start-lsp-*.sh
 logs/
+
+# large node log dumps pulled for debugging
+*.log
+
+# graphify knowledge graph (generated, local-only)
+graphify-out/

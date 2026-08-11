@@ -16,9 +16,11 @@ import VirtualChannelScreen from '@/screens/virtual-channel/index';
 import VirtualChannelBtcScreen from '@/screens/virtual-channel-btc/index';
 import VirtualChannelSignetScreen from '@/screens/virtual-channel-signet/index';
 import {
+  buildMainnetConfig,
   buildRegtestConfig,
   buildUtexoConfig,
   runExtSignerOnchainSendFlow,
+  runMainnetInitFlow,
   runRLNUtexoExternalPaymentFlow,
   runRLNUtexoPaymentFlow,
   runRlnUtexoVssFlow,
@@ -614,6 +616,10 @@ const RLN_DEMO_STEP_META: Record<string, { label: string; desc: string }> = {
   extOsWaitExtBalance: { label: 'Wait nodeA Balance', desc: 'Poll nodeA.getAssetBalance() until spendable=500' },
   extOsSendFromExt: { label: 'Send ← Ext Signer', desc: 'nodeB (pwd).blindReceive(), nodeA (ext).send() 250 units — rgb_send_begin→rgb_sign_psbt→rgb_send_end' },
   extOsFinalBalances: { label: 'Final Balances', desc: 'getAssetBalance() — expected nodeA=250, nodeB=750' },
+  // ── Mainnet init flow steps ───────────────────────────────────────────────
+  mainnetInitNode: { label: 'Init Node', desc: 'UTEXOWallet.init() — createNode + PasswordRLNSigner on mainnet' },
+  mainnetUnlockNode: { label: 'Unlock Node', desc: 'UTEXOWallet.unlock() — mainnet indexer/proxy endpoints' },
+  mainnetGetAddress: { label: 'Get Address', desc: 'getAddress() — derive a mainnet receive address' },
 };
 
 // ─── Wallet flow step meta ────────────────────────────────────────────────────
@@ -652,7 +658,7 @@ const RLN_VSS_STEP_META: Record<string, { label: string; desc: string }> = {
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function FlowsScreen() {
-  const [activeTab, setActiveTab] = useState<'regtest' | 'utexo'>('regtest');
+  const [activeTab, setActiveTab] = useState<'regtest' | 'utexo' | 'mainnet'>('regtest');
 
   const [rlnWalletChanPayResults, setRlnWalletChanPayResults] = useState<FlowResults>(null);
   const [runningRlnWalletChanPayFlow, setRunningRlnWalletChanPayFlow] = useState(false);
@@ -675,8 +681,13 @@ export default function FlowsScreen() {
   const [rlnVssFlowResults, setRlnVssFlowResults] = useState<FlowResults>(null);
   const [runningRlnVssFlow, setRunningRlnVssFlow] = useState(false);
   const rlnVssFlowInFlightRef = useRef(false);
+  const [mainnetInitResults, setMainnetInitResults] = useState<FlowResults>(null);
+  const [runningMainnetInitFlow, setRunningMainnetInitFlow] = useState(false);
+  const mainnetInitInFlightRef = useRef(false);
   const activeUnlockParams = activeTab === 'regtest'
     ? buildRegtestConfig().unlockParams
+    : activeTab === 'mainnet'
+    ? buildMainnetConfig().unlockParams
     : buildUtexoConfig().unlockParams;
   const activeUnlockRows: [string, string][] = [
     ['host', `${activeUnlockParams.bitcoindRpcHost ?? '(default)'}:${activeUnlockParams.bitcoindRpcPort ?? '(default)'}`],
@@ -835,6 +846,27 @@ export default function FlowsScreen() {
     }
   }
 
+  async function handleMainnetInitFlow() {
+    if (mainnetInitInFlightRef.current) return;
+    mainnetInitInFlightRef.current = true;
+    try {
+      setRunningMainnetInitFlow(true);
+      setMainnetInitResults({ running: true, steps: [] });
+      const r = await runMainnetInitFlow();
+      setMainnetInitResults({ ...r, running: false });
+    } catch (e: any) {
+      setMainnetInitResults({
+        running: false,
+        success: false,
+        error: e instanceof Error ? e.message : String(e),
+        steps: [],
+      });
+    } finally {
+      setRunningMainnetInitFlow(false);
+      mainnetInitInFlightRef.current = false;
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -860,7 +892,7 @@ export default function FlowsScreen() {
           </View>
           <View style={styles.envCard}>
             <Text style={styles.envTitle}>
-              {activeTab === 'regtest' ? 'Regtest config' : 'UTEXO config'}
+              {activeTab === 'regtest' ? 'Regtest config' : activeTab === 'mainnet' ? 'Mainnet config' : 'UTEXO config'}
             </Text>
             {activeUnlockRows.map(([key, value]) => (
               <View key={key} style={styles.envRow}>
@@ -887,6 +919,14 @@ export default function FlowsScreen() {
             activeOpacity={0.75}>
             <Text style={[styles.tabBtnText, activeTab === 'utexo' && styles.tabBtnTextActive]}>
               UTEXO
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'mainnet' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('mainnet')}
+            activeOpacity={0.75}>
+            <Text style={[styles.tabBtnText, activeTab === 'mainnet' && styles.tabBtnTextActive]}>
+              Mainnet
             </Text>
           </TouchableOpacity>
         </View>
@@ -1090,6 +1130,37 @@ export default function FlowsScreen() {
             })}
           </FlowCard>
           <VirtualChannelSignetScreen embedded />
+          </>
+        )}
+
+        {activeTab === 'mainnet' && (
+          <>
+          <FlowCard
+            title="Mainnet · Init, Unlock, Get Address"
+            funcName="runMainnetInitFlow"
+            tags={['Mainnet', 'Read-only']}
+            description="Creates a single UTEXOWallet node (PasswordRLNSigner) against real Bitcoin mainnet, unlocks it with the mainnet indexer/proxy endpoints, and derives a receive address. No funding, UTXOs, or channels — nothing is ever spent."
+            accentColor="#8A1D2E"
+            totalSteps={3}
+            results={mainnetInitResults}
+            running={runningMainnetInitFlow}
+            onRun={handleMainnetInitFlow}>
+            {mainnetInitResults?.steps?.map((step: any, idx: number, arr: any[]) => {
+              const meta = RLN_DEMO_STEP_META[step.step] ?? { label: step.step, desc: '' };
+              return (
+                <StepCard
+                  key={idx}
+                  idx={idx}
+                  step={step}
+                  label={meta.label}
+                  desc={meta.desc}
+                  accentColor="#8A1D2E"
+                  isLast={idx === arr.length - 1}
+                  deferErrorDisplay={runningMainnetInitFlow}
+                />
+              );
+            })}
+          </FlowCard>
           </>
         )}
 

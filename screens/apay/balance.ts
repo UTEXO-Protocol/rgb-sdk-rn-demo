@@ -1,6 +1,6 @@
 import type { UTEXOWallet } from '@utexo/rgb-sdk-rn';
 
-import { ASSET_ID, normHash, short, type LogEntry } from './config';
+import { normHash, short, type LogEntry } from './config';
 
 function chanField<T>(c: Record<string, unknown>, camel: string, snake: string): T | undefined {
   return (c[camel] ?? c[snake]) as T | undefined;
@@ -80,6 +80,7 @@ export async function logSettlementDiagnostics(
   wB: UTEXOWallet,
   paymentHash: string,
   lspPubkey: string,
+  assetId: string,
   addLog: (msg: string, type?: LogEntry['type']) => void,
 ): Promise<void> {
   try {
@@ -124,7 +125,7 @@ export async function logSettlementDiagnostics(
         const row = c as unknown as Record<string, unknown>;
         const peer = String(chanField<string>(row, 'peerPubkey', 'peer_pubkey') ?? '');
         const asset = String(chanField<string>(row, 'assetId', 'asset_id') ?? '');
-        return peer === lspPubkey && asset === ASSET_ID;
+        return peer === lspPubkey && asset === assetId;
       });
 
     const mChan = pickLspChan(merchantChans);

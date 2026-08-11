@@ -54,6 +54,21 @@ export function buildUtexoConfig() {
   };
 }
 
+export function buildMainnetConfig() {
+  const indexerUrl = process.env.EXPO_PUBLIC_MAINNET_INDEXER_URL?.trim() || 'https://esplora-mainnet.utexo.com';
+  const proxyEndpoint = process.env.EXPO_PUBLIC_MAINNET_PROXY_ENDPOINT?.trim() || 'rpcs://rgb-proxy-mainnet.utexo.com/json-rpc';
+
+  return {
+    network: 'mainnet' as const,
+    unlockParams: {
+      indexerUrl,
+      proxyEndpoint,
+      announceAddresses: [] as string[],
+      announceAlias: null as string | null,
+    } as IRLNUnlockParams,
+  };
+}
+
 export function buildRegtestConfig() {
   const rpcHost = readEnv('RLN_BITCOIND_RPC_HOST');
   const rpcPort = readEnv('RLN_BITCOIND_RPC_PORT');

@@ -127,10 +127,10 @@ Implements `test_flow0_full_e2e` from `utexo-lsp/tests/e2e/tests/test_flow0_full
 
 **Infrastructure required:** Run `./scripts/start-lsp-regtest.sh` before launching the flow. This script:
 1. Wipes and restarts `data_lsp` + `data_faucet` RLN nodes fresh
-2. Issues a new RGB asset (UTST) on the Faucet node
-3. Seeds the LSP with 3 units from the Faucet
-4. Starts `utexo-lsp` (Go service) with `SUPPORTED_ASSET_IDS` set to the new asset
-5. Writes the new asset ID + LSP pubkey to `.env.lsp.local` and `.env.local`
+2. Issues **two** RGB assets on the Faucet node — NIA `UTST` (precision 0) and IFA `UTIF` (precision 6)
+3. Seeds the LSP with `SEED_ROUNDS` (6) allocations of the **active** asset (`ASSET=utst|ifa`), `SEED_UNITS` base units apiece
+4. Starts `utexo-lsp` (Go service) with `SUPPORTED_ASSET_IDS` set to the active asset only — see the one-session-per-peer note below
+5. Writes both asset IDs (+ ticker, precision) and the LSP pubkey to `.env.lsp.local`, `.env.local` and `e2e-fixtures.json`
 
 **Key services and ports:**
 
@@ -165,10 +165,51 @@ Fix: ensure `adb reverse tcp:3000 tcp:3000` is set before connecting the app to 
 **Root cause of `CounterpartyForceClosed: Failed to find RGB consignment`**
 This is the underlying error behind the stuck sends — the app node rejects the channel because it can't fetch the RGB consignment from the proxy. Always set the proxy port forward before running the LSP flow.
 
-## LSP-related SDK bugs fixed (in `../rgb-sdk-rn`)
+## APay cart flows — two assets, one LSP
 
-### `UtexoLSPClient` snake_case mismatch (`src/lsp/UtexoLSPClient.ts`)
-`utexo-lsp` returns JSON with snake_case keys (`rgb_invoice`, `ln_invoice`, `mapping_id`). The SDK's `request<T>()` does a plain `JSON.parse()` with no key transformation, so camelCase type fields like `rgbInvoice` come back as `undefined`.
+`screens/apay/useApayFlow.ts` is asset-agnostic: pass an `ApayAsset` (`screens/apay/config.ts`) and it drives the whole checkout. Two profiles ship:
+
+| Profile | Asset | Precision | Checkout | Screen |
+|---------|-------|-----------|----------|--------|
+| `UTST_ASSET` | NIA `UTST` | 0 | 3000 sat + 1 UTST | `screens/apay-regular-channels.tsx` |
+| `IFA_ASSET` | IFA `UTIF` | 6 | 1 sat + 500 000 base units (0.5 UTIF) | `screens/apay-ifa.tsx` |
+
+`apay-ifa.tsx` is a thin wrapper around the cart screen with a different asset, storage prefix and port bases (48000/50000) — the flow code is shared, not copied.
+
+**Amounts are always base units.** Every RGB/LSP API (`receiveAsset.amountRgb`, `payAddress.asset.assetAmount`, `sendrgb` assignments) takes 10^-precision units; `precision` only affects display. `formatAssetAmount()` in `screens/apay/config.ts` renders them.
+
+**One asset per stack run — this is a hard constraint, not a preference.** `virtual_channel_add_intent` (rgb-lightning-node `src/ldk.rs`) rejects a second virtual channel to a peer it already has a session with, and the check ignores the asset entirely:
+
+```
+openchannel failed for 03eadf98…: virtual channel session already exists for this peer pair
+```
+
+So an LSP advertising two assets in `SUPPORTED_ASSET_IDS` opens a channel for whichever the cron reaches first and leaves every flow for the other asset polling until its channel timeout. The script therefore serves exactly one:
+
+```bash
+./scripts/start-lsp-regtest.sh             # UTST
+ASSET=ifa ./scripts/start-lsp-regtest.sh   # UTIF
+```
+
+Both assets are issued on the faucet either way (so the fixtures and `.env.local` stay complete), but only the active one is seeded to the LSP and advertised. `EXPO_PUBLIC_LSP_REGTEST_ACTIVE_ASSET` tells the app which; the flows check it up front and refuse with the command to run rather than burning 180 s in `waitForChannel`.
+
+`DEFAULT_CHANNEL_ASSET_AMOUNT` is a single global in utexo-lsp, so the script sizes it for the precision-6 asset (1 000 000 base units = 1.0 UTIF, and harmlessly 1 000 000 whole UTST) and seeds ~120 channels' worth.
+
+### `MIN_AMT_MSAT` and the 1-sat HTLC
+
+`rgb-lightning-node` has two per-HTLC floors (`src/core_types.rs`):
+- `HTLC_MIN_MSAT = 3_000_000` — regular channels. An RGB payment rides the HTLC output, and a dust-trimmed HTLC on a broadcastable commitment cannot settle the asset.
+- `VIRTUAL_HTLC_MIN_MSAT = 1_000` — `trusted_no_broadcast` (virtual) channels. Never broadcast, so no dust limit applies.
+
+The virtual floor is applied consistently on every leg: channel open (`our_htlc_minimum_msat`, `routes.rs`/`sdk/mod.rs`), invoice creation (`htlc_min_msat_for_asset`), sends/keysend (`htlc_min_msat_for_peer`) and the APay `request_outbound_invoice` handler (`ldk.rs`). The acceptor keeps LDK's default 1 msat, and utexo-lsp never subtracts a fee — the outbound leg must equal the reserved `amount_msat`. So **1 sat works end to end on virtual channels**, and `start-lsp-regtest.sh` defaults `MIN_AMT_MSAT=1000` whenever `VIRTUAL_OPEN_MODE` is set (falling back to 3 000 000 when it is not).
+
+`LIGHTNING_ADDRESS_MIN_SENDABLE_MSAT` has to track it — the SDK validates `payAddress` against LNURL discovery's `minSendable`, not against `MIN_AMT_MSAT`, so leaving it at the 3 000 000 default would reject a 1-sat checkout client-side. `maxSendable` is set to the per-HTLC ceiling utexo-lsp itself derives (`capacity × PEER_MAX_INBOUND_HTLC_IN_FLIGHT_PERCENT`).
+
+## LSP-related SDK bugs fixed (in `@utexo/rgb-sdk-core`, moved out of `../rgb-sdk-rn`)
+
+### `UtexoLSPClient` snake_case mismatch (`rgb-sdk-core/src/lsp/UtexoLSPClient.ts`)
+
+`utexo-lsp` returns JSON with snake_case keys (`rgb_invoice`, `ln_invoice`, `mapping_id`, `num_channels`, etc.). The SDK's `request<T>()` does a plain `JSON.parse()` with no key transformation, so camelCase type fields come back as `undefined` unless explicitly mapped.
 
 Fixed in `lightningReceive()` by introducing `LspLightningReceiveWire` type and explicitly mapping keys:
 ```ts
@@ -180,7 +221,7 @@ return {
 };
 ```
 
-**Still needs fixing:** `getInfo` (`num_channels` vs `numChannels`), `onchainSend` response, `ApayNewResponse` fields — all have the same snake_case mismatch pattern.
+**Status (verified 2026-08-06):** all previously-flagged endpoints are now fixed — `getInfo()` maps every snake_case field explicitly (`apiVersion`, `supportedAssets`, `minPaymentSizeMsat`, etc.), `onchainSend` response has its own wire type + mapping, and `ApayNewResponse` now goes through the native P2P binding (already camelCase, consistent on both platforms) so the REST variant's mismatch is moot.
 
 ## What the App Must Provide (vs SDK)
 
@@ -191,3 +232,13 @@ The SDK never touches Bitcoin Core or the filesystem directly. The app owns:
 - Port assignment per node
 - Polling loops for channel readiness (`getNodeInfo().numUsableChannels`) and balance settlement (`getAssetBalance()`)
 - Env variable parsing (`readEnv()` wrapper around `process.env.EXPO_PUBLIC_*`)
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

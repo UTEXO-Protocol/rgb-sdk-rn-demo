@@ -49,22 +49,23 @@ import {
   snapshotRgbBalances,
 } from './balance';
 import {
+  ACTIVE_ASSET_KEY,
   APAY_HASH_REFILL_THRESHOLD,
-  ASSET_ID,
   CHANNEL_TIMEOUT_S,
+  formatAssetAmount,
   host,
   LSP_DAEMON_URL,
   LSP_LDK_PORT,
   LSP_URL,
   MERCHANT_KEEPALIVE_MS,
   normHash,
-  PAYMENT_ASSET_AMOUNT,
-  PAYMENT_MSAT,
   POLL_INTERVAL_MS,
   REGTEST_UNLOCK,
   SETTLE_TIMEOUT_S,
   sleep,
   short,
+  UTST_ASSET,
+  type ApayAsset,
   type ApayFlowVariant,
   type LogEntry,
   type Phase,
@@ -81,6 +82,8 @@ const ASYNC_B_EXTERNAL_SIGNER = true;
 
 export type UseApayFlowOptions = {
   variant?: ApayFlowVariant;
+  /** Which demo asset to run the checkout with. Defaults to UTST (NIA, precision 0). */
+  asset?: ApayAsset;
   storagePrefix?: string;
   merchantPortBase?: number;
   buyerPortBase?: number;
@@ -93,6 +96,7 @@ export type UseApayFlowOptions = {
 export function useApayFlow(options: UseApayFlowOptions = {}) {
   const {
     variant = 'cart',
+    asset = UTST_ASSET,
     storagePrefix = variant === 'cart' ? 'apay_reg' : 'apay',
     merchantPortBase = variant === 'cart' ? 44000 : 40000,
     buyerPortBase = variant === 'cart' ? 46000 : 42000,
@@ -100,6 +104,18 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
     settlementDiagnostics = variant === 'cart',
     setupScriptHint = variant === 'cart' ? './scripts/start-lsp-local.sh' : './scripts/start-lsp-regtest.sh',
   } = options;
+
+  const { assetId, paymentMsat, paymentAssetAmount } = asset;
+  /**
+   * The LSP serves one asset per run. Running against the other one would open
+   * no channel at all — the cron's second `/openchannel` is refused with
+   * "virtual channel session already exists for this peer pair" — so the flow
+   * would burn the full channel timeout for nothing.
+   */
+  const assetActive = asset.key === ACTIVE_ASSET_KEY;
+  const startCommand = asset.key === 'utst'
+    ? setupScriptHint
+    : `ASSET=${asset.key} ${setupScriptHint}`;
 
   const logTag = variant === 'cart' ? 'apay-reg' : 'apay';
   const merchantLabel = variant === 'cart' ? 'merchant' : 'userB';
@@ -150,13 +166,24 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
       addLog(`→ ${label}${p ? '  ' + Object.entries(p).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''}`);
     const res = (label: string, d?: Record<string, any>) =>
       addLog(`← ${label}${d ? '  ' + Object.entries(d).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' ') : ''}`, 'success');
+    /** Base units → "0.5 UTIF" for the log; every API call still sees base units. */
+    const fmtAsset = (units: number) =>
+      `${formatAssetAmount(units, asset.precision)} ${asset.ticker}`;
 
     try {
       // ── Preflight ──────────────────────────────────────────────────────────
       setPhase('b_init');
       addLog(`Platform=${Platform.OS}  host=${host}`);
       addLog(`LSP_URL=${LSP_URL}`);
-      if (!ASSET_ID) throw new Error(`EXPO_PUBLIC_LSP_REGTEST_ASSET_ID not set — run ${setupScriptHint}`);
+      if (!assetId) throw new Error(`${asset.envVarName} not set — run ${startCommand}`);
+      if (!assetActive) throw new Error(
+        `The LSP is serving "${ACTIVE_ASSET_KEY}", not ${asset.ticker} — it opens one virtual ` +
+        `channel per peer, so only one asset works per run. Restart with: ${startCommand}`,
+      );
+      addLog(
+        `Asset ${asset.ticker} (precision ${asset.precision})  id=${short(assetId, 24)}  ` +
+        `checkout=${paymentMsat / 1000} sat + ${fmtAsset(paymentAssetAmount)} (${paymentAssetAmount} base units)`,
+      );
 
       // Regtest only: fetch LSP pubkey for virtualPeerPubkeys (identity rotates on stack restart).
       // Utexo/signet: skip — createLsp() loads pubkey from GET /get_info via wallet.lspBaseUrl.
@@ -242,8 +269,8 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
       await mine(2);
       await sleep(6000);
 
-      addLog(`Waiting for RGB channel usable (asset: ${short(ASSET_ID)})…`);
-      const chanB = await lspB.waitForChannel(ASSET_ID, {
+      addLog(`Waiting for RGB channel usable (asset: ${short(assetId)})…`);
+      const chanB = await lspB.waitForChannel(assetId, {
         timeoutMs: CHANNEL_TIMEOUT_S * 1000,
         pollIntervalMs: POLL_INTERVAL_MS,
         onProgress: (msg) => addLog(`merchant ${msg}`),
@@ -255,7 +282,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
       logRgbBalanceSnap(
         merchantLabel,
         'START (after channel)',
-        await snapshotRgbBalances(wB, ASSET_ID, lspPeerPubkey),
+        await snapshotRgbBalances(wB, assetId, lspPeerPubkey),
         addLog,
       );
 
@@ -359,7 +386,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         await mine(2);
         await sleep(6000);
 
-        const chanA = await lspA.waitForChannel(ASSET_ID, {
+        const chanA = await lspA.waitForChannel(assetId, {
           timeoutMs: CHANNEL_TIMEOUT_S * 1000,
           pollIntervalMs: POLL_INTERVAL_MS,
           onProgress: (msg) => addLog(`buyer ${msg}`),
@@ -374,11 +401,11 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         // over the channel (production: funded by the buyer's own on-chain RGB;
         // regtest stand-in for the external sender: faucet node).
         setPhase('a_topup');
-        req('lspA.receiveAsset', { assetId: short(ASSET_ID), amountSats: PAYMENT_MSAT / 1000, amountRgb: PAYMENT_ASSET_AMOUNT });
+        req('lspA.receiveAsset', { assetId: short(assetId), amountSats: paymentMsat / 1000, amountRgb: paymentAssetAmount });
         const { lnInvoice: topupInvoice, rgbInvoice: topupRgbInvoice } = await lspA.receiveAsset({
-          assetId:    ASSET_ID,
-          amountSats: PAYMENT_MSAT / 1000,
-          amountRgb:  PAYMENT_ASSET_AMOUNT,
+          assetId,
+          amountSats: paymentMsat / 1000,
+          amountRgb:  paymentAssetAmount,
         });
         res('lspA.receiveAsset', { lnInvoice: short(topupInvoice, 32), rgbInvoice: short(topupRgbInvoice, 32) });
 
@@ -388,14 +415,14 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         const topupEndpoints = topupDecoded.transport_endpoints ?? [`rpc://${host}:3000/json-rpc`];
         const topupAssignment = (topupDecoded.assignment?.type === 'Fungible' && topupDecoded.assignment?.value > 0)
           ? topupDecoded.assignment
-          : { type: 'Fungible', value: PAYMENT_ASSET_AMOUNT };
+          : { type: 'Fungible', value: paymentAssetAmount };
         res('faucet.decodergbinvoice', { recipientId: short(topupRecipientId, 24) });
 
         req('faucet.sendrgb', { amount: topupAssignment.value, recipientId: short(topupRecipientId, 20) });
         await faucet.sendRgb({
           donation: false, fee_rate: 7, min_confirmations: 1, skip_sync: false,
           recipient_map: {
-            [ASSET_ID]: [{ recipient_id: topupRecipientId, assignment: topupAssignment, transport_endpoints: topupEndpoints }],
+            [assetId]: [{ recipient_id: topupRecipientId, assignment: topupAssignment, transport_endpoints: topupEndpoints }],
           },
         });
         res('faucet.sendrgb');
@@ -415,8 +442,8 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           try {
             await lspDaemon.refresh();
             await faucet.refresh();
-            const faucetTransfers = await faucet.listTransfers(ASSET_ID);
-            const lspTransfers    = await lspDaemon.listTransfers(ASSET_ID);
+            const faucetTransfers = await faucet.listTransfers(assetId);
+            const lspTransfers    = await lspDaemon.listTransfers(assetId);
             const faucetSend = [...(faucetTransfers.transfers ?? [])].reverse().find((t: any) => t.kind === 'Send');
             const lspReceive = [...(lspTransfers.transfers    ?? [])].reverse().find((t: any) => t.kind === 'ReceiveBlind');
             addLog(`faucet Send: ${faucetSend?.status ?? 'none'}  LSP receive: ${lspReceive?.status ?? 'none'}`);
@@ -441,17 +468,17 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         if (topupLastStatus !== 'Succeeded') throw new Error(
           `Buyer top-up did not settle (last status: ${topupLastStatus}) — check LSP RGB inventory and proxy reachability`
         );
-        addLog(`Buyer deposited ${PAYMENT_ASSET_AMOUNT} RGB via lightning_receive ✓`, 'success');
+        addLog(`Buyer deposited ${fmtAsset(paymentAssetAmount)} via lightning_receive ✓`, 'success');
         await wA.syncWallet();
 
-        const buyerSnapStart = await snapshotRgbBalances(wA, ASSET_ID, lspPeerPubkey);
-        const merchantSnapCheckout = await snapshotRgbBalances(wB, ASSET_ID, lspPeerPubkey);
+        const buyerSnapStart = await snapshotRgbBalances(wA, assetId, lspPeerPubkey);
+        const merchantSnapCheckout = await snapshotRgbBalances(wB, assetId, lspPeerPubkey);
         logRgbBalanceSnap(buyerLabel, 'START (pre-checkout)', buyerSnapStart, addLog);
         logRgbBalanceSnap(merchantLabel, 'START (pre-checkout)', merchantSnapCheckout, addLog);
 
         // SDK: confirm buyer can route before payAddress
-        req('lspA.waitForOutboundLiquidity', { minMsat: PAYMENT_MSAT });
-        await lspA.waitForOutboundLiquidity(PAYMENT_MSAT, {
+        req('lspA.waitForOutboundLiquidity', { minMsat: paymentMsat });
+        await lspA.waitForOutboundLiquidity(paymentMsat, {
           timeoutMs: CHANNEL_TIMEOUT_S * 1000,
           pollIntervalMs: POLL_INTERVAL_MS,
           onProgress: (msg) => addLog(msg),
@@ -460,7 +487,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         res('lspA.waitForOutboundLiquidity');
         addLog('Buyer outbound liquidity ready ✓', 'success');
 
-        let balBefore = Number((await wB.getAssetBalance(ASSET_ID))?.offchainOutbound ?? 0);
+        let balBefore = Number((await wB.getAssetBalance(assetId))?.offchainOutbound ?? 0);
 
         // ── LNURL-pay + HODL payment (resolveAddress + payLightningInvoice) ──
         req('lspB.connect'); // merchant reachable before buyer pays
@@ -471,11 +498,11 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         if (!lnAddr.address) throw new Error('Lightning Address missing');
 
         setPhase('send');
-        req('lspA.payAddress', { address: lnAddr.address, amtMsat: PAYMENT_MSAT, assetAmount: PAYMENT_ASSET_AMOUNT });
+        req('lspA.payAddress', { address: lnAddr.address, amtMsat: paymentMsat, assetAmount: paymentAssetAmount });
         const { invoice, sendResult: payRes } = await lspA.payAddress({
           address: lnAddr.address,
-          amtMsat: PAYMENT_MSAT,
-          asset: { assetId: ASSET_ID, assetAmount: PAYMENT_ASSET_AMOUNT },
+          amtMsat: paymentMsat,
+          asset: { assetId, assetAmount: paymentAssetAmount },
         });
         if (!invoice) throw new Error('payAddress returned no invoice');
         setHodlBolt11(invoice);
@@ -517,7 +544,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         await wB.refreshWallet();
         await mine(1);
         if (settlementDiagnostics) {
-          await logSettlementDiagnostics(wA, wB, pHash, lspPeerPubkey, addLog);
+          await logSettlementDiagnostics(wA, wB, pHash, lspPeerPubkey, assetId, addLog);
         }
 
         const deadline = Date.now() + SETTLE_TIMEOUT_S * 1000;
@@ -546,7 +573,7 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           addLog(`${buyerLabel} getLightningSendStatus: ${status}`);
 
           let balAfter = balBefore;
-          const b1 = await wB.getAssetBalance(ASSET_ID).catch(() => null);
+          const b1 = await wB.getAssetBalance(assetId).catch(() => null);
           if (b1) {
             balAfter = Number(b1.offchainOutbound ?? 0);
             setFinalBalB(b1);
@@ -563,14 +590,14 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
             diagEvery += POLL_INTERVAL_MS;
             if (diagEvery >= MERCHANT_KEEPALIVE_MS) {
               diagEvery = 0;
-              await logSettlementDiagnostics(wA, wB, pHash, lspPeerPubkey, addLog);
+              await logSettlementDiagnostics(wA, wB, pHash, lspPeerPubkey, assetId, addLog);
             }
           }
 
           const merchantOk = mp && ['succeeded', 'claimable'].includes(String(mp.status ?? '').toLowerCase());
           if (status === 'Succeeded' && balAfter > balBefore) {
             settled = true;
-            addLog(`merchant received +${balAfter - balBefore} RGB`, 'success');
+            addLog(`merchant received +${fmtAsset(balAfter - balBefore)}`, 'success');
             break;
           }
           if (status === 'Succeeded' && merchantOk) {
@@ -598,8 +625,8 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
           addLog(`Hash pool: ~${unusedHashesRef.current} unused left`, 'info');
         }
 
-        const buyerSnapEnd = await snapshotRgbBalances(wA, ASSET_ID, lspPeerPubkey);
-        const merchantSnapEnd = await snapshotRgbBalances(wB, ASSET_ID, lspPeerPubkey);
+        const buyerSnapEnd = await snapshotRgbBalances(wA, assetId, lspPeerPubkey);
+        const merchantSnapEnd = await snapshotRgbBalances(wB, assetId, lspPeerPubkey);
         logRgbBalanceSnap(buyerLabel, 'END (settled)', buyerSnapEnd, addLog);
         logRgbBalanceSnap(merchantLabel, 'END (settled)', merchantSnapEnd, addLog);
         logRgbBalanceDelta(buyerLabel, buyerSnapStart, buyerSnapEnd, addLog);
@@ -616,6 +643,12 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
     }
   }, [
     addLog,
+    asset,
+    assetActive,
+    assetId,
+    paymentAssetAmount,
+    paymentMsat,
+    startCommand,
     buyerPortBase,
     buyerLabel,
     merchantKeepalive,
@@ -663,8 +696,12 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
     sendStatus,
     merchantOnline,
     finalBalB,
-    envReady: !!ASSET_ID,
+    envReady: !!assetId && assetActive,
+    assetActive,
+    activeAssetKey: ACTIVE_ASSET_KEY,
     setupScriptHint,
+    /** What to run to make this flow's asset the served one. */
+    startCommand,
     isRunning: !['idle', 'done', 'error'].includes(phase),
   };
 }

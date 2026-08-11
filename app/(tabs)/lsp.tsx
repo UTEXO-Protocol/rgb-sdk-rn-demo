@@ -3,6 +3,7 @@ import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-nati
 import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
+import ApayIfaScreen from '@/screens/apay-ifa';
 import ApayRegularChannelsScreen from '@/screens/apay-regular-channels';
 import ScidReproScreen from '@/screens/apay-scid-repro/index';
 import ScidReproSignetScreen from '@/screens/apay-scid-repro-signet/index';
@@ -63,6 +64,8 @@ export default function LspHubScreen() {
                   <AsyncPayScreen embedded />
                   <View style={s.flowDivider} />
                   <ApayRegularChannelsScreen embedded />
+                  <View style={s.flowDivider} />
+                  <ApayIfaScreen embedded />
                   <View style={s.flowDivider} />
                   <ScidReproScreen embedded />
                 </ScrollView>
