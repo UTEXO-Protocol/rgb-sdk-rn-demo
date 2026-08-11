@@ -1,18 +1,35 @@
 // Learn more https://docs.expo.dev/guides/customizing-metro
 const { getDefaultConfig } = require('expo/metro-config');
+const fs = require('fs');
 const path = require('path');
 
-// Core SDK is installed from npm as a dependency of the RN SDK, resolved
-// from the demo's own node_modules.
-const localCoreSdkPath = path.resolve(
-  __dirname,
-  'node_modules/@utexo/rgb-sdk-core'
-);
+const localCoreSdkPath = path.resolve(__dirname, '../rgb-sdk-core');
+const localSdkPath = path.resolve(__dirname, '../rgb-sdk-rn');
 
-
+// Core SDK comes in as a dependency of the RN SDK, and where it lands depends
+// on the install layout: hoisted into the demo's own node_modules when the RN
+// SDK is installed from npm, but nested under it when the RN SDK is a
+// `file:../rgb-sdk-rn` link installed with --install-strategy=nested (the
+// documented setup). Probe both — a hand-written mapping to a path that does
+// not exist surfaces as "Failed to get the SHA-1", not as a resolution error,
+// because resolveRequest's answer is taken on trust.
+const coreSdkPath = [
+  path.resolve(__dirname, 'node_modules/@utexo/rgb-sdk-core'),
+  path.resolve(localSdkPath, 'node_modules/@utexo/rgb-sdk-core'),
+].find((dir) => fs.existsSync(path.join(dir, 'dist/conformance/index.cjs')));
 /** @type {import('expo/metro-config').MetroConfig} */
 const config = getDefaultConfig(__dirname);
 
+// Both sibling SDKs must be watched. Core is watched whenever the checkout
+// exists because `rgb-sdk-rn/node_modules/@utexo/rgb-sdk-core` may be a symlink
+// into it (`npm link` / `file:../rgb-sdk-core`); with symlinks enabled Metro
+// resolves to the real path and refuses anything outside projectRoot or a watch
+// folder — "Unable to resolve module @utexo/rgb-sdk-core". Listing a folder
+// that does not exist makes Metro exit at startup, hence the probe.
+config.watchFolders = [localSdkPath];
+if (fs.existsSync(localCoreSdkPath)) {
+  config.watchFolders.push(localCoreSdkPath);
+}
 config.resolver = {
   ...config.resolver,
   nodeModulesPaths: [path.resolve(__dirname, 'node_modules')],
@@ -28,22 +45,28 @@ config.resolver = {
     // that does not exist. The e2e suite needs those field helpers (they are
     // shared with the web suite so the two cannot drift), so map the one
     // subpath by hand to the built CommonJS entry.
-    if (moduleName === '@utexo/rgb-sdk-core/conformance') {
+    //
+    // When coreSdkPath is undefined the package is missing or unbuilt; fall
+    // through so Metro reports that honestly instead of failing on a path this
+    // config invented.
+    if (moduleName === '@utexo/rgb-sdk-core/conformance' && coreSdkPath) {
       return {
-        filePath: path.resolve(localCoreSdkPath, 'dist/conformance/index.cjs'),
+        filePath: path.join(coreSdkPath, 'dist/conformance/index.cjs'),
         type: 'sourceFile',
       };
     }
-    // The RN SDK now re-exports runtime code from `@utexo/rgb-sdk-core`
-    // (LSP client, network defaults, shared types). The demo doesn't depend on
-    // core directly, and with package exports off the bare `.` entry isn't
-    // resolved, so map it to the built ESM bundle by hand.
-    if (moduleName === '@utexo/rgb-sdk-core') {
-      return {
-        filePath: path.resolve(localCoreSdkPath, 'dist/index.mjs'),
-        type: 'sourceFile',
-      };
-    }
+    // The bare `.` entry needs no mapping while core is installed from npm:
+    // with package exports off it falls back to `main` (dist/index.cjs), which
+    // resolves out of the demo's own node_modules. The sibling-checkout setup
+    // did need it — restore this together with the localCoreSdkPath and
+    // watchFolders lines above when switching back to file:../rgb-sdk-rn.
+    //
+    // if (moduleName === '@utexo/rgb-sdk-core') {
+    //   return {
+    //     filePath: path.resolve(localCoreSdkPath, 'dist/index.mjs'),
+    //     type: 'sourceFile',
+    //   };
+    // }
     if (
       moduleName === './ExponentConstants' &&
       context.originModulePath.includes('expo-constants/build/Constants.js')

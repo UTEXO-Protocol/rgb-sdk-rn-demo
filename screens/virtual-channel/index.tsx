@@ -28,23 +28,27 @@ import { useVirtualChannelFlow } from './useVirtualChannelFlow';
 
 // ── Phase progress ────────────────────────────────────────────────────────────
 
-const PHASES_SETUP: Phase[] = ['init', 'init_b', 'fund', 'issue', 'connect', 'open_channel', 'wait_channel'];
-const PHASES_PAY:   Phase[] = ['pay_ab', 'settle_ab', 'pay_ba', 'settle_ba', 'done'];
+const PHASES_SETUP: Phase[] = ['init', 'init_b', 'fund', 'issue', 'connect', 'open_channel', 'wait_channel', 'open_btc_channel'];
+const PHASES_PAY:   Phase[] = ['pay_ab', 'settle_ab', 'pay_ba', 'settle_ba', 'close_channel', 'reopen_attempt', 'client_regular_open', 'done'];
 const ALL_PHASES   = [...PHASES_SETUP, ...PHASES_PAY];
 
 const PHASE_LABELS: Partial<Record<Phase, string>> = {
-  init:         'A Init',
-  init_b:       'B Init',
-  fund:         'Fund',
-  issue:        'Issue',
-  connect:      'Connect',
-  open_channel: 'Open',
-  wait_channel: 'Wait',
-  pay_ab:       'A→B',
-  settle_ab:    'Settle',
-  pay_ba:       'B→A',
-  settle_ba:    'Settle',
-  done:         'Done',
+  init:            'A Init',
+  init_b:          'B Init',
+  fund:            'Fund',
+  issue:           'Issue',
+  connect:         'Connect',
+  open_channel:    'Open',
+  wait_channel:    'Wait',
+  open_btc_channel:'2nd (BTC)',
+  pay_ab:          'A→B',
+  settle_ab:       'Settle',
+  pay_ba:          'B→A',
+  settle_ba:       'Settle',
+  close_channel:   'Close',
+  reopen_attempt:  'Reopen',
+  client_regular_open: 'C→B Regular',
+  done:            'Done',
 };
 
 function PhaseRow({ phases, phase }: { phases: Phase[]; phase: Phase }) {
@@ -120,8 +124,21 @@ export default function VirtualChannelScreen({ embedded = false }: { embedded?: 
                'What this flow proves:\n' +
                '1. Node A issues an RGB asset (VTST, 1 000 units)\n' +
                '2. Node A opens a virtual Lightning channel to Node B carrying ' + CHANNEL_ASSET_AMOUNT + ' VTST of capacity\n' +
-               '3. A→B payment: Node B invoices ' + PAYMENT_ASSET_AMOUNT + ' VTST, Node A pays\n' +
-               '4. B→A reverse: Node A invoices ' + PAYMENT_ASSET_AMOUNT + ' VTST, Node B pays back\n\n' +
+               '3. Node A tries a 2nd, BTC-only virtual channel to the same peer — expected to be ' +
+               'rejected: virtual_channel_add_intent() caps virtual sessions at one per peer, ' +
+               'asset-agnostic (ldk.rs:777-802)\n' +
+               '4. A→B payment: Node B invoices ' + PAYMENT_ASSET_AMOUNT + ' VTST, Node A pays\n' +
+               '5. B→A reverse: Node A invoices ' + PAYMENT_ASSET_AMOUNT + ' VTST, Node B pays back\n' +
+               '6. Node A cooperatively closes the channel, confirmed via listChannels() on both nodes\n' +
+               '7. Node A immediately tries to open a NEW virtual channel to the same peer — repro of ' +
+               'the virtual-channel session-leak bug (docs/issue-virtual-session-leak.md): the LDK session ' +
+               'store never clears on ChannelClosed, so the reopen is expected to fail with ' +
+               '"virtual channel session already exists for this peer pair"\n' +
+               '8. A fresh Node C (no virtual flags, not in Node B\'s virtualPeerPubkeys) tries a ' +
+               'plain REGULAR channel to Node B — expected to be swept into the same ' +
+               'untrusted_virtual_peer rejection meant for virtual opens, since Node B\'s acceptor ' +
+               'branches on its own enableVirtualChannelsV0 flag before checking what the incoming ' +
+               'request actually asked for (docs/issue-virtual-channel-accept-mode.md)\n\n' +
                'Virtual channels differ from standard channels in that the channel open is negotiated off-chain ' +
                '(no on-chain funding transaction). This means no mining is required to open — the two nodes ' +
                'agree on the initial state directly.\n\n' +
@@ -183,6 +200,13 @@ export default function VirtualChannelScreen({ embedded = false }: { embedded?: 
             <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>mining blocks every 2 s</Text>
           </View>
         )}
+        {flow.phase === 'open_btc_channel' && (
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>Opening a 2nd (BTC-only) virtual channel to the same peer …</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>expecting one-per-peer rejection</Text>
+          </View>
+        )}
         {['pay_ab', 'settle_ab'].includes(flow.phase) && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
@@ -201,6 +225,30 @@ export default function VirtualChannelScreen({ embedded = false }: { embedded?: 
                 ? 'Part 2: Node B sending reverse → Node A …'
                 : `Part 2: settling B→A … ${flow.statusBA || 'Pending'}`}
             </Text>
+          </View>
+        )}
+        {flow.phase === 'close_channel' && (
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>
+              {flow.closeConfirmed
+                ? 'Channel closed ✓ — confirmed via listChannels()'
+                : 'Cooperatively closing the channel, then polling listChannels() on both nodes …'}
+            </Text>
+          </View>
+        )}
+        {flow.phase === 'reopen_attempt' && (
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>Attempting to reopen a virtual channel to the same peer …</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>expecting session-leak rejection</Text>
+          </View>
+        )}
+        {flow.phase === 'client_regular_open' && (
+          <View style={s.spinnerCard}>
+            <ActivityIndicator size="large" color={AppColors.primary} />
+            <Text style={s.spinnerTxt}>Node C (plain, no virtual flags) opening a REGULAR channel to Node B …</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>funding + mining, up to 40s</Text>
           </View>
         )}
 
@@ -252,6 +300,114 @@ export default function VirtualChannelScreen({ embedded = false }: { embedded?: 
             ['Amount', `${PAYMENT_MSAT / 1000} sat + ${PAYMENT_ASSET_AMOUNT} VTST`],
             ['Status', flow.statusBA || 'Pending'],
           ]} />
+        )}
+
+        {/* ── BTC + asset concurrent virtual channel result ── */}
+        {flow.btcChannelOutcome !== 'pending' && (
+          <View style={[s.card, {
+            borderColor: flow.btcChannelOutcome === 'blocked' ? AppColors.border
+              : flow.btcChannelOutcome === 'succeeded' ? AppColors.successBorder
+              : AppColors.errorBorder,
+          }]}>
+            <Text style={[s.cardTitle, {
+              color: flow.btcChannelOutcome === 'blocked' ? AppColors.textPrimary
+                : flow.btcChannelOutcome === 'succeeded' ? AppColors.success
+                : AppColors.error,
+            }]}>
+              {flow.btcChannelOutcome === 'blocked' && 'One virtual channel per peer confirmed (asset-agnostic)'}
+              {flow.btcChannelOutcome === 'succeeded' && '✓ BTC + asset virtual channels coexisted'}
+              {flow.btcChannelOutcome === 'error' && '✗ 2nd open failed — unexpected error'}
+            </Text>
+            <Text style={s.cardDesc}>
+              {flow.btcChannelOutcome === 'blocked' &&
+                `The RGB asset channel occupies the peer's only virtual-channel slot; a BTC-only open ` +
+                `to the same peer was rejected:\n\n${flow.btcChannelError}\n\nMatches ` +
+                `virtual_channel_add_intent() (ldk.rs:777-802) — the duplicate check is keyed on ` +
+                `peer_id only, with no asset dimension.`}
+              {flow.btcChannelOutcome === 'succeeded' &&
+                `Both a BTC-only channel (tmpChanId ${short(flow.btcChannelId, 16)}) and the RGB asset ` +
+                `channel are open to the same peer simultaneously — the one-per-peer limit did not apply.`}
+              {flow.btcChannelOutcome === 'error' &&
+                `The 2nd open failed with an error that doesn't match the expected one-per-peer ` +
+                `signature ("already exists for this peer pair"):\n\n${flow.btcChannelError}`}
+            </Text>
+          </View>
+        )}
+
+        {/* ── Accept-mode asymmetry result ── */}
+        {flow.clientOpenOutcome !== 'pending' && (
+          <View style={[s.card, {
+            borderColor: flow.clientOpenOutcome === 'accepted' ? AppColors.successBorder
+              : flow.clientOpenOutcome === 'timeout' ? AppColors.border
+              : flow.clientOpenOutcome === 'blocked' ? AppColors.successBorder
+              : AppColors.errorBorder,
+          }]}>
+            <Text style={[s.cardTitle, {
+              color: flow.clientOpenOutcome === 'accepted' ? AppColors.success
+                : flow.clientOpenOutcome === 'timeout' ? AppColors.textPrimary
+                : flow.clientOpenOutcome === 'blocked' ? AppColors.success
+                : AppColors.error,
+            }]}>
+              {flow.clientOpenOutcome === 'accepted' && '✓ Regular open from unlisted peer accepted'}
+              {flow.clientOpenOutcome === 'timeout' && '🐛 Likely accept-mode asymmetry — never appeared on Node B'}
+              {flow.clientOpenOutcome === 'blocked' && '🐛 Rejected — accept-mode asymmetry reproduced'}
+              {flow.clientOpenOutcome === 'error' && '✗ Local send failed — unexpected error'}
+            </Text>
+            <Text style={s.cardDesc}>
+              {flow.clientOpenOutcome === 'accepted' &&
+                `Node C (no virtual flags, not in Node B's virtualPeerPubkeys) sent a plain regular ` +
+                `openChannel() and it showed up on Node B's listChannels() — Node B's acceptor falls ` +
+                `back to a normal accept correctly, even with enableVirtualChannelsV0 on.`}
+              {flow.clientOpenOutcome === 'timeout' &&
+                `Node C's request never appeared on Node B within the timeout. Node C's own ` +
+                `openChannel() call succeeded locally (tmpChanId ${short(flow.clientOpenChanId, 16)}) — ` +
+                `that only means Node C sent the OpenChannel message, not that Node B accepted it. ` +
+                `Matches docs/issue-virtual-channel-accept-mode.md: Node B's acceptor branches on its ` +
+                `own enableVirtualChannelsV0 flag before checking what the incoming request actually ` +
+                `asked for, so a plain regular open from a peer outside virtualPeerPubkeys can be swept ` +
+                `into the untrusted_virtual_peer rejection meant for virtual opens. Check Node B's own ` +
+                `.ldk/logs/logs.txt for the exact reject reason.`}
+              {flow.clientOpenOutcome === 'blocked' &&
+                `Node C's openChannel() was rejected synchronously with the untrusted_virtual_peer ` +
+                `signature:\n\n${flow.clientOpenError}\n\nConfirms docs/issue-virtual-channel-accept-mode.md: ` +
+                `Node B's acceptor treats a plain regular open from a peer outside virtualPeerPubkeys as ` +
+                `an untrusted virtual peer, even though Node C never requested virtual_open_mode at all.`}
+              {flow.clientOpenOutcome === 'error' &&
+                `Node C's own openChannel() call failed before it could even reach Node B:\n\n${flow.clientOpenError}`}
+            </Text>
+          </View>
+        )}
+
+        {/* ── Session-leak repro result ── */}
+        {flow.reopenOutcome !== 'pending' && (
+          <View style={[s.card, {
+            borderColor: flow.reopenOutcome === 'blocked' ? AppColors.successBorder
+              : flow.reopenOutcome === 'succeeded' ? AppColors.border
+              : AppColors.errorBorder,
+          }]}>
+            <Text style={[s.cardTitle, {
+              color: flow.reopenOutcome === 'blocked' ? AppColors.success
+                : flow.reopenOutcome === 'succeeded' ? AppColors.textPrimary
+                : AppColors.error,
+            }]}>
+              {flow.reopenOutcome === 'blocked' && '🐛 Session-leak bug reproduced'}
+              {flow.reopenOutcome === 'succeeded' && '⚠ Reopen succeeded (bug did not reproduce)'}
+              {flow.reopenOutcome === 'error' && '✗ Reopen failed — unexpected error'}
+            </Text>
+            <Text style={s.cardDesc}>
+              {flow.reopenOutcome === 'blocked' &&
+                `Cooperative close confirmed on both nodes, then the second openChannel() to the same peer ` +
+                `was rejected:\n\n${flow.reopenErrorMsg}\n\nMatches docs/issue-virtual-session-leak.md: ` +
+                `virtual_channel_session_store is never reconciled on Event::ChannelClosed, so ` +
+                `virtual_channel_add_intent's duplicate check (peer_id only, no status/liveness filter) blocks the reopen.`}
+              {flow.reopenOutcome === 'succeeded' &&
+                `Close confirmed on both nodes, and the reopen (tmpChanId ${short(flow.reopenChanId, 16)}) succeeded. ` +
+                `Either this build already fixes the session-leak bug, or the fix landed since issue-virtual-session-leak.md was written.`}
+              {flow.reopenOutcome === 'error' &&
+                `Close confirmed on both nodes, but the reopen failed with an error that doesn't match the ` +
+                `known session-leak signature ("virtual channel session already exists for this peer pair"):\n\n${flow.reopenErrorMsg}`}
+            </Text>
+          </View>
         )}
 
         {/* ── Done ── */}

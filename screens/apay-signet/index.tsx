@@ -14,10 +14,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AppColors } from '@/constants/theme';
 
-import { PHASES_P1, PHASES_P2, short, type Phase } from '../apay/config';
+import { formatAssetAmount, PHASES_P1, PHASES_P2, short, type Phase } from '../apay/config';
 import { apayStyles as s, InfoCard, LogPane, PhaseRow } from '../apay/ui';
-import { ASSET_ID, LSP_URL, PAYMENT_ASSET_AMOUNT, PAYMENT_MSAT } from './config';
+import {
+  ASSET_ID,
+  ASSET_PRECISION,
+  ASSET_TICKER,
+  LSP_URL,
+  PAYMENT_ASSET_AMOUNT,
+  PAYMENT_MSAT,
+} from './config';
 import { useApayFlow } from './useApayFlow';
+
+/** Base units → "0.5 USDT" — every amount in this flow is in base units. */
+const fmtAsset = (units: number) =>
+  `${formatAssetAmount(units, ASSET_PRECISION)} ${ASSET_TICKER}`;
 
 function phaseMessage(phase: Phase): string {
   switch (phase) {
@@ -64,7 +75,9 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
           <Text style={s.subtitle}>UTEXO signet · recipient offline → LSP holds HTLC → online settlement</Text>
           <View style={s.badge}>
             <View style={[s.dot, { backgroundColor: flow.envReady ? AppColors.success : AppColors.error }]} />
-            <Text style={s.badgeTxt}>{flow.envReady ? 'Asset configured' : 'EXPO_PUBLIC_SIGNET_ASSET_ID not set'}</Text>
+            <Text style={s.badgeTxt}>
+              {flow.envReady ? `${ASSET_TICKER} · precision ${ASSET_PRECISION}` : 'Asset not configured'}
+            </Text>
           </View>
         </View>
 
@@ -80,7 +93,7 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
             <Text style={s.cardTitle}>Async Payment (APay) — Signet</Text>
             <Text style={s.cardDesc}>
               {'Same APay flow as regtest, but against the live signet stack —\n' +
-               'real RGB channels and no manual mining (waits for confirmations).\n\n' +
+               'virtual channels and no manual mining (waits for confirmations).\n\n' +
                'Part 1 — Recipient (merchant)\n' +
                '   Faucet funds BTC → createUtxos → LSP opens an RGB channel.\n' +
                '   enableLightningAddress registers a hash pool → Lightning Address.\n\n' +
@@ -98,7 +111,10 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
               <Text style={s.paramTitle}>Config</Text>
               <Text style={s.paramLine}>LSP     {LSP_URL}</Text>
               <Text style={s.paramLine}>Asset   {ASSET_ID ? short(ASSET_ID, 28) : '(not set)'}</Text>
-              <Text style={s.paramLine}>Pay     {PAYMENT_MSAT / 1000} sat + {PAYMENT_ASSET_AMOUNT} RGB</Text>
+              <Text style={s.paramLine}>Ticker  {ASSET_TICKER} (IFA, precision {ASSET_PRECISION})</Text>
+              <Text style={s.paramLine}>
+                Pay     {PAYMENT_MSAT / 1000} sat + {fmtAsset(PAYMENT_ASSET_AMOUNT)} ({PAYMENT_ASSET_AMOUNT} base units)
+              </Text>
             </View>
 
             <TouchableOpacity
@@ -111,13 +127,28 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
           </View>
         )}
 
-        {flow.isRunning && (
+        {flow.isRunning && !flow.awaitingContinue && (
           <View style={s.spinnerCard}>
             <ActivityIndicator size="large" color={AppColors.primary} />
             <Text style={s.spinnerTxt}>{phaseMessage(flow.phase)}</Text>
             <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>
               Signet — confirmations can take several minutes
             </Text>
+          </View>
+        )}
+
+        {flow.awaitingContinue && (
+          <View style={s.spinnerCard}>
+            <Text style={s.spinnerTxt}>⏸  Paused — Lightning Address ready</Text>
+            <Text style={[s.spinnerTxt, { fontSize: 11, marginTop: 4 }]}>
+              Inspect the address below, then continue to create the buyer and pay
+            </Text>
+            <TouchableOpacity
+              style={[s.startBtn, { marginTop: 14 }]}
+              onPress={flow.continueFlow}
+              activeOpacity={0.8}>
+              <Text style={s.startBtnTxt}>▶  Continue</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -146,7 +177,7 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
         {flow.hodlBolt11 && (
           <InfoCard title="HODL BOLT11 (LSP holding HTLC)" accent={AppColors.warning} rows={[
             ['Invoice',  short(flow.hodlBolt11, 32)],
-            ['Amount',   `${PAYMENT_MSAT / 1000} sat`],
+            ['Amount',   `${PAYMENT_MSAT / 1000} sat + ${fmtAsset(PAYMENT_ASSET_AMOUNT)}`],
             ['Pmt Hash', short(flow.paymentHash, 28)],
             ['Status',   hodlStatus],
           ]} />
@@ -154,8 +185,8 @@ export default function ApaySignetScreen({ embedded = false }: { embedded?: bool
 
         {flow.finalBalB && (
           <InfoCard title="Merchant Final Balance" accent={AppColors.success} rows={[
-            ['Offchain In',  String(flow.finalBalB.offchainInbound ?? 0)],
-            ['Offchain Out', String(flow.finalBalB.offchainOutbound ?? 0)],
+            ['Offchain In',  fmtAsset(Number(flow.finalBalB.offchainInbound ?? 0))],
+            ['Offchain Out', fmtAsset(Number(flow.finalBalB.offchainOutbound ?? 0))],
           ]} />
         )}
 

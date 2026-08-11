@@ -10,11 +10,14 @@
 # Run once before starting the demo app.
 # Outputs .env.lsp.local with LSP_ASSET_ID, LSP_PEER_PUBKEY, etc.
 #
+# One RGB asset is issued on the faucet:
+#   IFA "UTIF" precision 6 — fractional units, used by the APay IFA cart flow
+#
 # The regtest docker services (bitcoind, electrs, proxy) are started here if
 # they are not already up — no separate `./regtest.sh start` needed.
 #
 # Usage:
-#   ./scripts/start-lsp-regtest.sh
+#   ./scripts/start-lsp-regtest.sh          # serve UTIF (IFA, precision 6)
 #   VSS=1 ./scripts/start-lsp-regtest.sh    # …plus vss-server on :8181 (NOT
 #                                           # :8081 — Metro owns that port);
 #                                           # adds VSS_URL to e2e-fixtures.json
@@ -55,6 +58,55 @@ PROXY_ENDPOINT="rpc://127.0.0.1:3000/json-rpc"
 UNLOCK_BODY="{\"password\":\"$PASSWORD\",\"bitcoind_rpc_username\":\"$BTC_USER\",\"bitcoind_rpc_password\":\"$BTC_PASS\",\"bitcoind_rpc_host\":\"$BTC_HOST\",\"bitcoind_rpc_port\":$BTC_PORT,\"indexer_url\":\"$INDEXER_URL\",\"proxy_endpoint\":\"$PROXY_ENDPOINT\",\"announce_addresses\":[]}"
 
 ENV_OUT="$DEMO_DIR/.env.lsp.local"
+
+# ── demo asset ────────────────────────────────────────────────────────────────
+# Every amount below is in *base units* (10^-precision), the only unit the RGB
+# and LSP APIs speak. 1.000000 UTIF is therefore 1000000.
+IFA_TICKER="${IFA_TICKER:-UTIF}"
+IFA_NAME="${IFA_NAME:-UTEXO LSP Inflatable}"
+IFA_PRECISION="${IFA_PRECISION:-6}"
+
+# ── channel / amount policy ──────────────────────────────────────────────────
+CHANNEL_CAPACITY_SAT="${CHANNEL_CAPACITY_SAT:-200000}"
+CHANNEL_PUSH_MSAT="${CHANNEL_PUSH_MSAT:-5000000}"
+VIRTUAL_OPEN_MODE="${VIRTUAL_OPEN_MODE:-trusted_no_broadcast}"
+
+# RGB units the LSP puts on its side of each channel it opens: 1000000 base
+# units = 1.000000 UTIF. It caps what one payment may carry — see
+# validateDeliverableAmounts in utexo-lsp.
+CHANNEL_ASSET_AMOUNT="${CHANNEL_ASSET_AMOUNT:-1000000}"
+
+# Seeding: SEED_ROUNDS separate sends per asset, each landing on its own LSP
+# UTXO, so several channels can be funded in parallel. 20 channels' worth per
+# round keeps the LSP from hitting InsufficientAssets mid-demo.
+SEED_ROUNDS="${SEED_ROUNDS:-6}"
+SEED_UNITS="${SEED_UNITS:-$((CHANNEL_ASSET_AMOUNT * 20))}"
+ISSUE_AMOUNT="${ISSUE_AMOUNT:-$((SEED_UNITS * SEED_ROUNDS * 2))}"
+
+# Per-payment floor advertised by utexo-lsp. rgb-lightning-node negotiates
+# VIRTUAL_HTLC_MIN_MSAT (1000 msat = 1 sat) on virtual channels and
+# HTLC_MIN_MSAT (3000000 msat) on regular ones — an RGB payment rides the HTLC
+# output, and a dust-trimmed HTLC on a broadcastable commitment cannot settle
+# it. A trusted_no_broadcast channel is never broadcast, so 1 sat is safe there
+# and the floor follows VIRTUAL_OPEN_MODE.
+if [ -n "$VIRTUAL_OPEN_MODE" ]; then
+  MIN_AMT_MSAT="${MIN_AMT_MSAT:-1000}"
+else
+  MIN_AMT_MSAT="${MIN_AMT_MSAT:-3000000}"
+fi
+# minSendable is what the SDK validates payAddress against, so it has to track
+# MIN_AMT_MSAT or the LSP would advertise a floor it does not enforce.
+LN_ADDR_MIN_SENDABLE_MSAT="${LN_ADDR_MIN_SENDABLE_MSAT:-$MIN_AMT_MSAT}"
+# …and maxSendable to the per-HTLC ceiling utexo-lsp derives from capacity ×
+# PEER_MAX_INBOUND_HTLC_IN_FLIGHT_PERCENT (10), so discovery cannot promise more
+# than a fresh channel could carry.
+LN_ADDR_MAX_SENDABLE_MSAT="${LN_ADDR_MAX_SENDABLE_MSAT:-$((CHANNEL_CAPACITY_SAT * 1000 * 10 / 100))}"
+
+# Colored-UTXO budget. Each blinded receive burns one UTXO on the LSP and each
+# send needs change on the faucet; with SEED_ROUNDS rounds the stock 10 would
+# run out before seeding finishes.
+LSP_UTXO_NUM="${LSP_UTXO_NUM:-25}"
+FAUCET_UTXO_NUM="${FAUCET_UTXO_NUM:-30}"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -288,43 +340,37 @@ sleep 3
 
 # ── create UTXOs ──────────────────────────────────────────────────────────────
 
-UTXO_BODY='{"up_to":false,"num":10,"size":null,"fee_rate":7,"skip_sync":false}'
-
-log "Creating UTXOs on LSP …"
-rln_post "$LSP_PORT"    "/createutxos" "$UTXO_BODY" >/dev/null
-log "Creating UTXOs on Faucet …"
-rln_post "$FAUCET_PORT" "/createutxos" "$UTXO_BODY" >/dev/null
+log "Creating $LSP_UTXO_NUM UTXOs on LSP …"
+rln_post "$LSP_PORT"    "/createutxos" \
+  "{\"up_to\":false,\"num\":$LSP_UTXO_NUM,\"size\":null,\"fee_rate\":7,\"skip_sync\":false}" >/dev/null
+log "Creating $FAUCET_UTXO_NUM UTXOs on Faucet …"
+rln_post "$FAUCET_PORT" "/createutxos" \
+  "{\"up_to\":false,\"num\":$FAUCET_UTXO_NUM,\"size\":null,\"fee_rate\":7,\"skip_sync\":false}" >/dev/null
 btc_mine 1
 sleep 2
 
-# ── issue RGB asset on Faucet ─────────────────────────────────────────────────
+# ── issue RGB assets on Faucet ───────────────────────────────────────────────
 
-log "Issuing RGB asset on Faucet …"
-ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetnia" \
-  '{"ticker":"UTST","name":"UTEXO LSP Test","precision":0,"amounts":[1000]}')
-ASSET_ID=$(echo "$ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
-[ -n "$ASSET_ID" ] || die "Failed to parse asset_id from: $ISSUE_RESP"
-log "Asset ID: $ASSET_ID"
-btc_mine 1
-sleep 2
+# seed_lsp <asset_id> <label> — SEED_ROUNDS sends of SEED_UNITS each, one per
+# LSP UTXO (mirrors seed_lsp_from_faucet in the utexo-lsp harness.py).
+seed_lsp() {
+  local asset_id=$1; local label=$2
+  log "Seeding LSP with $SEED_ROUNDS × $SEED_UNITS $label base units from Faucet …"
+  local i
+  for ((i = 1; i <= SEED_ROUNDS; i++)); do
+    log "  $label seed $i/$SEED_ROUNDS …"
 
-# ── seed LSP from Faucet (mirrors seed_lsp_from_faucet in harness.py) ────────
+    # RGB invoice on LSP — no asset_id (receive any asset, mirrors lsp.rgbinvoice_any())
+    local expiry rgb_invoice_resp recipient_id send_body
+    expiry=$(($(date +%s) + 3600))
+    rgb_invoice_resp=$(rln_post "$LSP_PORT" "/rgbinvoice" \
+      "{\"assignment\":{\"type\":\"Any\"},\"expiration_timestamp\":$expiry,\"min_confirmations\":1,\"witness\":false}")
+    recipient_id=$(echo "$rgb_invoice_resp" | jq -r '.recipient_id')
+    [ -n "$recipient_id" ] || die "No recipient_id in rgbinvoice response: $rgb_invoice_resp"
 
-log "Seeding LSP with 6 RGB units from Faucet …"
-for i in 1 2 3 4 5 6; do
-  log "  Seed $i/6 …"
-
-  # Get RGB invoice on LSP — no asset_id (receive any asset, mirrors lsp.rgbinvoice_any())
-  EXPIRY=$(($(date +%s) + 3600))
-  RGB_INVOICE_RESP=$(rln_post "$LSP_PORT" "/rgbinvoice" \
-    "{\"assignment\":{\"type\":\"Any\"},\"expiration_timestamp\":$EXPIRY,\"min_confirmations\":1,\"witness\":false}")
-  RECIPIENT_ID=$(echo "$RGB_INVOICE_RESP" | jq -r '.recipient_id')
-  [ -n "$RECIPIENT_ID" ] || die "No recipient_id in rgbinvoice response: $RGB_INVOICE_RESP"
-
-  # Send 1 unit from Faucet → LSP
-  # Note: skip_sync is required by the Rust struct (not in openapi docs)
-  # assignment format: {"type":"Fungible","value":N}
-  SEND_BODY=$(printf '{
+    # Note: skip_sync is required by the Rust struct (not in openapi docs)
+    # assignment format: {"type":"Fungible","value":N}
+    send_body=$(printf '{
   "donation": true,
   "fee_rate": 7,
   "min_confirmations": 1,
@@ -333,26 +379,40 @@ for i in 1 2 3 4 5 6; do
     "%s": [
       {
         "recipient_id": "%s",
-        "assignment": {"type": "Fungible", "value": 1},
+        "assignment": {"type": "Fungible", "value": %s},
         "transport_endpoints": ["%s"]
       }
     ]
   }
-}' "$ASSET_ID" "$RECIPIENT_ID" "$PROXY_ENDPOINT")
-  rln_post "$FAUCET_PORT" "/sendrgb" "$SEND_BODY" >/dev/null
-  btc_mine 1
-  sleep 2
+}' "$asset_id" "$recipient_id" "$SEED_UNITS" "$PROXY_ENDPOINT")
+    rln_post "$FAUCET_PORT" "/sendrgb" "$send_body" >/dev/null
+    btc_mine 1
+    sleep 2
 
-  # Double refresh (mirrors harness.py)
-  rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
-  rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
-done
+    # Double refresh (mirrors harness.py)
+    rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+    rln_post "$LSP_PORT"    "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+    rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+    rln_post "$FAUCET_PORT" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+  done
 
-log "LSP seeded. Checking LSP asset balance …"
-LSP_BAL=$(rln_post "$LSP_PORT" "/assetbalance" "{\"asset_id\":\"$ASSET_ID\"}" | jq '.settled // 0')
-log "LSP settled balance: $LSP_BAL"
+  local bal
+  bal=$(rln_post "$LSP_PORT" "/assetbalance" "{\"asset_id\":\"$asset_id\"}" | jq '.settled // 0')
+  log "LSP settled balance ($label): $bal"
+}
+
+log "Issuing IFA asset $IFA_TICKER (precision $IFA_PRECISION) on Faucet …"
+IFA_ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetifa" \
+  "{\"ticker\":\"$IFA_TICKER\",\"name\":\"$IFA_NAME\",\"precision\":$IFA_PRECISION,\"amounts\":[$ISSUE_AMOUNT],\"inflation_amounts\":[$ISSUE_AMOUNT],\"reject_list_url\":null}")
+IFA_ASSET_ID=$(echo "$IFA_ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
+[ -n "$IFA_ASSET_ID" ] || die "Failed to parse IFA asset_id from: $IFA_ISSUE_RESP"
+log "$IFA_TICKER asset ID: $IFA_ASSET_ID"
+btc_mine 1
+sleep 2
+
+# ── seed LSP from Faucet ─────────────────────────────────────────────────────
+
+seed_lsp "$IFA_ASSET_ID" "$IFA_TICKER"
 
 # ── set adb reverse ports so Android emulator can reach proxy + LSP ──────────
 # Must happen BEFORE utexo-lsp starts; otherwise cron fires, consignment
@@ -388,19 +448,26 @@ sleep 2
 rm -f "$UTEXO_LSP_REPO/utexo_lsp.db"
 log "Wiped utexo_lsp.db"
 
-log "Starting utexo-lsp (port $UTEXO_PORT) with SUPPORTED_ASSET_IDS=$ASSET_ID …"
+log "Starting utexo-lsp (port $UTEXO_PORT) with SUPPORTED_ASSET_IDS=$IFA_ASSET_ID ($IFA_TICKER) …"
+log "  MIN_AMT_MSAT=$MIN_AMT_MSAT  minSendable=$LN_ADDR_MIN_SENDABLE_MSAT  maxSendable=$LN_ADDR_MAX_SENDABLE_MSAT"
 cd "$UTEXO_LSP_REPO"
 env \
   LSP_BASE_URL="http://127.0.0.1:$LSP_PORT" \
   RGB_NODE_BASE_URL="http://127.0.0.1:$LSP_PORT" \
   LIGHTNING_ADDRESS_DOMAIN_URL="http://127.0.0.1:$UTEXO_PORT" \
-  SUPPORTED_ASSET_IDS="$ASSET_ID" \
+  LSP_NODE_HOST="127.0.0.1" \
+  LSP_NODE_PORT="$LSP_PEER_PORT" \
+  SUPPORTED_ASSET_IDS="$IFA_ASSET_ID" \
   CRON_EVERY="5s" \
-  DEFAULT_CHANNEL_CAPACITY_SAT="200000" \
-  DEFAULT_CHANNEL_PUSH_MSAT="5000000" \
-  DEFAULT_CHANNEL_ASSET_AMOUNT="2" \
-  DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast" \
-  MIN_AMT_MSAT="3000000" \
+  DELIVERY_RETRY_BASE_DELAY="${DELIVERY_RETRY_BASE_DELAY:-5s}" \
+  DELIVERY_RETRY_MAX_DELAY="${DELIVERY_RETRY_MAX_DELAY:-20s}" \
+  DEFAULT_CHANNEL_CAPACITY_SAT="$CHANNEL_CAPACITY_SAT" \
+  DEFAULT_CHANNEL_PUSH_MSAT="$CHANNEL_PUSH_MSAT" \
+  DEFAULT_CHANNEL_ASSET_AMOUNT="$CHANNEL_ASSET_AMOUNT" \
+  DEFAULT_VIRTUAL_OPEN_MODE="$VIRTUAL_OPEN_MODE" \
+  MIN_AMT_MSAT="$MIN_AMT_MSAT" \
+  LIGHTNING_ADDRESS_MIN_SENDABLE_MSAT="$LN_ADDR_MIN_SENDABLE_MSAT" \
+  LIGHTNING_ADDRESS_MAX_SENDABLE_MSAT="$LN_ADDR_MAX_SENDABLE_MSAT" \
   EXPIRY_MATCH_TOLERANCE_SEC="30" \
   UTXO_MIN_COUNT="15" \
   UTXO_TARGET_COUNT="25" \
@@ -415,7 +482,11 @@ wait_for_utexo
 # URLs are computed at runtime from Platform.OS (mirrors wallet-flow.ts pattern).
 # Only write non-URL values to env files.
 cat > "$ENV_OUT" <<EOF
-EXPO_PUBLIC_LSP_REGTEST_ASSET_ID="$ASSET_ID"
+EXPO_PUBLIC_LSP_REGTEST_IFA_ASSET_ID="$IFA_ASSET_ID"
+EXPO_PUBLIC_LSP_REGTEST_IFA_TICKER="$IFA_TICKER"
+EXPO_PUBLIC_LSP_REGTEST_IFA_PRECISION="$IFA_PRECISION"
+EXPO_PUBLIC_LSP_REGTEST_MIN_AMT_MSAT="$MIN_AMT_MSAT"
+EXPO_PUBLIC_LSP_REGTEST_CHANNEL_ASSET_AMOUNT="$CHANNEL_ASSET_AMOUNT"
 EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
 EOF
@@ -427,11 +498,7 @@ if [ -f "$ENV_LOCAL" ]; then
   grep -v "^EXPO_PUBLIC_LSP_REGTEST_\|^EXPO_PUBLIC_FAUCET_REGTEST_" "$ENV_LOCAL" > "$ENV_LOCAL.tmp" && mv "$ENV_LOCAL.tmp" "$ENV_LOCAL"
 fi
 
-cat >> "$ENV_LOCAL" <<EOF
-EXPO_PUBLIC_LSP_REGTEST_ASSET_ID="$ASSET_ID"
-EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
-EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
-EOF
+cat "$ENV_OUT" >> "$ENV_LOCAL"
 log "LSP regtest vars written to $ENV_LOCAL (single env-file workflow)"
 
 # ── e2e fixtures — machine-readable, additive to the env files above ──────────
@@ -446,7 +513,11 @@ VSS_URL_VALUE=""
 jq -n \
   --arg vssUrl "$VSS_URL_VALUE" \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg assetId "$ASSET_ID" \
+  --arg ifaAssetId "$IFA_ASSET_ID" \
+  --arg ifaTicker "$IFA_TICKER" \
+  --argjson ifaPrecision "$IFA_PRECISION" \
+  --argjson minAmtMsat "$MIN_AMT_MSAT" \
+  --argjson channelAssetAmount "$CHANNEL_ASSET_AMOUNT" \
   --arg lspPubkey "$LSP_PUBKEY" \
   --arg faucetPubkey "$FAUCET_PUBKEY" \
   --arg lspUrl "http://127.0.0.1:$LSP_PORT" \
@@ -460,7 +531,11 @@ jq -n \
   '{
     generatedAt: $generatedAt,
     platform: "rn",
-    ASSET_ID: $assetId,
+    IFA_ASSET_ID: $ifaAssetId,
+    IFA_TICKER: $ifaTicker,
+    IFA_PRECISION: $ifaPrecision,
+    MIN_AMT_MSAT: $minAmtMsat,
+    CHANNEL_ASSET_AMOUNT: $channelAssetAmount,
     LSP_PUBKEY: $lspPubkey,
     FAUCET_PUBKEY: $faucetPubkey,
     LSP_URL: $lspUrl,
@@ -483,10 +558,13 @@ log "  utexo-lsp:   http://127.0.0.1:$UTEXO_PORT"
 log "  LSP daemon:  http://127.0.0.1:$LSP_PORT  (peer :$LSP_PEER_PORT)"
 log "  Faucet:      http://127.0.0.1:$FAUCET_PORT  (peer :$FAUCET_PEER_PORT)"
 [ "${VSS:-}" = "1" ] && log "  VSS:         $VSS_URL"
-log "  Asset ID:    $ASSET_ID"
+log "  SERVING:     $IFA_TICKER (IFA, precision $IFA_PRECISION): $IFA_ASSET_ID"
+log "  Channel asset amount: $CHANNEL_ASSET_AMOUNT base units per channel"
+log "  MIN_AMT_MSAT:         $MIN_AMT_MSAT msat ($((MIN_AMT_MSAT / 1000)) sat)"
 log "  LSP pubkey:  $LSP_PUBKEY"
 log "  Env file:    $ENV_OUT"
 log "  Fixtures:    $FIXTURES"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  Start demo app, select Regtest in LSP tab"
+log "  Runnable now: APay Cart Checkout · IFA"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
