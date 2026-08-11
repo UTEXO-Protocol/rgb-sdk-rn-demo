@@ -55,18 +55,17 @@ config.resolver = {
         type: 'sourceFile',
       };
     }
-    // The bare `.` entry needs no mapping while core is installed from npm:
-    // with package exports off it falls back to `main` (dist/index.cjs), which
-    // resolves out of the demo's own node_modules. The sibling-checkout setup
-    // did need it — restore this together with the localCoreSdkPath and
-    // watchFolders lines above when switching back to file:../rgb-sdk-rn.
-    //
-    // if (moduleName === '@utexo/rgb-sdk-core') {
-    //   return {
-    //     filePath: path.resolve(localCoreSdkPath, 'dist/index.mjs'),
-    //     type: 'sourceFile',
-    //   };
-    // }
+    // The RN SDK re-exports runtime code from `@utexo/rgb-sdk-core` (LSP
+    // client, network defaults, shared types). With package exports off the
+    // bare `.` entry isn't resolved on its own, so map it to the sibling
+    // checkout's built ESM bundle by hand — this is the sibling-checkout
+    // counterpart to the `coreSdkPath` probe above.
+    if (moduleName === '@utexo/rgb-sdk-core') {
+      return {
+        filePath: path.resolve(localCoreSdkPath, 'dist/index.mjs'),
+        type: 'sourceFile',
+      };
+    }
     if (
       moduleName === './ExponentConstants' &&
       context.originModulePath.includes('expo-constants/build/Constants.js')
