@@ -64,6 +64,7 @@ import {
   SETTLE_TIMEOUT_S,
   sleep,
   short,
+  toDaemonUrl,
   UTST_ASSET,
   type ApayAsset,
   type ApayFlowVariant,
@@ -412,7 +413,8 @@ export function useApayFlow(options: UseApayFlowOptions = {}) {
         req('faucet.decodergbinvoice');
         const topupDecoded = await faucet.decodeRgbInvoice(topupRgbInvoice);
         const topupRecipientId = topupDecoded.recipient_id;
-        const topupEndpoints = topupDecoded.transport_endpoints ?? [`rpc://${host}:3000/json-rpc`];
+        const topupEndpoints = (topupDecoded.transport_endpoints ?? [`rpc://${host}:3000/json-rpc`])
+          .map(toDaemonUrl);
         const topupAssignment = (topupDecoded.assignment?.type === 'Fungible' && topupDecoded.assignment?.value > 0)
           ? topupDecoded.assignment
           : { type: 'Fungible', value: paymentAssetAmount };

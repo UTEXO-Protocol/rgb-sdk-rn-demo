@@ -21,6 +21,39 @@
 #   VSS=1 ./scripts/start-lsp-regtest.sh    # …plus vss-server on :8181 (NOT
 #                                           # :8081 — Metro owns that port);
 #                                           # adds VSS_URL to e2e-fixtures.json
+#   TWO_ASSETS=1 ./scripts/start-lsp-regtest.sh
+#                                           # issue TWO assets instead of a single
+#                                           # UTIF, for the APay bridge-asset
+#                                           # checkout. Both are ordinary IFA
+#                                           # contracts on the Faucet, unrelated to
+#                                           # each other:
+#                                           #   LNUSDT — what the merchant is paid
+#                                           #            out in; the only
+#                                           #            SUPPORTED_ASSET_ID, seeded
+#                                           #            to the LSP from the Faucet
+#                                           #   BUSDT  — what the buyer holds and
+#                                           #            spends; CONVERTIBLE only,
+#                                           #            the cron never opens it
+#                                           # utexo-lsp quotes the buyer in BUSDT and
+#                                           # pays the merchant in LNUSDT, converting
+#                                           # 1:1 between the two legs of one APay
+#                                           # payment — option A of
+#                                           # docs/apay-linked-asset-options.uk.md,
+#                                           # as revised in its §10. There is no RGB
+#                                           # Asset Link anywhere: CONVERTIBLE_PAIRS
+#                                           # is what authorizes the conversion.
+#                                           # No virtual channels anywhere in this
+#                                           # mode: LSP starts WITHOUT
+#                                           # --enable-virtual-channels-v0, and its
+#                                           # cron opens the merchant's LNUSDT leg as
+#                                           # a regular on-chain channel
+#                                           # (DEFAULT_VIRTUAL_OPEN_MODE unset). The
+#                                           # buyer's BUSDT channel is opened by the
+#                                           # client itself — the app is responsible
+#                                           # for that, this script only issues the
+#                                           # assets and exposes BRIDGE_ASSET_ID.
+#                                           # LINKED_ASSET=1 still works as the old
+#                                           # name of this flag.
 #   ./scripts/start-lsp-regtest.sh stop     # kill daemons (docker stays up)
 
 set -euo pipefail
@@ -66,19 +99,93 @@ IFA_TICKER="${IFA_TICKER:-UTIF}"
 IFA_NAME="${IFA_NAME:-UTEXO LSP Inflatable}"
 IFA_PRECISION="${IFA_PRECISION:-6}"
 
-# ── channel / amount policy ──────────────────────────────────────────────────
-CHANNEL_CAPACITY_SAT="${CHANNEL_CAPACITY_SAT:-200000}"
-CHANNEL_PUSH_MSAT="${CHANNEL_PUSH_MSAT:-5000000}"
-VIRTUAL_OPEN_MODE="${VIRTUAL_OPEN_MODE:-trusted_no_broadcast}"
+# ── two-asset checkout (opt-in) ─────────────────────────────────────────────
+# TWO_ASSETS=1 replaces the single UTIF issuance with two assets, for the APay
+# bridge-asset checkout (option A of docs/apay-linked-asset-options.uk.md — the
+# LSP converts 1:1 between the two legs of one APay payment):
+#
+#   LNUSDT — issued on the Faucet, seeded to the LSP, what the MERCHANT is paid
+#            out in and what utexo-lsp serves (SUPPORTED_ASSET_IDS)
+#   BUSDT  — issued on the Faucet, what the BUYER holds and spends
+#            (CONVERTIBLE_ASSET_IDS — accepted and paid out, never provisioned)
+#
+# Both are plain IFA contracts with no relationship to each other. The pair used
+# to be an RGB Asset Link, which forced the LSP to issue LNUSDT itself: the proof
+# (parent.linked_to_asset_id + a settled Link transfer) lives only in the wallet
+# that ran link_ifa and never travels in a consignment, measured in
+# docs/linked-asset-bridge-test-report.md §5.2. utexo-lsp no longer looks for it —
+# CONVERTIBLE_PAIRS is the entire authorization. See §10 of
+# docs/apay-linked-asset-options.uk.md.
+TWO_ASSETS="${TWO_ASSETS:-${LINKED_ASSET:-0}}"   # LINKED_ASSET=1: old name
+LN_IFA_TICKER="${LN_IFA_TICKER:-LNUSDT}"
+LN_IFA_NAME="${LN_IFA_NAME:-LnUSDT}"
+BRIDGE_IFA_TICKER="${BRIDGE_IFA_TICKER:-BUSDT}"
+BRIDGE_IFA_NAME="${BRIDGE_IFA_NAME:-bridgeUSDT}"
+# Dust-sized send that teaches the LSP a contract it did not issue and is never
+# seeded: without it /assetmetadata for BUSDT 403s with UnknownContractId, and
+# discovery cannot advertise the asset's ticker/precision before the buyer's own
+# channel exists.
+BRIDGE_BOOTSTRAP_UNITS="${BRIDGE_BOOTSTRAP_UNITS:-${LINK_BOOTSTRAP_UNITS:-1}}"
 
-# RGB units the LSP puts on its side of each channel it opens: 1000000 base
-# units = 1.000000 UTIF. It caps what one payment may carry — see
+# ── channel / amount policy ──────────────────────────────────────────────────
+#
+# Sized to mirror the signet deployment (utexo-lsp/.env.signet), so a regtest run
+# exercises the numbers production will actually use. The three values below are
+# one decision, not three — see CHANNEL_ASSET_AMOUNT for the arithmetic.
+#
+# Capacity is driven by sats, not by the asset: every delivery to a peer also
+# moves >= MIN_AMT_MSAT of sats to its side, and they only come back if the peer
+# spends. So capacity buys PAYMENTS, at a flat 3 000 sat each:
+#
+#   deliveries = (capacity - push_sat) / (MIN_AMT_MSAT / 1000)
+#              = (75 000 - 12 000) / 3 000 = 21
+#
+# 75 000 is chosen to be affordable on mainnet, where these sats are locked per
+# peer. It cannot go much lower: rgb-lightning-node refuses an RGB channel below
+# htlc_min_msat/1000 * 10 + 10 = 30 010 sat (ChannelsSection::open_rgb_min_sat,
+# src/config/mod.rs) — "at least ten minimum HTLCs". 75 000 is 2.5x that floor.
+CHANNEL_CAPACITY_SAT="${CHANNEL_CAPACITY_SAT:-75000}"
+
+# What the peer can SPEND before it has received anything. LDK locks 1% of
+# capacity as the peer's channel reserve (their_channel_reserve_proportional_
+# millionths = 10_000, rust-lightning util/config.rs; RLN only overrides it to 0
+# for virtual opens), so 750 sat here is untouchable and 12 000 - 750 leaves 3
+# payments at the floor — the cart flow's refund, relay and recipient legs, each
+# of which is anyway preceded by a receive. The old 5 000 000 left exactly ONE.
+#
+# In production this can go lower still: a peer that only ever receives needs no
+# push at all. It is the merchant paying OUT that costs you this.
+CHANNEL_PUSH_MSAT="${CHANNEL_PUSH_MSAT:-12000000}"
+# TWO_ASSETS=1 is on-chain-only end to end (see docs/apay-linked-asset-mvp.md):
+# the LSP's cron opens the merchant's payout leg as a regular channel, not virtual.
+_DEFAULT_VIRTUAL_OPEN_MODE="trusted_no_broadcast"
+[ "$TWO_ASSETS" = "1" ] && _DEFAULT_VIRTUAL_OPEN_MODE=""
+VIRTUAL_OPEN_MODE="${VIRTUAL_OPEN_MODE-$_DEFAULT_VIRTUAL_OPEN_MODE}"
+
+# RGB units the LSP puts on its side of each channel it opens: 100000000 base
+# units = 100.000000 at precision 6. It caps what one payment may carry — see
 # validateDeliverableAmounts in utexo-lsp.
-CHANNEL_ASSET_AMOUNT="${CHANNEL_ASSET_AMOUNT:-1000000}"
+#
+# Match it to the sats, not the other way round. A payment costs a flat 3 000 sat
+# however much asset it carries, so the channel's 21 deliveries want
+#
+#   asset_per_channel = 21 x typical_payment
+#
+# and 100 units divides into 20 payments of 5 units. That is what fixes the cart
+# flow's checkout at 5 units rather than 0.5: at 0.5 the 3 000 sat floor is 6x
+# the value being moved, and matching 100 units would have needed a 640 000 sat
+# channel per peer — unaffordable on mainnet. The floor is also why sub-dollar
+# RGB payments do not make economic sense on a regular (broadcastable) channel;
+# only trusted_no_broadcast channels drop it to 1 sat, and this mode has none.
+CHANNEL_ASSET_AMOUNT="${CHANNEL_ASSET_AMOUNT:-100000000}"
 
 # Seeding: SEED_ROUNDS separate sends per asset, each landing on its own LSP
 # UTXO, so several channels can be funded in parallel. 20 channels' worth per
 # round keeps the LSP from hitting InsufficientAssets mid-demo.
+#
+# Both derive from CHANNEL_ASSET_AMOUNT, so they followed it up ×100: 2e9 base
+# units per round, 2.4e10 issued (24 000 units, ~120 channels' worth). Large but
+# free — this is regtest, and an IFA `amounts` entry is a u64.
 SEED_ROUNDS="${SEED_ROUNDS:-6}"
 SEED_UNITS="${SEED_UNITS:-$((CHANNEL_ASSET_AMOUNT * 20))}"
 ISSUE_AMOUNT="${ISSUE_AMOUNT:-$((SEED_UNITS * SEED_ROUNDS * 2))}"
@@ -114,10 +221,16 @@ log() { echo "[lsp-setup] $*"; }
 die() { echo "[lsp-setup] ERROR: $*" >&2; exit 1; }
 
 rln_post() {
-  local port=$1; local path=$2; local body=${3:-'{}'};
-  curl -sf -X POST "http://127.0.0.1:$port$path" \
-    -H 'Content-Type: application/json' \
-    -d "$body" || die "POST $path failed on port $port"
+  local port=$1 path=$2 body=${3:-'{}'} resp
+  resp=$(curl -s -w "\n%{http_code}" -X POST "http://127.0.0.1:$port$path" \
+    -H 'Content-Type: application/json' -d "$body") || die "POST $path failed on port $port (curl error)"
+  local code=${resp##*$'\n'}
+  local payload=${resp%"$code"}
+  payload=${payload%$'\n'}
+  case "$code" in
+    2*) printf '%s' "$payload" ;;
+    *) die "POST $path failed on port $port (HTTP $code): $payload" ;;
+  esac
 }
 
 rln_get() {
@@ -171,7 +284,7 @@ if [ "${1:-}" = "stop" ]; then
   pkill -f "rgb-lightning-node.*data_lsp"    2>/dev/null || true
   pkill -f "rgb-lightning-node.*data_faucet" 2>/dev/null || true
   pkill -f "go run \."                       2>/dev/null || true
-  pkill -f "utexo-lsp"                       2>/dev/null || true
+  pkill -f "/utexo-lsp$"                     2>/dev/null || true
   pkill -f "local-node-bridge"               2>/dev/null || true
   # A fixture describing a torn-down stack would send e2e at dead endpoints.
   rm -f "$DEMO_DIR/e2e-fixtures.json"
@@ -206,9 +319,26 @@ regtest_running() { # 0 = up, 1 = down, 2 = docker unreachable
   grep -qx bitcoind <<<"$out"
 }
 
+port_open() { nc -z -G 1 127.0.0.1 "$1" >/dev/null 2>&1; }
+
+wait_for_tcp() {
+  local port=$1 label=$2 deadline=$((SECONDS + 60))
+  while ! port_open "$port"; do
+    [ $SECONDS -lt $deadline ] || die "$label did not listen on :$port within 60s"
+    sleep 1
+  done
+}
+
 regtest_running && rc=0 || rc=$?
 case "$rc" in
-  0) log "Regtest services already running" ;;
+  0)
+    # bitcoind up is not enough: /unlock needs electrs on :50001. electrs often
+    # exits independently (indexer rebuild, docker restart of one container)
+    # while bitcoind and proxy stay up. `compose up -d` here is additive — it
+    # does NOT run `down -v`, so the chain is kept.
+    log "bitcoind is running — ensuring electrs (:50001) and proxy (:3000) …"
+    docker compose up -d electrs proxy || die "failed to start electrs/proxy"
+    ;;
   1)
     log "Regtest not running — starting it (./regtest.sh start, fresh chain) …"
     # VSS is deliberately NOT passed through: regtest.sh publishes vss-server on
@@ -218,6 +348,10 @@ case "$rc" in
     ;;
   *) die "could not query docker compose in $RGBLN_REPO — is Docker running?" ;;
 esac
+wait_for_tcp 18443 "bitcoind"
+wait_for_tcp 50001 "electrs"
+wait_for_tcp 3000  "RGB proxy"
+log "Regtest services ready (bitcoind :18443, electrs :50001, proxy :3000)"
 
 # The vss profile is part of the same compose project but not of a plain
 # `regtest.sh start`, so it is added separately either way.
@@ -263,12 +397,18 @@ log "Starting LSP RLN daemon (port $LSP_PORT, peer $LSP_PEER_PORT) …"
 # --enable-virtual-channels-v0: required for async-pay.tsx — User B nodes are created with
 #   enableVirtualChannelsV0:true and reject standard anchor channels with "unsupported_scid_alias".
 #   Virtual channels (trusted_no_broadcast) avoid the SCID-alias negotiation entirely.
+#   Skipped under TWO_ASSETS=1: that flow is on-chain only (no virtual channels
+#   anywhere), and the flag's accept-side behavior would force-convert the
+#   client's inbound bridge-asset channel open into virtual — see
+#   docs/apay-linked-asset-mvp.md "Why no utexo-lsp / node change is needed".
+LSP_VIRTUAL_FLAG=""
+[ "$TWO_ASSETS" != "1" ] && LSP_VIRTUAL_FLAG="--enable-virtual-channels-v0"
 "$RLN_BIN" "$LSP_DIR" \
   --daemon-listening-port "$LSP_PORT" \
   --ldk-peer-listening-port "$LSP_PEER_PORT" \
   --network regtest \
   --disable-authentication \
-  --enable-virtual-channels-v0 \
+  $LSP_VIRTUAL_FLAG \
   --lsp-base-url "http://127.0.0.1:$UTEXO_PORT" \
   --lsp-bearer-token "$APAY_BEARER_TOKEN" \
   >"$DEMO_DIR/logs/rln-lsp.log" 2>&1 &
@@ -401,18 +541,101 @@ seed_lsp() {
   log "LSP settled balance ($label): $bal"
 }
 
-log "Issuing IFA asset $IFA_TICKER (precision $IFA_PRECISION) on Faucet …"
-IFA_ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetifa" \
-  "{\"ticker\":\"$IFA_TICKER\",\"name\":\"$IFA_NAME\",\"precision\":$IFA_PRECISION,\"amounts\":[$ISSUE_AMOUNT],\"inflation_amounts\":[$ISSUE_AMOUNT],\"reject_list_url\":null}")
-IFA_ASSET_ID=$(echo "$IFA_ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
-[ -n "$IFA_ASSET_ID" ] || die "Failed to parse IFA asset_id from: $IFA_ISSUE_RESP"
-log "$IFA_TICKER asset ID: $IFA_ASSET_ID"
-btc_mine 1
-sleep 2
+# The bridge asset the BUYER spends. Empty unless TWO_ASSETS=1 — everything
+# downstream treats "" as "single-asset stack".
+BRIDGE_ASSET_ID=""
 
-# ── seed LSP from Faucet ─────────────────────────────────────────────────────
+# send_rgb_bootstrap <from_port> <to_port> <asset_id> <units> <label>
+# Teaches <to_port>'s wallet a contract it did not issue, by actually sending it
+# some. The receiving invoice asks for "Any" asset on purpose: the receiver has
+# never seen the contract, and /rgbinvoice with an unknown asset_id 403s with
+# UnknownContractId. The sender supplies the real asset_id in /sendrgb's
+# recipient_map, and receipt is what registers the contract.
+send_rgb_bootstrap() {
+  local from_port=$1; local to_port=$2; local asset_id=$3; local units=$4; local label=$5
+  log "Bootstrap transfer of $units $label base unit(s) → port $to_port …"
+  local expiry invoice_resp recipient_id send_body
+  expiry=$(($(date +%s) + 3600))
+  invoice_resp=$(rln_post "$to_port" "/rgbinvoice" \
+    "{\"assignment\":{\"type\":\"Any\"},\"expiration_timestamp\":$expiry,\"min_confirmations\":1,\"witness\":false}")
+  recipient_id=$(echo "$invoice_resp" | jq -r '.recipient_id')
+  [ -n "$recipient_id" ] || die "No recipient_id in bootstrap rgbinvoice response: $invoice_resp"
+  send_body=$(printf '{
+  "donation": true,
+  "fee_rate": 7,
+  "min_confirmations": 1,
+  "skip_sync": false,
+  "recipient_map": {
+    "%s": [
+      {
+        "recipient_id": "%s",
+        "assignment": {"type": "Fungible", "value": %s},
+        "transport_endpoints": ["%s"]
+      }
+    ]
+  }
+}' "$asset_id" "$recipient_id" "$units" "$PROXY_ENDPOINT")
+  rln_post "$from_port" "/sendrgb" "$send_body" >/dev/null
+  btc_mine 1
+  sleep 2
+  # Double refresh on both sides (mirrors seed_lsp's own pattern): the receiver
+  # has to settle the incoming transfer before the contract is usable.
+  local p
+  for p in "$to_port" "$from_port"; do
+    rln_post "$p" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+    rln_post "$p" "/refreshtransfers" '{"filter":[],"skip_sync":false}' >/dev/null 2>&1 || true
+  done
+}
 
-seed_lsp "$IFA_ASSET_ID" "$IFA_TICKER"
+if [ "$TWO_ASSETS" = "1" ]; then
+  # ── two independent assets, both issued on the Faucet ───────────────────────
+  # Same issuance as the single-asset path, twice. Nothing links the contracts:
+  # what makes them interchangeable is CONVERTIBLE_PAIRS on utexo-lsp, below.
+
+  log "Issuing $LN_IFA_TICKER (payout asset, precision $IFA_PRECISION) on Faucet …"
+  LN_ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetifa" \
+    "{\"ticker\":\"$LN_IFA_TICKER\",\"name\":\"$LN_IFA_NAME\",\"precision\":$IFA_PRECISION,\"amounts\":[$ISSUE_AMOUNT],\"inflation_amounts\":[$ISSUE_AMOUNT],\"reject_list_url\":null}")
+  IFA_ASSET_ID=$(echo "$LN_ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
+  [ -n "$IFA_ASSET_ID" ] || die "Failed to parse $LN_IFA_TICKER asset_id from: $LN_ISSUE_RESP"
+  IFA_TICKER="$LN_IFA_TICKER"
+  IFA_NAME="$LN_IFA_NAME"
+  log "$LN_IFA_TICKER asset ID: $IFA_ASSET_ID"
+  btc_mine 1
+  sleep 2
+
+  log "Issuing $BRIDGE_IFA_TICKER (bridge asset, precision $IFA_PRECISION) on Faucet …"
+  BRIDGE_ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetifa" \
+    "{\"ticker\":\"$BRIDGE_IFA_TICKER\",\"name\":\"$BRIDGE_IFA_NAME\",\"precision\":$IFA_PRECISION,\"amounts\":[$ISSUE_AMOUNT],\"inflation_amounts\":[$ISSUE_AMOUNT],\"reject_list_url\":null}")
+  BRIDGE_ASSET_ID=$(echo "$BRIDGE_ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
+  [ -n "$BRIDGE_ASSET_ID" ] || die "Failed to parse $BRIDGE_IFA_TICKER asset_id from: $BRIDGE_ISSUE_RESP"
+  log "$BRIDGE_IFA_TICKER asset ID: $BRIDGE_ASSET_ID"
+  btc_mine 1
+  sleep 2
+
+  # The payout asset is the one the cron opens channels in, so the LSP needs a
+  # spendable allocation per parallel channel — same multi-round seeding as the
+  # single-asset stack.
+  seed_lsp "$IFA_ASSET_ID" "$LN_IFA_TICKER"
+
+  # The bridge asset is never seeded (the LSP only ever receives it from buyers),
+  # so this dust send is how its node learns the contract at all: /assetmetadata
+  # 403s with UnknownContractId until then, and discovery needs the ticker and
+  # precision before the buyer's channel exists.
+  send_rgb_bootstrap "$FAUCET_PORT" "$LSP_PORT" "$BRIDGE_ASSET_ID" "$BRIDGE_BOOTSTRAP_UNITS" "$BRIDGE_IFA_TICKER"
+else
+  log "Issuing IFA asset $IFA_TICKER (precision $IFA_PRECISION) on Faucet …"
+  IFA_ISSUE_RESP=$(rln_post "$FAUCET_PORT" "/issueassetifa" \
+    "{\"ticker\":\"$IFA_TICKER\",\"name\":\"$IFA_NAME\",\"precision\":$IFA_PRECISION,\"amounts\":[$ISSUE_AMOUNT],\"inflation_amounts\":[$ISSUE_AMOUNT],\"reject_list_url\":null}")
+  IFA_ASSET_ID=$(echo "$IFA_ISSUE_RESP" | jq -r '.asset.asset_id // .asset_id // empty')
+  [ -n "$IFA_ASSET_ID" ] || die "Failed to parse IFA asset_id from: $IFA_ISSUE_RESP"
+  log "$IFA_TICKER asset ID: $IFA_ASSET_ID"
+  btc_mine 1
+  sleep 2
+
+  # ── seed LSP from Faucet ─────────────────────────────────────────────────────
+
+  seed_lsp "$IFA_ASSET_ID" "$IFA_TICKER"
+fi
 
 # ── set adb reverse ports so Android emulator can reach proxy + LSP ──────────
 # Must happen BEFORE utexo-lsp starts; otherwise cron fires, consignment
@@ -441,14 +664,73 @@ fi
 # ── start utexo-lsp ───────────────────────────────────────────────────────────
 
 pkill -f "go run \."  2>/dev/null || true
-pkill -f "utexo-lsp"  2>/dev/null || true
+# Anchored at end-of-command-line: matches the compiled `go run .` child
+# binary (…/go-build/…/utexo-lsp) without also matching the RLN daemon's own
+# argv, which contains its data dir ($RGBLN_REPO/data_lsp) — when RGBLN_REPO
+# is the submodule nested inside a checkout literally named "utexo-lsp"
+# (e.g. .../utexo-lsp/rgb-lightning-node), a bare "utexo-lsp" pattern kills
+# the just-started LSP daemon too. Confirmed live: the daemon completed its
+# whole asset-issue/link sequence, then got a clean shutdown signal at this
+# exact point in the script, right before "Starting utexo-lsp" — utexo-lsp's
+# own /health has no dependency on the daemon, so wait_for_utexo still
+# reported "ready" against a daemon that no longer existed.
+pkill -f "/utexo-lsp$"  2>/dev/null || true
 sleep 2
 
 # Wipe the database so the new instance starts clean (no stale transfers/assets from previous runs)
 rm -f "$UTEXO_LSP_REPO/utexo_lsp.db"
 log "Wiped utexo_lsp.db"
 
+# The bridge asset is CONVERTIBLE, not SUPPORTED: utexo-lsp will accept it and
+# pay it out over a channel the peer funded itself, but its cron never opens
+# channels in it. Adding it to SUPPORTED_ASSET_IDS instead would give every
+# connected peer a second channel (connectionsFromPeers loops assets inside the
+# peer loop), burn LSP inventory in an asset it does not issue, and make every
+# peer's payout asset ambiguous — breaking the direction that already works.
+# PAYOUT_ASSET_PREFERENCE decides for a peer that holds both, which is exactly
+# the buyer after a checkout: its own bridge channel plus the LNUSDT one the
+# cron opened. Preferring the bridge asset means a refund comes back in what the
+# buyer actually paid with. See docs/apay-linked-asset-options.uk.md §9.
+#
+# CONVERTIBLE_PAIRS is what lets the two legs of one payment differ, and it is
+# the *whole* authorization: the assets are unrelated contracts, so there is
+# nothing on-chain to verify. Both must also be payout-eligible and share a
+# precision, which utexo-lsp checks itself. See §10 of the same document.
+#
+# CHANNEL_PROVISION_GRACE closes the one window where the cron cannot tell a
+# self-provisioning client from a peer waiting to be served: between the client's
+# connect and its own funding tx it has no channels at all. Without the grace the
+# 5 s cron wins that race and hands the buyer a channel in the served asset it
+# never asked for. Once the buyer's own channel exists (pending counts), its
+# payout asset is established and the cron leaves it alone permanently.
+if [ "$TWO_ASSETS" = "1" ]; then
+  CONVERTIBLE_ASSET_IDS="${CONVERTIBLE_ASSET_IDS:-$BRIDGE_ASSET_ID}"
+  CONVERTIBLE_PAIRS="${CONVERTIBLE_PAIRS:-$IFA_ASSET_ID|$BRIDGE_ASSET_ID}"
+  PAYOUT_ASSET_PREFERENCE="${PAYOUT_ASSET_PREFERENCE:-$BRIDGE_ASSET_ID}"
+  CHANNEL_PROVISION_GRACE="${CHANNEL_PROVISION_GRACE:-30s}"
+  # POST /lightning_send needs the same CONVERTIBLE_PAIRS entry and nothing else,
+  # so it rides along with the two-asset stack. Off by default in utexo-lsp: it
+  # lets anyone who can reach the API park a HODL invoice on the node.
+  LIGHTNING_SEND_ENABLED="${LIGHTNING_SEND_ENABLED:-1}"
+  # Ceiling on one relay's asset amount (0 = none, the utexo-lsp default). Set
+  # here only so a regtest run carries the same cap signet will — the cart flow
+  # relays 100000 base units, three orders of magnitude under it.
+  LIGHTNING_SEND_MAX_ASSET_AMOUNT="${LIGHTNING_SEND_MAX_ASSET_AMOUNT:-500000000}"
+else
+  CONVERTIBLE_ASSET_IDS="${CONVERTIBLE_ASSET_IDS:-}"
+  CONVERTIBLE_PAIRS="${CONVERTIBLE_PAIRS:-}"
+  PAYOUT_ASSET_PREFERENCE="${PAYOUT_ASSET_PREFERENCE:-}"
+  CHANNEL_PROVISION_GRACE="${CHANNEL_PROVISION_GRACE:-0}"
+  # Without a convertible pair there is nothing to relay into, so leave it off.
+  LIGHTNING_SEND_ENABLED="${LIGHTNING_SEND_ENABLED:-0}"
+  LIGHTNING_SEND_MAX_ASSET_AMOUNT="${LIGHTNING_SEND_MAX_ASSET_AMOUNT:-0}"
+fi
+
 log "Starting utexo-lsp (port $UTEXO_PORT) with SUPPORTED_ASSET_IDS=$IFA_ASSET_ID ($IFA_TICKER) …"
+[ -n "$CONVERTIBLE_ASSET_IDS" ] && log "  CONVERTIBLE_ASSET_IDS=$CONVERTIBLE_ASSET_IDS ($BRIDGE_IFA_TICKER, payout-only — cron never opens it)"
+[ -n "$CONVERTIBLE_PAIRS" ] && log "  CONVERTIBLE_PAIRS=$CONVERTIBLE_PAIRS ($IFA_TICKER <-> $BRIDGE_IFA_TICKER, 1:1 — no asset link involved)"
+[ "$LIGHTNING_SEND_ENABLED" = "1" ] && log "  LIGHTNING_SEND_ENABLED=1 (POST /lightning_send: pay a third party's BOLT11 out of the other asset)"
+[ "$CHANNEL_PROVISION_GRACE" != "0" ] && log "  CHANNEL_PROVISION_GRACE=$CHANNEL_PROVISION_GRACE (cron waits before serving a peer that may open its own channel)"
 log "  MIN_AMT_MSAT=$MIN_AMT_MSAT  minSendable=$LN_ADDR_MIN_SENDABLE_MSAT  maxSendable=$LN_ADDR_MAX_SENDABLE_MSAT"
 cd "$UTEXO_LSP_REPO"
 env \
@@ -458,6 +740,12 @@ env \
   LSP_NODE_HOST="127.0.0.1" \
   LSP_NODE_PORT="$LSP_PEER_PORT" \
   SUPPORTED_ASSET_IDS="$IFA_ASSET_ID" \
+  CONVERTIBLE_ASSET_IDS="$CONVERTIBLE_ASSET_IDS" \
+  CONVERTIBLE_PAIRS="$CONVERTIBLE_PAIRS" \
+  PAYOUT_ASSET_PREFERENCE="$PAYOUT_ASSET_PREFERENCE" \
+  LIGHTNING_SEND_ENABLED="$LIGHTNING_SEND_ENABLED" \
+  LIGHTNING_SEND_MAX_ASSET_AMOUNT="$LIGHTNING_SEND_MAX_ASSET_AMOUNT" \
+  CHANNEL_PROVISION_GRACE="$CHANNEL_PROVISION_GRACE" \
   CRON_EVERY="5s" \
   DELIVERY_RETRY_BASE_DELAY="${DELIVERY_RETRY_BASE_DELAY:-5s}" \
   DELIVERY_RETRY_MAX_DELAY="${DELIVERY_RETRY_MAX_DELAY:-20s}" \
@@ -489,6 +777,8 @@ EXPO_PUBLIC_LSP_REGTEST_MIN_AMT_MSAT="$MIN_AMT_MSAT"
 EXPO_PUBLIC_LSP_REGTEST_CHANNEL_ASSET_AMOUNT="$CHANNEL_ASSET_AMOUNT"
 EXPO_PUBLIC_LSP_REGTEST_PEER_PUBKEY="$LSP_PUBKEY"
 EXPO_PUBLIC_LSP_REGTEST_LDK_PORT="$LSP_PEER_PORT"
+EXPO_PUBLIC_LSP_REGTEST_BRIDGE_ASSET_ID="$BRIDGE_ASSET_ID"
+EXPO_PUBLIC_LSP_REGTEST_BRIDGE_TICKER="$BRIDGE_IFA_TICKER"
 EOF
 
 # Expo auto-loads .env.local — write LSP regtest vars there.
@@ -512,6 +802,8 @@ VSS_URL_VALUE=""
 [ "${VSS:-}" = "1" ] && VSS_URL_VALUE="$VSS_URL"
 jq -n \
   --arg vssUrl "$VSS_URL_VALUE" \
+  --arg bridgeAssetId "$BRIDGE_ASSET_ID" \
+  --arg bridgeTicker "$BRIDGE_IFA_TICKER" \
   --arg generatedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg ifaAssetId "$IFA_ASSET_ID" \
   --arg ifaTicker "$IFA_TICKER" \
@@ -546,7 +838,9 @@ jq -n \
     PROXY_ENDPOINT: $proxyEndpoint,
     LSP_PEER_PORT: $lspPeerPort,
     FAUCET_PEER_PORT: $faucetPeerPort
-  } + (if $vssUrl == "" then {} else { VSS_URL: $vssUrl } end)' \
+  } + (if $vssUrl == "" then {} else { VSS_URL: $vssUrl } end)
+    + (if $bridgeAssetId == "" then {} else
+         { BRIDGE_ASSET_ID: $bridgeAssetId, BRIDGE_TICKER: $bridgeTicker } end)' \
   > "$FIXTURES"
 log "e2e fixtures written to $FIXTURES"
 
@@ -558,6 +852,7 @@ log "  utexo-lsp:   http://127.0.0.1:$UTEXO_PORT"
 log "  LSP daemon:  http://127.0.0.1:$LSP_PORT  (peer :$LSP_PEER_PORT)"
 log "  Faucet:      http://127.0.0.1:$FAUCET_PORT  (peer :$FAUCET_PEER_PORT)"
 [ "${VSS:-}" = "1" ] && log "  VSS:         $VSS_URL"
+[ "$TWO_ASSETS" = "1" ] && log "  BRIDGE:      $BRIDGE_IFA_TICKER (issuer=Faucet, the buyer spends it): $BRIDGE_ASSET_ID"
 log "  SERVING:     $IFA_TICKER (IFA, precision $IFA_PRECISION): $IFA_ASSET_ID"
 log "  Channel asset amount: $CHANNEL_ASSET_AMOUNT base units per channel"
 log "  MIN_AMT_MSAT:         $MIN_AMT_MSAT msat ($((MIN_AMT_MSAT / 1000)) sat)"
@@ -566,5 +861,15 @@ log "  Env file:    $ENV_OUT"
 log "  Fixtures:    $FIXTURES"
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "  Start demo app, select Regtest in LSP tab"
-log "  Runnable now: APay Cart Checkout · IFA"
+if [ "$TWO_ASSETS" = "1" ]; then
+  log "  Runnable now: APay Bridge Asset — buyer pays $BRIDGE_IFA_TICKER,"
+  log "  merchant is paid $LN_IFA_TICKER, LSP converts 1:1 (on-chain channels only)"
+  log "  Both assets are issued on the Faucet and are unrelated contracts —"
+  log "  CONVERTIBLE_PAIRS is what makes them interchangeable, not an asset link."
+  log "  LSP started WITHOUT --enable-virtual-channels-v0 — the other APay"
+  log "  cart/IFA flows won't work against this stack until you restart"
+  log "  without TWO_ASSETS=1."
+else
+  log "  Runnable now: APay Cart Checkout · IFA"
+fi
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

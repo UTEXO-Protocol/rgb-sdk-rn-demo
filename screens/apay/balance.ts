@@ -45,7 +45,14 @@ export async function snapshotRgbBalances(
 
 export function logRgbBalanceSnap(
   role: string,
-  when: 'START (after channel)' | 'START (pre-checkout)' | 'END (settled)',
+  when:
+    | 'START (after channel)'
+    | 'START (pre-checkout)'
+    | 'START (pre-topup)'
+    | 'START (pre-relay)'
+    | 'END (settled)'
+    | 'END (after refund)'
+    | 'END (after topup)',
   snap: RgbBalanceSnap,
   addLog: (msg: string, type?: LogEntry['type']) => void,
 ): void {

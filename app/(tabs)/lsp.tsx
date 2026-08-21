@@ -4,6 +4,8 @@ import { SafeAreaInsetsContext, useSafeAreaInsets } from 'react-native-safe-area
 
 import { AppColors } from '@/constants/theme';
 import ApayIfaScreen from '@/screens/apay-ifa';
+import ApayLinkedAssetScreen from '@/screens/apay-linked-asset';
+import ApayLinkedAssetSignetScreen from '@/screens/apay-linked-asset-signet/index';
 import ApayRegularChannelsScreen from '@/screens/apay-regular-channels';
 import ScidReproScreen from '@/screens/apay-scid-repro/index';
 import ScidReproSignetScreen from '@/screens/apay-scid-repro-signet/index';
@@ -57,6 +59,10 @@ export default function LspHubScreen() {
                   showsVerticalScrollIndicator={false}
                   nestedScrollEnabled
                 >
+                  {/* Bridge Asset first: it is the flow under active work, and
+                      the only one that needs TWO_ASSETS=1. */}
+                  <ApayLinkedAssetScreen embedded />
+                  <View style={s.flowDivider} />
                   <LspRegtestScreen embedded />
                   <View style={s.flowDivider} />
                   <LspRegtestVirtualScreen embedded />
@@ -77,6 +83,11 @@ export default function LspHubScreen() {
                   showsVerticalScrollIndicator={false}
                   nestedScrollEnabled
                 >
+                  {/* Bridge Asset first, mirroring the Regtest pane: it is the
+                      flow under active work, and the only one that needs the
+                      two-asset utexo-lsp (utexo-lsp/.env.signet). */}
+                  <ApayLinkedAssetSignetScreen embedded />
+                  <View style={s.flowDivider} />
                   <LspSignetScreen embedded />
                   <View style={s.flowDivider} />
                   <ApaySignetScreen embedded />
