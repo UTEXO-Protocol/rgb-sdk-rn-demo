@@ -54,3 +54,5 @@ logs/
 
 # graphify knowledge graph (generated, local-only)
 graphify-out/
+research
+e2e-fixtures.json

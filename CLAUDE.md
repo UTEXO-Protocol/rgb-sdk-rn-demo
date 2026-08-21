@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 End-to-end integration demo for `@utexo/rgb-sdk-rn`. An Expo + Expo Router app that runs four live RGB Lightning flows (plus VSS flows) against a local regtest stack — two or three on-device RLN nodes execute real transactions inside the app process.
 
-The SDK is consumed via a **local file reference** (`file:../rgb-sdk-rn`), not from npm. Metro is configured to watch that sibling directory so changes to the SDK are picked up without republishing.
+The SDK is consumed from **npm** — `"@utexo/rgb-sdk-rn": "1.0.0-beta.29"`, which pulls `@utexo/rgb-sdk-core@1.0.0-beta.8`. A clone plus `npm install` is enough; no sibling checkout is required.
+
+To work on the SDK itself, point the dependency back at `file:../rgb-sdk-rn` and reinstall — `metro.config.js` still watches both sibling checkouts whenever they exist, so that path keeps working without any other change.
 
 ## Commands
 
@@ -70,7 +72,9 @@ The Bitcoin node helper is a tiny HTTP server (minimal Python/Flask example in `
 
 ### Metro configuration (`metro.config.js`)
 
-Watches `../rgb-sdk-rn` as an additional folder so Metro picks up SDK changes without reinstalling. `nodeModulesPaths` puts the demo's `node_modules` first to avoid duplicate React instances from the local SDK package.
+Watches `../rgb-sdk-rn` and `../rgb-sdk-core` as additional folders **when those checkouts exist**, so a `file:` install picks up SDK changes without reinstalling; with the npm dependency neither is needed and Metro starts without them. `nodeModulesPaths` puts the demo's `node_modules` first to avoid duplicate React instances.
+
+`@utexo/rgb-sdk-core` arrives as a dependency of the RN SDK and its location depends on the install layout — with `--install-strategy=nested` it lands under `node_modules/@utexo/rgb-sdk-rn/node_modules/`, not hoisted. `coreSdkPath` probes all three layouts; only the `./conformance` subpath is hand-mapped, because package exports are disabled and a subpath has no `main` to fall back on.
 
 ### Flow runner (`utils/wallet-flow.ts`)
 
@@ -165,6 +169,15 @@ Fix: ensure `adb reverse tcp:3000 tcp:3000` is set before connecting the app to 
 **Root cause of `CounterpartyForceClosed: Failed to find RGB consignment`**
 This is the underlying error behind the stuck sends — the app node rejects the channel because it can't fetch the RGB consignment from the proxy. Always set the proxy port forward before running the LSP flow.
 
+**The same error in the other direction: never put `10.0.2.2` in a node's `proxyEndpoint`.**
+A node's proxy endpoint is not only dialled by that node. When it funds an RGB channel the endpoint travels to the counterparty, which fetches the consignment from it. An app node unlocked with `rpc://10.0.2.2:3000/json-rpc` therefore tells the LSP — a process on the dev machine — to look for the consignment at an address that only means something inside the emulator. The LSP finds nothing and closes the channel ~10 s after accepting it.
+
+The tell is that **the proxy log shows the `consignment.post` but no matching `consignment.get`**: the fetch was attempted, it just never reached this proxy. Measured over a full stack run, 59 of 61 channel-open consignments were fetched normally; the 2 that were not were exactly the two channels an Android app node funded.
+
+Only Android is affected — an iOS node says `127.0.0.1`, which is correct for both sides. Fix: `PROXY_HOST` in `screens/apay/config.ts` pins port 3000 to `127.0.0.1` on both platforms, which works from the device thanks to `adb reverse tcp:3000 tcp:3000`. bitcoind (18443) and electrs (50001) have no reverse forward and are dialled only by the device, so they keep `10.0.2.2`.
+
+The same trap applies to any `transport_endpoints` array handed to a host-side daemon — see `toDaemonUrl()` next to `PROXY_HOST`.
+
 ## APay cart flows — two assets, one LSP
 
 `screens/apay/useApayFlow.ts` is asset-agnostic: pass an `ApayAsset` (`screens/apay/config.ts`) and it drives the whole checkout. Two profiles ship:
@@ -194,6 +207,176 @@ ASSET=ifa ./scripts/start-lsp-regtest.sh   # UTIF
 Both assets are issued on the faucet either way (so the fixtures and `.env.local` stay complete), but only the active one is seeded to the LSP and advertised. `EXPO_PUBLIC_LSP_REGTEST_ACTIVE_ASSET` tells the app which; the flows check it up front and refuse with the command to run rather than burning 180 s in `waitForChannel`.
 
 `DEFAULT_CHANNEL_ASSET_AMOUNT` is a single global in utexo-lsp, so the script sizes it for the precision-6 asset (1 000 000 base units = 1.0 UTIF, and harmlessly 1 000 000 whole UTST) and seeds ~120 channels' worth.
+
+### Bridge-asset checkout (`TWO_ASSETS=1`)
+
+`TWO_ASSETS=1 ./scripts/start-lsp-regtest.sh` (old name `LINKED_ASSET=1` still
+works) swaps the single UTIF issuance for two assets and enables
+`screens/apay-linked-asset.tsx`:
+
+| | asset | issued on | role |
+|---|---|---|---|
+| payout | `LNUSDT` | **Faucet**, seeded to the LSP | merchant's channel + delivery; the only `SUPPORTED_ASSET_IDS` |
+| bridge | `BUSDT` | **Faucet** | what the buyer receives on-chain and funds its own channel with; `CONVERTIBLE_ASSET_IDS` only |
+
+**Both are ordinary IFA contracts with no relationship to each other.** What
+makes them interchangeable is one utexo-lsp setting, `CONVERTIBLE_PAIRS`
+(`<asset>|<asset>`, `|` because contract ids already contain `rgb:`), and that
+list is the entire authorization for the 1:1 rate.
+
+The pair used to be an RGB Asset Link, which forced the LSP to issue `LNUSDT`
+itself: `linked_to_asset_id` and the parent's settled `Link` transfer live only
+in the wallet that ran `link_ifa` and never travel in a consignment — measured in
+`docs/linked-asset-bridge-test-report.md` §5.2, where the LSP received 100 % of
+both assets' supply and still saw neither. utexo-lsp no longer looks for any of
+it (`internal/lspapi/convertible_asset.go`, `ensureConvertiblePair`): it checks
+that both assets are payout-eligible, that the pair is declared, and that the
+precisions match. See §10 of `docs/apay-linked-asset-options.uk.md`.
+
+The script still sends the LSP a 1-unit bootstrap transfer of `BUSDT`, now for a
+different reason: the bridge asset is never seeded, so without it the LSP's node
+403s `UnknownContractId` on `/assetmetadata` and discovery cannot advertise the
+asset's ticker/precision before the buyer's channel exists.
+
+The payment is **option A** of `docs/apay-linked-asset-options.uk.md`: no
+node-level swap (the invoice is hosted, so the payee is the LSP and
+`find_linked_asset_channel` drops every one of the buyer's channels). utexo-lsp
+quotes the buyer in `BUSDT`, pays the merchant `LNUSDT`, and converts 1:1 between
+the two legs of one APay payment; one shared payment hash keeps them atomic.
+
+Which asset gets quoted is the payer's call, made in the SDK: `payAddress` with
+an `asset.assetAmount` but no `assetId` runs `UtexoLsp.selectPaymentAsset`, which
+reads `payout_asset` / `accepted_assets` off LNURL discovery and picks the payout
+asset when local liquidity covers the amount, an accepted asset otherwise.
+Conversion is the fallback, never the default — quoting the payout asset trusts
+the LSP for delivery only, converting also trusts it for the second leg's amount.
+Liquidity is compared per channel, not summed: there is no cross-asset MPP.
+
+### Paying from a node that has never heard of APay
+
+The LNURL callback is unauthenticated and payer-agnostic, and the invoice it
+returns is *hosted*: utexo-lsp signs it with its own key against a hash the
+receiver pre-registered (`internal/lspapi/lightning_address.go`,
+`handleLightningAddressCallback`). Nothing in it names the payer, and the RGB
+contract id and amount ride inside the BOLT11 — `send_payment` reads them back
+out of `invoice.rgb_contract_id()` (`rgb-lightning-node/src/routes.rs`). So any
+RGB Lightning node with a channel to the LSP in the quoted asset can settle it
+with a bare `POST /sendpayment {"invoice": …}`, no SDK and no LNURL involved.
+
+`UtexoLsp.requestExternalInvoice()` is the receiver side of that: it quotes the
+BOLT11 and hands it back instead of paying it. The asset is resolved from LNURL
+discovery, not from `.env` — `listPayableAssets()` returns the address's payout
+asset plus every convertible one with tickers, and `requestExternalInvoice` takes
+a **ticker** (`'BUSDT'`) or nothing, defaulting to the single convertible asset.
+`/get_info` is the wrong source here and always will be: `supported_assets` is
+built from `SUPPORTED_ASSET_IDS`, which by design excludes the bridge asset.
+
+Each quote reserves a hash from the receiver's APay batch, so an invoice that is
+quoted and never paid still costs one — call `enableLightningAddress()` first and
+refill off `unusedHashes`. The screen's **External-payer invoice** toggle runs the
+checkout this way: the merchant quotes, and the buyer settles the raw BOLT11 with
+`payLightningInvoice`, which is all an external node would do.
+
+### Receiving on-chain in one asset, over Lightning in another
+
+`/lightning_receive` runs the same conversion in the opposite direction: the
+sender pays canonical USDT on-chain and the receiver is delivered LNUSDT over its
+channel. Nothing in the delivery path needed changing — the stored asset is only
+used to watch the inbound transfer (`transferStatusByIdx`), and delivery just
+pays the receiver's BOLT11, whose own asset picks the channel.
+
+Which asset the RGB invoice is issued in is the **LSP's** decision, not the
+client's: `rgb_invoice.asset_id` is now optional, and omitting it resolves the
+counterpart from `CONVERTIBLE_PAIRS` (one → take it, several → 400, none → same
+asset as before). `receiveAsset()` therefore omits it by default
+(`onchainAsset: 'convertible'`) and never needs the canonical asset's contract
+id; `onchainAsset: 'payout'` restores one-asset-end-to-end.
+
+A converted receive pins the inbound amount — `{"type":"Fungible","value":N}`
+instead of the usual `Any` — because two unrelated contracts have nothing else
+tying what arrives on-chain to what the BOLT11 pays out, and the LSP would cover
+the gap from its own inventory. Same-asset receives keep `Any`.
+
+No virtual channels anywhere in this mode: the LSP node starts without
+`--enable-virtual-channels-v0` and `VIRTUAL_OPEN_MODE` is empty, so
+`MIN_AMT_MSAT` falls back to 3 000 000 and the checkout carries 3 000 sat. The
+other APay cart flows will not work against this stack.
+
+**Both directions, and who gets a channel.** The flow ends with a refund: the
+merchant pays the buyer back through APay, quoting `LNUSDT` (all it holds) while
+the buyer is delivered `BUSDT`. Four utexo-lsp settings make that possible, all
+set by the script under `TWO_ASSETS=1`:
+
+- `CONVERTIBLE_ASSET_IDS` — assets the LSP accepts and pays out over a channel
+  the peer funded itself, but never provisions. Putting the bridge asset in
+  `SUPPORTED_ASSET_IDS` instead would give every peer a second channel
+  (`connectionsFromPeers` loops assets inside the peer loop), burn inventory in
+  an asset the LSP does not issue, and make every peer's payout asset ambiguous.
+- `CONVERTIBLE_PAIRS` — which assets may differ between the two legs. Being
+  payout-eligible is not enough; the pair has to be declared, in either
+  direction, and the same entry serves the checkout and the refund.
+- `PAYOUT_ASSET_PREFERENCE` — tie-break for a peer that ended up with channels in
+  two payout-eligible assets. Without it the LSP refuses to guess.
+- `CHANNEL_PROVISION_GRACE` (30s here) — the cron provisions a peer only in its
+  own payout asset, and holds off entirely on a peer first seen moments ago with
+  no channels, which is exactly what a client looks like between its `connect`
+  and its own funding tx.
+
+The RGB amount rides an HTLC, so the LSP also needs **sats** on its side of the
+buyer's channel to deliver anything: the buyer opens with `aChannelPushMsat`
+(10 000 sat) because a channel opened at 0 leaves the LSP with only the
+checkout's 3 000 sat, of which the 1% channel reserve is unspendable — the refund
+then fails as `NoRoute` with the asset balance untouched.
+
+### The same flow on signet (`screens/apay-linked-asset-signet/`)
+
+The UTEXO tab's copy of the bridge-asset checkout, against a utexo-lsp deployed
+from `utexo-lsp/.env.signet` — the production equivalent of `TWO_ASSETS=1`. Same
+six legs, same SDK calls, same amounts: the regtest script was sized off
+`.env.signet` in the first place, so `CHANNEL_ASSET_AMOUNT`,
+`CHANNEL_CAPACITY_SAT` and `CHANNEL_PUSH_MSAT` match on both networks and the
+5-unit checkout is the same number. **What differs is time, not money.**
+
+| | regtest | signet |
+|---|---|---|
+| blocks | mined on demand | ~30 s, unprompted |
+| `CHANNEL_PROVISION_GRACE` | 30 s | **60 s** |
+| `CRON_EVERY` | 5 s | 10 s |
+| BTC funding | `sendToAddress` + `mine(6)` | faucet `/sendbtc`, then poll |
+| channel wait | 240 s | 30 min |
+| LN settlement | 120 s | 15 min |
+| on-chain RGB leg | 300 s | 45 min |
+
+Assets default to the two ids in `.env.signet`: payout `LNUSDT`
+(`SUPPORTED_ASSET_IDS`) and bridge `USDT` (`CONVERTIBLE_ASSET_IDS`) — the latter
+is the same contract `screens/apay-signet` already calls `ASSET_ID`, because on
+signet the canonical USDT *is* the convertible asset. Override with
+`EXPO_PUBLIC_SIGNET_BRIDGE_PAYOUT_ASSET_ID` / `EXPO_PUBLIC_SIGNET_BRIDGE_ASSET_ID`.
+
+Three things the signet flow does that regtest does not need:
+
+- **A preflight.** `/get_info` is checked for the served asset and its precision,
+  for the Lightning-Address sendable range against all four legs, and for
+  `virtual_channel_mode` being *empty* (a non-empty value means this is the
+  single-asset signet LSP, not the two-asset one). The faucet's BTC and bridge-asset
+  balances are checked too — it is the on-chain source of `USDT`, and there is no
+  script to issue it. Every one of these costs 20+ minutes to discover later.
+- **The peer URI comes from `/get_info`** (`host`/`port`), not from a constant.
+  `createLsp()` still gets the peer explicitly, for the regtest reason:
+  the no-arg form calls `enableVirtualChannelsForPeer()`, and this deployment has
+  no virtual channels, so the merchant's public regular channel would be rejected
+  as `unsupported_scid_alias`.
+- **`createUtxos` is waited on via `colored.settled`**, not `spendable`. rgb-lib
+  defines `spendable = future − immature` and `future = confirmed + unconfirmed`
+  (`_get_btc_balance`, `wallet/offline.rs`), so `spendable` counts an unconfirmed
+  batch and is not a confirmation signal at all — `settled` is `balance.confirmed`
+  alone. The buyer runs `createUtxos` twice (its blind receive burns one UTXO), so
+  the wait compares against a reading taken just before each call rather than
+  against zero.
+
+No endpoint rewriting anywhere: signet wallets unlock against the public
+`rgb-proxy.utexo.com`, which means the same thing to the device, the faucet and
+the LSP. `toDaemonUrl()` and `PROXY_HOST` are regtest/emulator-only.
 
 ### `MIN_AMT_MSAT` and the 1-sat HTLC
 
